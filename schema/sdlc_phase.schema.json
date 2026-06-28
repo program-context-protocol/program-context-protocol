@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pcp-protocol.com/schema/sdlc_phase.schema.json",
+  "title": "PCP SDLC Phase",
+  "type": "object",
+  "required": ["version", "current_phase", "phases"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": ["1.0"]
+    },
+    "current_phase": { "type": "string" },
+    "phases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "exit_criteria"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "scope": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "exit_criteria": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "description", "check", "status"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string" },
+                "description": { "type": "string" },
+                "check": {
+                  "type": "string",
+                  "enum": ["file_exists", "ast_pattern", "manual"]
+                },
+                "target": { "type": "string" },
+                "status": {
+                  "type": "string",
+                  "enum": ["pending", "complete"]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

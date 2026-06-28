@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pcp-protocol.com/schema/module_acceptance.schema.json",
+  "title": "PCP Module Acceptance Criteria",
+  "type": "object",
+  "required": ["version", "module", "criteria"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": ["1.0"]
+    },
+    "module": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "description", "check", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Z][0-9]+$" },
+          "description": { "type": "string" },
+          "check": {
+            "type": "string",
+            "enum": ["ast_pattern", "file_exists", "test_passes", "manual"]
+          },
+          "target": { "type": "string" },
+          "pattern": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "complete"]
+          }
+        }
+      }
+    }
+  }
+}

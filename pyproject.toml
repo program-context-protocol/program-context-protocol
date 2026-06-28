@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "program-context-protocol"
+version = "0.1.0"
+description = "PCP — prevent LLM hallucination and context drift across dev sessions"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "jsonschema>=4.21",
+    "rich>=13.0",
+]
+
+[project.scripts]
+pcp = "pcp.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pcp"]
+
+[tool.hatch.envs.default]
+dependencies = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+]
+
+[tool.hatch.envs.default.scripts]
+test = "pytest tests/ -v"

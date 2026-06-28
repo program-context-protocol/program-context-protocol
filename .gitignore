@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+node_modules/
+.venv/
+venv/
+.claude/
+hermes_memory.md

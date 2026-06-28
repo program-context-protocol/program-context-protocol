@@ -1,0 +1,192 @@
+"""pcp scan — auto-generate current_state.md from acceptance criteria."""
+
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import click
+from rich.console import Console
+
+from pcp.pcp_dir import find_pcp_dir, get_modules_dir, NoPCPDir
+from pcp.schema.validator import validate_file, load_yaml
+
+console = Console()
+
+
+def _check_file_exists(target: str, project_root: Path) -> tuple[bool, str]:
+    path = project_root / target
+    exists = path.exists()
+    return exists, str(path.relative_to(project_root))
+
+
+def _check_ast_pattern(target: str, pattern: str, project_root: Path) -> tuple[bool, str]:
+    path = project_root / target
+    if not path.exists():
+        return False, f"{target}: file not found"
+    content = path.read_text(errors="replace")
+    matched = bool(re.search(pattern, content, re.MULTILINE))
+    return matched, f"pattern {'found' if matched else 'not found'} in {target}"
+
+
+def _load_prior_manual_status(current_state_path: Path) -> dict[str, str]:
+    """Parse prior current_state.md to preserve manual criterion statuses."""
+    if not current_state_path.exists():
+        return {}
+    statuses = {}
+    content = current_state_path.read_text()
+    for line in content.splitlines():
+        # Format: `- [x] MODULE/ID: description` or `- [ ] MODULE/ID: description`
+        m = re.match(r"- \[([ x])\] ([A-Z]+/[A-Z][0-9]+):", line.strip())
+        if m:
+            done = m.group(1) == "x"
+            key = m.group(2)
+            statuses[key] = "complete" if done else "pending"
+    return statuses
+
+
+def _evaluate_criterion(
+    criterion: dict,
+    module_name: str,
+    project_root: Path,
+    prior_manual: dict[str, str],
+    spec: dict,
+) -> tuple[str, str]:
+    """Returns (status, detail)."""
+    cid = criterion["id"]
+    check = criterion.get("check", "manual")
+    target = criterion.get("target", "")
+    pattern = criterion.get("pattern", "")
+
+    if check == "file_exists":
+        ok, detail = _check_file_exists(target, project_root)
+        return ("complete" if ok else "pending"), detail
+
+    elif check == "ast_pattern":
+        if not pattern:
+            return criterion.get("status", "pending"), "no pattern defined"
+        ok, detail = _check_ast_pattern(target, pattern, project_root)
+        return ("complete" if ok else "pending"), detail
+
+    elif check == "test_passes":
+        return criterion.get("status", "pending"), "test_passes: preserved (run tests to update)"
+
+    else:  # manual
+        key = f"{module_name.upper()}/{cid}"
+        prior = prior_manual.get(key)
+        if prior:
+            return prior, "manual (preserved from prior scan)"
+        return criterion.get("status", "pending"), "manual"
+
+
+def _scan_module(
+    module_name: str,
+    acceptance_path: Path,
+    project_root: Path,
+    prior_manual: dict[str, str],
+) -> dict:
+    errors = validate_file(acceptance_path, "module_acceptance")
+    if errors:
+        console.print(f"[yellow]⚠  {module_name}/acceptance.yaml: schema errors[/yellow]")
+        for e in errors:
+            console.print(f"   {e}")
+
+    data = load_yaml(acceptance_path)
+    criteria = data.get("criteria", [])
+    results = []
+
+    for c in criteria:
+        status, detail = _evaluate_criterion(c, module_name, project_root, prior_manual, data)
+        results.append({
+            "id": c["id"],
+            "description": c["description"],
+            "check": c.get("check", "manual"),
+            "status": status,
+            "detail": detail,
+        })
+
+    return {"module": module_name, "criteria": results}
+
+
+def _write_current_state(pcp_dir: Path, modules_results: list[dict], timestamp: str) -> None:
+    total = sum(len(m["criteria"]) for m in modules_results)
+    complete = sum(
+        1 for m in modules_results for c in m["criteria"] if c["status"] == "complete"
+    )
+    score = complete / total if total else 0.0
+
+    lines = [
+        "# Current State",
+        f"Generated: {timestamp}",
+        "",
+        "## Summary",
+        f"- Total criteria: {total}",
+        f"- Complete: {complete} ({score:.0%})",
+        f"- Pending: {total - complete}",
+        "",
+        "## Module Status",
+    ]
+
+    for m in modules_results:
+        lines.append(f"\n### {m['module']}")
+        for c in m["criteria"]:
+            mark = "x" if c["status"] == "complete" else " "
+            key = f"{m['module'].upper()}/{c['id']}"
+            lines.append(f"- [{mark}] {key}: {c['description']}")
+            if c["detail"] and c["detail"] not in ("manual", ""):
+                lines.append(f"  > {c['detail']}")
+
+    lines += [
+        "",
+        "## Drift Score",
+        f"acceptance coverage: {score:.2f}",
+        "",
+    ]
+
+    out = pcp_dir / "current_state.md"
+    out.write_text("\n".join(lines))
+    return out
+
+
+@click.command()
+@click.option("--path", "project_path", type=click.Path(), default=None,
+              help="Project root (default: cwd, walks up to find .pcp/).")
+@click.option("--quiet", is_flag=True, help="Suppress output.")
+def scan(project_path: str | None, quiet: bool):
+    """Auto-generate .pcp/current_state.md from acceptance criteria."""
+    try:
+        pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
+    except NoPCPDir as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(2)
+
+    project_root = pcp_dir.parent
+    modules_dir = get_modules_dir(pcp_dir)
+
+    if not modules_dir.exists():
+        console.print("[yellow]No modules found in .pcp/strategy/modules/.[/yellow]")
+        sys.exit(0)
+
+    current_state_path = pcp_dir / "current_state.md"
+    prior_manual = _load_prior_manual_status(current_state_path)
+
+    acceptance_files = sorted(modules_dir.glob("*/acceptance.yaml"))
+    if not acceptance_files:
+        console.print("[yellow]No acceptance.yaml files found.[/yellow]")
+        sys.exit(0)
+
+    modules_results = []
+    for af in acceptance_files:
+        module_name = af.parent.name
+        result = _scan_module(module_name, af, project_root, prior_manual)
+        modules_results.append(result)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out_path = _write_current_state(pcp_dir, modules_results, timestamp)
+
+    if not quiet:
+        total = sum(len(m["criteria"]) for m in modules_results)
+        complete = sum(1 for m in modules_results for c in m["criteria"] if c["status"] == "complete")
+        score = complete / total if total else 0.0
+        color = "green" if score >= 0.8 else "yellow" if score >= 0.5 else "red"
+        console.print(f"[{color}]{complete}/{total} criteria complete ({score:.0%})[/{color}]  →  {out_path.relative_to(project_root)}")
