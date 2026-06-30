@@ -94,7 +94,12 @@ def _get_staged_files() -> list[str]:
               help="Path to commit message file (set by git hook).")
 @click.option("--files", "file_list", default=None,
               help="Comma-separated file list to check (default: git staged files).")
-def check(project_path: str | None, commit_msg_file: str | None, file_list: str | None):
+@click.option("--baseline", is_flag=True,
+              help="Brownfield: scan all files, write baseline_violations.yaml. Does not block.")
+@click.option("--staged-only", is_flag=True,
+              help="Brownfield: check staged changes only, exclude baseline_violations.yaml violations.")
+def check(project_path: str | None, commit_msg_file: str | None, file_list: str | None,
+          baseline: bool, staged_only: bool):
     """Layer 1 pre-commit gate — YAML schema + AST pattern rules. No LLM."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
@@ -139,6 +144,42 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
     else:
         staged = _get_staged_files()
 
+    # ── Baseline mode: scan everything, write baseline_violations.yaml ────────
+    if baseline:
+        import subprocess
+        all_files_result = subprocess.run(
+            ["git", "ls-files"],
+            capture_output=True, text=True, cwd=project_root
+        )
+        all_files = [f.strip() for f in all_files_result.stdout.splitlines() if f.strip()]
+        all_violations = []
+        for rule in rules:
+            violations = _run_ast_rule(rule, all_files, project_root)
+            for v in violations:
+                all_violations.append({"rule_id": rule["id"], "file": v.split(":")[0], "detail": v})
+
+        from datetime import datetime, timezone
+        baseline_path = pcp_dir / "baseline_violations.yaml"
+        baseline_data = {
+            "violations": all_violations,
+            "total": len(all_violations),
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        baseline_path.write_text(yaml.dump(baseline_data, default_flow_style=False))
+        console.print(f"[dim]Baseline scan: {len(all_violations)} pre-existing violations → "
+                      f"baseline_violations.yaml[/dim]")
+        console.print("[dim]These violations are excluded from hard gates (brownfield grace mode).[/dim]")
+        sys.exit(0)
+
+    # ── Staged-only mode: exclude violations already in baseline ─────────────
+    baseline_keys: set[str] = set()
+    if staged_only:
+        baseline_path = pcp_dir / "baseline_violations.yaml"
+        if baseline_path.exists():
+            bd = yaml.safe_load(baseline_path.read_text()) or {}
+            for v in bd.get("violations", []):
+                baseline_keys.add(v.get("detail", ""))
+
     if not staged:
         sys.exit(0)
 
@@ -147,6 +188,8 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
 
     for rule in rules:
         violations = _run_ast_rule(rule, staged, project_root)
+        if staged_only and baseline_keys:
+            violations = [v for v in violations if v not in baseline_keys]
         if not violations:
             continue
         severity = rule.get("severity", "advisory")
