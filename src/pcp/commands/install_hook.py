@@ -1,4 +1,4 @@
-"""pcp install-hook — install pcp check as a git pre-commit hook."""
+"""pcp install-hook — install pcp check as a git commit-msg hook (Layer 1 gate)."""
 
 import sys
 from pathlib import Path
@@ -10,11 +10,19 @@ from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 
 console = Console()
 
-PRE_COMMIT_HOOK = """\
+COMMIT_MSG_HOOK = """\
 #!/bin/sh
-# PCP Layer 1 pre-commit gate
+# PCP Layer 1 gate
 # Installed by: pcp install-hook
-pcp check --commit-msg-file "$(git rev-parse --git-dir)/COMMIT_EDITMSG"
+#
+# Runs as a commit-msg hook, not pre-commit: git does not write the final
+# commit message to disk until after pre-commit runs (confirmed empirically —
+# COMMIT_EDITMSG holds the PREVIOUS commit's message at pre-commit time when
+# committing via `-m`), so a pre-commit hook can never see a `[pcp-bypass:
+# reason]` marker in the message being created. commit-msg fires after the
+# message is finalized but still before the commit object is created, so it
+# blocks just as effectively and the bypass marker actually works.
+pcp check --commit-msg-file "$1"
 """
 
 PRE_COMMIT_FRAMEWORK_CONFIG = """\
@@ -23,9 +31,10 @@ repos:
     hooks:
       - id: pcp-check
         name: PCP Layer 1 gate
-        entry: pcp check
+        entry: pcp check --commit-msg-file
         language: system
-        pass_filenames: false
+        stages: [commit-msg]
+        pass_filenames: true
         always_run: true
 """
 
@@ -36,7 +45,7 @@ repos:
               help="Add to .pre-commit-config.yaml instead of .git/hooks/.")
 @click.option("--force", is_flag=True, help="Overwrite existing hook.")
 def install_hook(project_path: str | None, pre_commit_framework: bool, force: bool):
-    """Install pcp check as git pre-commit hook."""
+    """Install pcp check as a git commit-msg hook (needed so `[pcp-bypass: reason]` is visible)."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
     except NoPCPDir as e:
@@ -78,17 +87,18 @@ def install_hook(project_path: str | None, pre_commit_framework: bool, force: bo
 
     hooks_dir = git_dir / "hooks"
     hooks_dir.mkdir(exist_ok=True)
-    hook_path = hooks_dir / "pre-commit"
+    hook_path = hooks_dir / "commit-msg"
 
     if hook_path.exists() and not force:
         console.print(f"[yellow]Hook already exists:[/yellow] {hook_path}")
-        console.print("Use --force to overwrite, or --pre-commit-framework to append.")
+        console.print("Use --force to overwrite (this replaces the whole file — merge manually "
+                       "if you have other commit-msg hooks), or --pre-commit-framework to append.")
         sys.exit(1)
 
-    hook_path.write_text(PRE_COMMIT_HOOK)
+    hook_path.write_text(COMMIT_MSG_HOOK)
     hook_path.chmod(0o755)
     console.print(f"[green]installed[/green] {hook_path}")
-    console.print("[dim]pcp check will run before every commit.[/dim]")
+    console.print("[dim]pcp check will run before every commit finalizes.[/dim]")
 
     _install_cron_scripts()
 
