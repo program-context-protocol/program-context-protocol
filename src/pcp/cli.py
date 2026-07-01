@@ -24,6 +24,7 @@ from pcp.commands.doctor import doctor
 from pcp.commands.watch import watch
 from pcp.commands.deploy import deploy
 from pcp.commands.capture import capture
+from pcp.commands.provenance import provenance
 
 
 @click.group()
@@ -58,3 +59,4 @@ cli.add_command(doctor)
 cli.add_command(watch)
 cli.add_command(deploy)
 cli.add_command(capture)
+cli.add_command(provenance)

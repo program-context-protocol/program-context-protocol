@@ -91,6 +91,13 @@ def deploy(project_path: str | None, yes: bool, rollout: str):
         sys.exit(1)
     console.print("[green]✓[/green] deploy-check passed")
 
+    try:
+        from pcp.commands.provenance import write_provenance
+        write_provenance(pcp_dir)
+        console.print("[dim]Audit evidence refreshed -> .pcp/provenance.md (review before approving)[/dim]")
+    except Exception as e:
+        console.print(f"[dim]Provenance refresh skipped: {e}[/dim]")
+
     modules_dir = get_modules_dir(pcp_dir)
     risk_flags = collect_risk_flags(modules_dir)
     if risk_flags:

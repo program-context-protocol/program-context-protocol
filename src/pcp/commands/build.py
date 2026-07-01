@@ -683,6 +683,14 @@ def build(module_name: str | None, project_path: str | None):
         except Exception as e:
             console.print(f"[dim]Audit skipped: {e}[/dim]")
 
+        # Audit-evidence document — pure aggregation over telemetry/controls/bypass
+        # log already on disk, so refreshing it here is free (no LLM, no rebuild).
+        try:
+            from pcp.commands.provenance import write_provenance
+            write_provenance(pcp_dir)
+        except Exception as e:
+            console.print(f"[dim]Provenance refresh skipped: {e}[/dim]")
+
         # Wave boundary: this module is the last one in its wave if the next
         # module (if any) belongs to a later wave.
         is_last_in_wave = (
