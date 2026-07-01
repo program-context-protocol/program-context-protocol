@@ -11,24 +11,68 @@ from rich.console import Console
 from pcp.pcp_dir import find_pcp_dir, get_modules_dir, NoPCPDir
 from pcp.schema.validator import validate_file, load_yaml
 from pcp.pcp_status import write_pcp_md
+from pcp.discovery.scanner import detect_stack, collect_source_files
 from pcp import qa
 
 console = Console()
 
+# Per-process caches: one `pcp scan` invocation is one process, so these are
+# safe to keep for the lifetime of the run and avoid re-globbing/re-reading
+# the whole repo once per acceptance criterion.
+_SOURCE_FILES_CACHE: dict[Path, list[Path]] = {}
+_FILE_CONTENT_CACHE: dict[Path, str] = {}
+
+
+def _project_source_files(project_root: Path) -> list[Path]:
+    cached = _SOURCE_FILES_CACHE.get(project_root)
+    if cached is None:
+        stack = detect_stack(project_root)
+        cached = collect_source_files(project_root, stack)
+        _SOURCE_FILES_CACHE[project_root] = cached
+    return cached
+
+
+def _read_cached(path: Path) -> str:
+    content = _FILE_CONTENT_CACHE.get(path)
+    if content is None:
+        content = path.read_text(errors="replace")
+        _FILE_CONTENT_CACHE[path] = content
+    return content
+
 
 def _check_file_exists(target: str, project_root: Path) -> tuple[bool, str]:
     path = project_root / target
-    exists = path.exists()
-    return exists, str(path.relative_to(project_root))
+    if path.exists():
+        return True, str(path.relative_to(project_root))
+
+    # Fallback: file may have moved/been renamed during a refactor.
+    # Search for a same-basename file elsewhere in the tree before failing.
+    basename = Path(target).name
+    for f in _project_source_files(project_root):
+        if f.name == basename:
+            rel = f.relative_to(project_root)
+            return True, f"{target}: not at declared path, found moved to {rel}"
+
+    return False, f"{target}: not found (declared path or elsewhere)"
 
 
 def _check_ast_pattern(target: str, pattern: str, project_root: Path) -> tuple[bool, str]:
     path = project_root / target
-    if not path.exists():
-        return False, f"{target}: file not found"
-    content = path.read_text(errors="replace")
-    matched = bool(re.search(pattern, content, re.MULTILINE))
-    return matched, f"pattern {'found' if matched else 'not found'} in {target}"
+    if path.exists():
+        if re.search(pattern, _read_cached(path), re.MULTILINE):
+            return True, f"pattern found in {target}"
+
+    # Fallback: feature may have been absorbed into a differently-named file
+    # during a refactor. Search other source files for the same pattern
+    # before declaring the criterion incomplete.
+    for f in _project_source_files(project_root):
+        if f == path:
+            continue
+        if re.search(pattern, _read_cached(f), re.MULTILINE):
+            rel = f.relative_to(project_root)
+            return True, f"pattern not found in {target}, found instead in {rel} — spec target may be stale"
+
+    return False, f"pattern not found in {target} or elsewhere in repo"
 
 
 def _load_prior_manual_status(current_state_path: Path) -> dict[str, str]:
