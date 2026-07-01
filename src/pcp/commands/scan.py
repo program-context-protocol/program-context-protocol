@@ -10,6 +10,8 @@ from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, get_modules_dir, NoPCPDir
 from pcp.schema.validator import validate_file, load_yaml
+from pcp.pcp_status import write_pcp_md
+from pcp import qa
 
 console = Console()
 
@@ -108,7 +110,7 @@ def _scan_module(
     return {"module": module_name, "criteria": results}
 
 
-def _write_current_state(pcp_dir: Path, modules_results: list[dict], timestamp: str) -> None:
+def _write_current_state(pcp_dir: Path, modules_results: list[dict], timestamp: str, coverage: dict | None = None) -> None:
     total = sum(len(m["criteria"]) for m in modules_results)
     complete = sum(
         1 for m in modules_results for c in m["criteria"] if c["status"] == "complete"
@@ -143,6 +145,13 @@ def _write_current_state(pcp_dir: Path, modules_results: list[dict], timestamp: 
         "",
     ]
 
+    if coverage and coverage.get("tool") and coverage.get("percent") is not None:
+        lines += [
+            "## Test Coverage",
+            f"{coverage['percent']:.0f}% ({coverage['tool']})",
+            "",
+        ]
+
     out = pcp_dir / "current_state.md"
     out.write_text("\n".join(lines))
     return out
@@ -152,7 +161,10 @@ def _write_current_state(pcp_dir: Path, modules_results: list[dict], timestamp: 
 @click.option("--path", "project_path", type=click.Path(), default=None,
               help="Project root (default: cwd, walks up to find .pcp/).")
 @click.option("--quiet", is_flag=True, help="Suppress output.")
-def scan(project_path: str | None, quiet: bool):
+@click.option("--coverage", "with_coverage", is_flag=True,
+              help="Also run the test suite under coverage and record %% covered. "
+                   "Off by default — runs the full suite, slower than a plain scan.")
+def scan(project_path: str | None, quiet: bool, with_coverage: bool):
     """Auto-generate .pcp/current_state.md from acceptance criteria."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
@@ -181,12 +193,23 @@ def scan(project_path: str | None, quiet: bool):
         result = _scan_module(module_name, af, project_root, prior_manual)
         modules_results.append(result)
 
+    coverage = None
+    if with_coverage:
+        if not quiet:
+            console.print("[dim]Running test suite under coverage...[/dim]")
+        coverage = qa.run_coverage(project_root)
+        if not quiet and not coverage.get("tool"):
+            console.print("[dim]No coverage tool detected (coverage/pytest or npm coverage script) — skipped.[/dim]")
+
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    out_path = _write_current_state(pcp_dir, modules_results, timestamp)
+    out_path = _write_current_state(pcp_dir, modules_results, timestamp, coverage)
+
+    total = sum(len(m["criteria"]) for m in modules_results)
+    complete = sum(1 for m in modules_results for c in m["criteria"] if c["status"] == "complete")
+
+    pcp_md_path = write_pcp_md(pcp_dir, modules_results, timestamp, total, complete)
 
     if not quiet:
-        total = sum(len(m["criteria"]) for m in modules_results)
-        complete = sum(1 for m in modules_results for c in m["criteria"] if c["status"] == "complete")
         score = complete / total if total else 0.0
         color = "green" if score >= 0.8 else "yellow" if score >= 0.5 else "red"
-        console.print(f"[{color}]{complete}/{total} criteria complete ({score:.0%})[/{color}]  →  {out_path.relative_to(project_root)}")
+        console.print(f"[{color}]{complete}/{total} criteria complete ({score:.0%})[/{color}]  →  {out_path.relative_to(project_root)}  +  {pcp_md_path.name}")

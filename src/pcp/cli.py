@@ -8,6 +8,22 @@ from pcp.commands.diff import diff
 from pcp.commands.check import check
 from pcp.commands.deploy_check import deploy_check
 from pcp.commands.gate import gate
+from pcp.commands.context import context
+from pcp.commands.validate_module import validate_module
+from pcp.commands.report import report
+from pcp.commands.install_hook import install_hook
+from pcp.commands.status import status
+from pcp.commands.architect_review import architect_review
+from pcp.commands.kickoff import kickoff
+from pcp.commands.pm import pm
+from pcp.commands.build import build
+from pcp.commands.import_project import import_project
+from pcp.commands.audit import audit
+from pcp.commands.telemetry_cmd import telemetry_cmd
+from pcp.commands.doctor import doctor
+from pcp.commands.watch import watch
+from pcp.commands.deploy import deploy
+from pcp.commands.capture import capture
 
 
 @click.group()
@@ -26,3 +42,19 @@ cli.add_command(check)
 cli.add_command(gate)
 cli.add_command(deploy_check, name="deploy-check")
 cli.add_command(validate_strategy, name="validate-strategy")
+cli.add_command(validate_module, name="validate-module")
+cli.add_command(context)
+cli.add_command(report)
+cli.add_command(install_hook, name="install-hook")
+cli.add_command(status)
+cli.add_command(architect_review, name="architect-review")
+cli.add_command(kickoff)
+cli.add_command(pm)
+cli.add_command(build)
+cli.add_command(import_project, name="import")
+cli.add_command(audit)
+cli.add_command(telemetry_cmd)
+cli.add_command(doctor)
+cli.add_command(watch)
+cli.add_command(deploy)
+cli.add_command(capture)

@@ -17,14 +17,16 @@
         "required": ["id", "name", "check", "severity"],
         "additionalProperties": false,
         "properties": {
-          "id": { "type": "string", "pattern": "^R[0-9]+$" },
+          "id": { "type": "string", "pattern": "^[A-Z]+_?[0-9]+$" },
           "name": { "type": "string" },
           "check": {
             "type": "string",
-            "enum": ["ast_pattern", "llm_semantic"]
+            "enum": ["ast_pattern", "file_exists", "llm_semantic"]
           },
           "pattern": { "type": "string" },
+          "target": { "type": "string" },
           "description": { "type": "string" },
+          "message": { "type": "string" },
           "severity": {
             "type": "string",
             "enum": ["hard_block", "advisory"]
@@ -34,15 +36,20 @@
             "items": { "type": "string" }
           }
         },
-        "if": {
-          "properties": { "check": { "const": "ast_pattern" } }
-        },
-        "then": {
-          "required": ["pattern"]
-        },
-        "else": {
-          "required": ["description"]
-        }
+        "allOf": [
+          {
+            "if": { "properties": { "check": { "const": "ast_pattern" } } },
+            "then": { "required": ["pattern"] }
+          },
+          {
+            "if": { "properties": { "check": { "const": "file_exists" } } },
+            "then": { "required": ["target"] }
+          },
+          {
+            "if": { "properties": { "check": { "const": "llm_semantic" } } },
+            "then": { "required": ["description"] }
+          }
+        ]
       }
     }
   }

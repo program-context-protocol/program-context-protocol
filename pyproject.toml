@@ -12,7 +12,15 @@ dependencies = [
     "pyyaml>=6.0",
     "jsonschema>=4.21",
     "rich>=13.0",
+    "networkx>=3.0",
 ]
+
+[project.optional-dependencies]
+# Community-detection enrichment on top of validate-strategy's deterministic
+# coupling_score (see coupling.py) — surfaces informal module clusters beyond
+# declared dependencies. Optional: pulls in numpy + ~20 tree-sitter grammars,
+# not needed for the core coupling computation, which only needs networkx.
+graph = ["graphifyy>=0.8"]
 
 [project.scripts]
 pcp = "pcp.cli:cli"

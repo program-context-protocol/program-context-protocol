@@ -10,3 +10,4 @@ node_modules/
 venv/
 .claude/
 hermes_memory.md
+.coverage

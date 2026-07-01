@@ -3,12 +3,11 @@
   "$id": "https://pcp-protocol.com/schema/module_acceptance.schema.json",
   "title": "PCP Module Acceptance Criteria",
   "type": "object",
-  "required": ["version", "module", "criteria"],
-  "additionalProperties": false,
+  "required": ["module", "criteria"],
+  "additionalProperties": true,
   "properties": {
     "version": {
-      "type": "string",
-      "enum": ["1.0"]
+      "type": "string"
     },
     "module": {
       "type": "string",
@@ -20,19 +19,23 @@
       "items": {
         "type": "object",
         "required": ["id", "description", "check", "status"],
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
-          "id": { "type": "string", "pattern": "^[A-Z][0-9]+$" },
+          "id": { "type": "string" },
           "description": { "type": "string" },
           "check": {
             "type": "string",
-            "enum": ["ast_pattern", "file_exists", "test_passes", "manual"]
+            "enum": ["ast_pattern", "file_exists", "test_passes", "manual", "dom_contains", "url_responds", "visual"]
           },
           "target": { "type": "string" },
           "pattern": { "type": "string" },
+          "test": { "type": "string" },
+          "url": { "type": "string" },
+          "selector": { "type": "string" },
+          "notes": { "type": "string" },
           "status": {
             "type": "string",
-            "enum": ["pending", "complete"]
+            "enum": ["pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"]
           }
         }
       }

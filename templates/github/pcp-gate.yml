@@ -1,0 +1,46 @@
+name: PCP Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  pcp-gate:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PCP
+        run: pip install program-context-protocol
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Run pcp gate
+        id: gate
+        run: |
+          pcp gate --base ${{ github.base_ref }} --markdown > gate_report.md
+          echo "report<<EOF" >> $GITHUB_OUTPUT
+          cat gate_report.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Post gate report as PR comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: pcp-gate
+          message: ${{ steps.gate.outputs.report }}

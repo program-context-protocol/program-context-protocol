@@ -3,12 +3,11 @@
   "$id": "https://pcp-protocol.com/schema/module_spec.schema.json",
   "title": "PCP Module Spec",
   "type": "object",
-  "required": ["version", "module", "description", "objective_coverage"],
-  "additionalProperties": false,
+  "required": ["module", "description"],
+  "additionalProperties": true,
   "properties": {
     "version": {
-      "type": "string",
-      "enum": ["1.0"]
+      "type": "string"
     },
     "module": {
       "type": "string",
@@ -30,6 +29,9 @@
     "constraints": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "deprecated": {
+      "type": "boolean"
     }
   }
 }

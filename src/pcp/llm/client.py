@@ -1,24 +1,71 @@
-"""LLM client — uses `claude -p` CLI subprocess. No API key required."""
+"""LLM client — uses `claude -p` CLI subprocess. No API key required.
+
+Token discipline is a hard constraint, same tier as modularity (see CLAUDE.md).
+Every call site must pass an explicit `model` — judge/advisory calls route to
+Haiku by default; PCP_MODEL env always wins if a human sets it. Usage/cost is
+captured from --output-format json and logged to .pcp/token_ledger.yaml so
+spend is visible the same way coverage_score and coupling_score are.
+"""
 
 import json
 import os
 import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+import yaml
+
+JUDGE_MODEL = "haiku"
 
 
 def _claude_bin() -> str:
     return os.environ.get("PCP_CLAUDE_BIN", "claude")
 
 
-def call(system: str, user: str) -> str:
-    """Run prompt through claude CLI. Returns text output."""
+def _timeout() -> int:
+    return int(os.environ.get("PCP_LLM_TIMEOUT", "300"))
+
+
+def _log_usage(pcp_dir: Path | None, command: str, model: str | None, session_id: str | None,
+               usage: dict, cost_usd: float | None) -> None:
+    if pcp_dir is None:
+        return
+    ledger_path = Path(pcp_dir) / "token_ledger.yaml"
+    entries = []
+    if ledger_path.exists():
+        data = yaml.safe_load(ledger_path.read_text()) or {}
+        entries = data.get("calls", [])
+    entries.append({
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "command": command,
+        "model": model or "default",
+        "session_id": session_id,
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+        "cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
+        "cost_usd": cost_usd,
+    })
+    ledger_path.write_text(yaml.dump({"calls": entries}, default_flow_style=False))
+
+
+def call(system: str, user: str, model: str | None = None, pcp_dir: Path | None = None,
+          command: str = "llm.call", return_meta: bool = False) -> str | tuple[str, dict]:
+    """Run prompt through claude CLI (one-shot, no session reuse). Returns text output.
+
+    model: explicit model for this call site (e.g. JUDGE_MODEL). PCP_MODEL env overrides
+    everything if set, so a human can force a model for debugging.
+    pcp_dir/command: if given, usage+cost is appended to .pcp/token_ledger.yaml.
+    return_meta: if True, returns (text, meta) where meta has model/session_id/usage/
+    cost_usd/duration_ms — for callers building richer per-event telemetry (see telemetry.py).
+    """
     prompt = f"{system}\n\n---\n\n{user}"
 
-    cmd = [_claude_bin(), "-p"]
-
-    model = os.environ.get("PCP_MODEL")
-    if model:
-        cmd += ["--model", model]
+    resolved_model = os.environ.get("PCP_MODEL") or model
+    cmd = [_claude_bin(), "-p", "--output-format", "json"]
+    if resolved_model:
+        cmd += ["--model", resolved_model]
 
     try:
         result = subprocess.run(
@@ -26,7 +73,7 @@ def call(system: str, user: str) -> str:
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=_timeout(),
         )
     except FileNotFoundError:
         raise RuntimeError(
@@ -34,22 +81,54 @@ def call(system: str, user: str) -> str:
             "Install Claude Code: https://claude.ai/download"
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError("claude CLI timed out after 120s")
+        raise RuntimeError(f"claude CLI timed out after {_timeout()}s")
 
     if result.returncode != 0:
         raise RuntimeError(
             f"claude CLI exited {result.returncode}: {result.stderr.strip()}"
         )
 
-    return result.stdout.strip()
+    try:
+        envelope = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        # Fallback: older CLI or unexpected output — treat stdout as raw text.
+        text = result.stdout.strip()
+        return (text, {}) if return_meta else text
+
+    if envelope.get("is_error"):
+        raise RuntimeError(f"claude CLI returned an error: {envelope.get('result', '')}")
+
+    _log_usage(
+        pcp_dir, command, resolved_model, envelope.get("session_id"),
+        envelope.get("usage", {}), envelope.get("total_cost_usd"),
+    )
+
+    text = (envelope.get("result") or "").strip()
+    if not return_meta:
+        return text
+
+    meta = {
+        "model": resolved_model or "default",
+        "session_id": envelope.get("session_id"),
+        "usage": envelope.get("usage", {}),
+        "cost_usd": envelope.get("total_cost_usd"),
+        "duration_ms": envelope.get("duration_ms"),
+    }
+    return text, meta
 
 
-def call_json(system: str, user: str) -> Any:
+def call_json(system: str, user: str, model: str | None = None, pcp_dir: Path | None = None,
+              command: str = "llm.call_json", return_meta: bool = False) -> Any:
     """Call claude CLI, parse response as JSON."""
-    text = call(system, user + "\n\nRespond with valid JSON only. No markdown fences.")
+    out = call(
+        system, user + "\n\nRespond with valid JSON only. No markdown fences.",
+        model=model, pcp_dir=pcp_dir, command=command, return_meta=return_meta,
+    )
+    text, meta = out if return_meta else (out, None)
     text = text.strip()
     # Strip markdown fences if model adds them anyway
     if text.startswith("```"):
         lines = text.split("\n")
         text = "\n".join(lines[1:-1])
-    return json.loads(text)
+    parsed = json.loads(text)
+    return (parsed, meta) if return_meta else parsed
