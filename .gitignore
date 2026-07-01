@@ -11,3 +11,4 @@ venv/
 .claude/
 hermes_memory.md
 .coverage
+presentations/
