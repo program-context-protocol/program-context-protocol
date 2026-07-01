@@ -340,6 +340,11 @@ WARN:
 - A module with more than 3 entries in its `dependencies:` field (God module risk)
 - A module that owns more than 3 database tables (God module risk)
 - A module that directly modifies another module's database tables
+- A non-trivial module (auth, payment, queue, scheduler, parser, embeddings,
+  state-machine, ETL-class complexity) scaffolded with no prior-art check
+  logged in `.pcp/decision_log.jsonl` — run `/priorart <description>` first
+  and record reuse-as-dependency / fork-adapt / reference-pattern-only /
+  build-fresh + license rationale before building
 
 ## Project-Specific Principles
 
@@ -365,6 +370,92 @@ BLOCK = must fix before merge
 WARN  = fix before ship
 NOTE  = track, non-blocking
 """
+
+PCP_CLAUDE_BLOCK_START = "<!-- PCP:BEGIN — auto-managed by `pcp init`, do not hand-edit this block -->"
+PCP_CLAUDE_BLOCK_END = "<!-- PCP:END -->"
+
+PCP_CLAUDE_BLOCK_BODY = """\
+# PCP Governance (this project is PCP-managed)
+
+This project uses PCP (Program Context Protocol). Every session — new or
+resumed — is governed by `.pcp/`. Read the relevant files before acting;
+do not restate or duplicate their content here.
+
+## Read first, every session
+
+- `.pcp/objective.md` — WHY this program exists. Immutable.
+- `.pcp/target_state.md` — WHAT done looks like.
+- `.pcp/architecture.md` — tech decisions + constraints.
+- `.pcp/architect_persona.md` — modularity + review rules.
+- `.pcp/current_state.md` — auto-generated reality snapshot.
+- `.pcp/diff.md` — auto-computed gap vs target.
+- `.pcp/strategy/decomposition.md` and `.pcp/strategy/modules/*/spec.yaml` — module specs.
+
+## Hard rules (non-negotiable, all sessions)
+
+1. **Spec files are human-written only** — `objective.md`, `target_state.md`,
+   `architecture.md`, `modules/*/spec.yaml`, `modules/*/acceptance.yaml`.
+   Never edit these as an agent. Propose changes via `pcp pm "<intent>"`.
+2. **`current_state.md` is always auto-generated** by `pcp scan`. Never
+   hand-write it.
+3. **`diff.md` is always auto-computed** by `pcp diff`. Never edit it.
+4. **Modularity is a hard constraint** — every module is a guest; it can
+   leave without drama and arrive without surgery. No direct cross-module
+   `src/` imports, no shared global mutable state, no module without a
+   feature flag and an `interfaces/` contract. See `ci_rules.yaml` MOD_001-005.
+5. Before committing, run `pcp check` (Layer 1). Before a PR, `pcp gate`
+   (Layer 2, advisory). Before deploy, `pcp deploy-check` (Layer 3, hard).
+   Bypass only via `[pcp-bypass: reason]` in the commit message — it is
+   logged to `bypass_log.yaml`, never silent.
+6. If work here changes program strategy (drop/add a module, change
+   objective coverage), run `pcp validate-strategy` before proceeding.
+7. Before scaffolding a non-trivial module (auth, payment, queue, scheduler,
+   parser, embeddings, state-machine, ETL-class complexity), run
+   `/priorart <description>` first — check for existing projects to reuse,
+   fork, or reference before building from scratch. Log the decision
+   (reuse-as-dependency / fork-adapt / reference-pattern-only / build-fresh
+   + license) via `pcp capture` so it lands in `.pcp/decision_log.jsonl`.
+   Skip for trivial modules (helpers, config parsers, glue code).
+
+## Session start checklist
+
+1. Read `.pcp/current_state.md` and `.pcp/diff.md` to know what's actually
+   built vs. what's left — don't assume from memory or git log alone.
+2. Read `.pcp/pcp.md` if present — it's the human-facing status rollup.
+3. If mid-build, check `.pcp/telemetry.jsonl` (or run `pcp telemetry`) for
+   prior attempt history on the current module before retrying.
+"""
+
+
+def render_pcp_claude_block() -> str:
+    return f"{PCP_CLAUDE_BLOCK_START}\n{PCP_CLAUDE_BLOCK_BODY}{PCP_CLAUDE_BLOCK_END}"
+
+
+def upsert_pcp_claude_block(claude_md_path: Path) -> bool:
+    """Insert or refresh the PCP governance block in a project's CLAUDE.md.
+
+    Preserves any human-authored content outside the marker pair. Returns
+    True if the file was created or changed.
+    """
+    block = render_pcp_claude_block()
+    if not claude_md_path.exists():
+        claude_md_path.parent.mkdir(parents=True, exist_ok=True)
+        claude_md_path.write_text(block + "\n")
+        return True
+
+    existing = claude_md_path.read_text()
+    if PCP_CLAUDE_BLOCK_START in existing and PCP_CLAUDE_BLOCK_END in existing:
+        pre = existing.split(PCP_CLAUDE_BLOCK_START)[0]
+        post = existing.split(PCP_CLAUDE_BLOCK_END)[1]
+        new_content = pre + block + post
+    else:
+        new_content = (existing.rstrip("\n") + "\n\n" + block + "\n") if existing.strip() else block + "\n"
+
+    if new_content == existing:
+        return False
+    claude_md_path.write_text(new_content)
+    return True
+
 
 ADR_EXAMPLE = """\
 # ADR-001: [Short Title]
@@ -451,6 +542,12 @@ def init(project_path: str, module_name: str | None, force: bool):
         console.print(f"  [green]created[/green]  {p}")
     for p in skipped:
         console.print(f"  [dim]skipped[/dim]  {p}  (exists, use --force to overwrite)")
+
+    claude_md = root / "CLAUDE.md"
+    if upsert_pcp_claude_block(claude_md):
+        console.print(f"  [green]updated[/green]  CLAUDE.md  (PCP governance block)")
+    else:
+        console.print(f"  [dim]unchanged[/dim]  CLAUDE.md  (PCP governance block already current)")
 
     gitattributes = root / ".gitattributes"
     ga_lines = [
