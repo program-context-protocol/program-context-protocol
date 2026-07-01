@@ -9,6 +9,7 @@ on:
       - "Dockerfile"
       - "railway.toml"
       - "pyproject.toml"
+  workflow_dispatch: {}
 
 jobs:
   deploy:
@@ -17,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Railway CLI
-        run: curl -fsSL https://railway.app/install.sh | sh
+        run: curl -fsSL https://railway.app/install.sh | bash
 
       - name: Deploy to Railway
         env:
