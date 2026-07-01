@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "src/pcp/server/**"
+      - "src/pcp/**"
+      - "SKILL.md"
       - "Dockerfile"
       - "railway.toml"
       - "pyproject.toml"

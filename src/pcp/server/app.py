@@ -6,13 +6,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
 app = FastAPI(title="PCP Server", version="1.0.0", docs_url="/docs")
 
 DATA_DIR = Path(os.getenv("PCP_DATA_DIR", "/data/pcp"))
 SKILL_VERSION = "1.0.0"
-SKILL_RAW_URL = "https://raw.githubusercontent.com/ganeshnallasivam-cell/program-context-protocol/main/SKILL.md"
+
+# Origin repo is private — the install doc and wheel are self-hosted here
+# instead of pulled from raw.githubusercontent.com / PyPI. See SKILL.md.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+SKILL_MD_PATH = Path(os.getenv("SKILL_MD_PATH", "/app/SKILL.md"))
+if not SKILL_MD_PATH.exists():
+    SKILL_MD_PATH = _REPO_ROOT / "SKILL.md"
+WHEEL_DIR = Path(os.getenv("WHEEL_DIR", "/app/dist"))
+if not WHEEL_DIR.exists():
+    WHEEL_DIR = _REPO_ROOT / "dist"
 
 
 def _ensure_data_dir() -> None:
@@ -25,12 +34,38 @@ def health():
 
 
 @app.get("/version")
-def version():
+def version(request: Request):
+    base = str(request.base_url).rstrip("/")
     return {
         "version": SKILL_VERSION,
-        "skill_url": SKILL_RAW_URL,
-        "changelog_url": "https://github.com/ganeshnallasivam-cell/program-context-protocol/blob/main/CHANGELOG.md",
+        "skill_url": f"{base}/skill",
+        "wheel_url": f"{base}/download/pcp-latest.whl",
     }
+
+
+@app.get("/skill", response_class=PlainTextResponse)
+def skill(request: Request):
+    """Self-install doc an LLM fetches to bootstrap PCP into a project."""
+    if not SKILL_MD_PATH.exists():
+        raise HTTPException(status_code=404, detail="SKILL.md not found")
+    base = str(request.base_url).rstrip("/")
+    return SKILL_MD_PATH.read_text().replace("{BASE_URL}", base)
+
+
+@app.get("/download/pcp-latest.whl")
+def download_wheel():
+    if not WHEEL_DIR.exists():
+        raise HTTPException(status_code=404, detail="no build artifacts")
+    wheels = sorted(WHEEL_DIR.glob("*.whl"))
+    if not wheels:
+        raise HTTPException(status_code=404, detail="no wheel built")
+    # Real wheel filename, not a "-latest" alias — pip validates the
+    # name-version-pytag-abitag-platformtag format and rejects anything else.
+    return FileResponse(
+        wheels[-1],
+        filename=wheels[-1].name,
+        media_type="application/octet-stream",
+    )
 
 
 @app.post("/interventions")
