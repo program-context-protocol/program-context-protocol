@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pcp-protocol.com/schema/controls.schema.json",
+  "title": "PCP Control Catalog",
+  "description": "Canonical list of gates PCP enforces, cross-referenced to NIST SP 800-218 (SSDF) practices. Human-readable jumpstart for a CMMC/SSDF-style audit document — not a certified mapping. Read by future `pcp provenance`/audit-evidence tooling; control ids here must match control_id values written to telemetry.jsonl.",
+  "type": "object",
+  "required": ["version", "controls"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "type": "string", "enum": ["1.0"] },
+    "controls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "layer", "enforcement", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^CTRL-[0-9]+$" },
+          "name": { "type": "string" },
+          "layer": {
+            "type": "string",
+            "enum": ["layer1", "layer2", "layer3", "wave-merge", "build-loop", "cross-cutting"]
+          },
+          "mechanism": { "type": "string" },
+          "tool": { "type": "string" },
+          "enforcement": {
+            "type": "string",
+            "enum": ["hard_block", "advisory", "tracked", "override"]
+          },
+          "description": { "type": "string" },
+          "ssdf_practice": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

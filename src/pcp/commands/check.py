@@ -8,7 +8,7 @@ import click
 import yaml
 from rich.console import Console
 
-from pcp.pcp_dir import find_pcp_dir, NoPCPDir
+from pcp.pcp_dir import find_pcp_dir, get_modules_dir, NoPCPDir
 from pcp.schema.validator import validate_file, load_yaml
 
 console = Console()
@@ -75,6 +75,30 @@ def _run_ast_rule(rule: dict, staged_files: list[str], project_root: Path) -> li
     return violations
 
 
+def get_module_names(pcp_dir: Path) -> list[str]:
+    modules_dir = get_modules_dir(pcp_dir)
+    if not modules_dir.exists():
+        return []
+    return sorted(p.name for p in modules_dir.iterdir() if p.is_dir() and (p / "spec.yaml").exists())
+
+
+def run_file_exists_rule(rule: dict, project_root: Path, module_names: list[str]) -> list[str]:
+    """Violations for a check:file_exists ci_rule. Resolves {module}/{MODULE}
+    placeholders per-module if present in the target; otherwise checks the
+    literal target once. Project-wide structural check, not diff-scoped."""
+    target_template = rule.get("target", "")
+    violations = []
+    if "{module}" in target_template or "{MODULE}" in target_template:
+        for name in module_names:
+            target = target_template.replace("{module}", name).replace("{MODULE}", name.upper())
+            if not (project_root / target).exists():
+                violations.append(f"{target}: required file missing (module '{name}')")
+    else:
+        if target_template and not (project_root / target_template).exists():
+            violations.append(f"{target_template}: required file missing")
+    return violations
+
+
 def _get_staged_files() -> list[str]:
     import subprocess
     result = subprocess.run(
@@ -124,17 +148,27 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
 
     data = load_yaml(ci_rules_path)
     rules = [r for r in data.get("rules", []) if r.get("check") == "ast_pattern"]
+    file_rules = [r for r in data.get("rules", []) if r.get("check") == "file_exists"]
+    module_names = get_module_names(pcp_dir)
 
-    if not rules:
-        console.print("[dim]No ast_pattern rules in ci_rules.yaml.[/dim]")
+    if not rules and not file_rules:
+        console.print("[dim]No ast_pattern or file_exists rules in ci_rules.yaml.[/dim]")
         sys.exit(0)
 
     # Check for bypass
     msg_file = Path(commit_msg_file) if commit_msg_file else None
     bypass_reason = _read_bypass_reason(msg_file)
     if bypass_reason:
-        rule_ids = [r["id"] for r in rules]
+        rule_ids = [r["id"] for r in rules + file_rules]
         _log_bypass(pcp_dir, bypass_reason, rule_ids)
+        from pcp import telemetry
+        telemetry.record(
+            pcp_dir, cycle="qa", cycle_number=None, check="layer1-bypass",
+            control_id="CTRL-004", module=None, submodule=None, criterion_id=None,
+            files=(file_list.split(",") if file_list else _get_staged_files()),
+            result="bypassed", errors=[f"reason: {bypass_reason}"] + [f"rule bypassed: {r}" for r in rule_ids],
+            error_count=len(rule_ids),
+        )
         console.print(f"[yellow]pcp-bypass:[/yellow] {bypass_reason} (logged to bypass_log.yaml)")
         sys.exit(0)
 
@@ -155,6 +189,10 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
         all_violations = []
         for rule in rules:
             violations = _run_ast_rule(rule, all_files, project_root)
+            for v in violations:
+                all_violations.append({"rule_id": rule["id"], "file": v.split(":")[0], "detail": v})
+        for rule in file_rules:
+            violations = run_file_exists_rule(rule, project_root, module_names)
             for v in violations:
                 all_violations.append({"rule_id": rule["id"], "file": v.split(":")[0], "detail": v})
 
@@ -180,7 +218,7 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
             for v in bd.get("violations", []):
                 baseline_keys.add(v.get("detail", ""))
 
-    if not staged:
+    if not staged and not file_rules:
         sys.exit(0)
 
     hard_violations = []
@@ -199,6 +237,20 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
         else:
             advisory_violations.append(entry)
 
+    # file_exists rules are structural (project-wide), not diff-scoped — always evaluated.
+    for rule in file_rules:
+        violations = run_file_exists_rule(rule, project_root, module_names)
+        if staged_only and baseline_keys:
+            violations = [v for v in violations if v not in baseline_keys]
+        if not violations:
+            continue
+        severity = rule.get("severity", "advisory")
+        entry = {"rule": rule, "violations": violations}
+        if severity == "hard_block":
+            hard_violations.append(entry)
+        else:
+            advisory_violations.append(entry)
+
     if advisory_violations:
         console.print("[yellow]Advisory violations:[/yellow]")
         for entry in advisory_violations:
@@ -206,6 +258,8 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
             console.print(f"  [{r['id']}] {r['name']}")
             for v in entry["violations"][:3]:
                 console.print(f"    {v}")
+            if r.get("message"):
+                console.print(f"    [dim]Fix: {r['message']}[/dim]")
 
     if hard_violations:
         console.print("[red bold]BLOCKED — hard rule violations:[/red bold]")
@@ -214,6 +268,8 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
             console.print(f"  [{r['id']}] {r['name']}")
             for v in entry["violations"][:3]:
                 console.print(f"    {v}")
+            if r.get("message"):
+                console.print(f"    [dim]Fix: {r['message']}[/dim]")
         console.print(
             "\n[dim]To bypass: add [pcp-bypass: reason] to your commit message.[/dim]"
         )

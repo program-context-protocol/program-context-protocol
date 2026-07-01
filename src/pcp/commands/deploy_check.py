@@ -117,6 +117,13 @@ def deploy_check(phase: str | None, project_path: str | None, skip_freshness: bo
     for p in passed:
         console.print(f"  [green]✓[/green]  {p}")
 
+    from pcp import telemetry
+    telemetry.record(
+        pcp_dir, cycle="qa", cycle_number=None, check="deploy-phase-exit",
+        control_id="CTRL-009", module=None, submodule=None, criterion_id=None,
+        files=[], result="block" if failures else "pass", errors=failures, error_count=len(failures),
+    )
+
     if failures:
         console.print(f"\n[red bold]BLOCKED — {len(failures)} exit criteria not met:[/red bold]")
         for f in failures:
