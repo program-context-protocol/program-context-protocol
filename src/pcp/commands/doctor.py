@@ -49,6 +49,7 @@ def detect_tools() -> dict:
         "coverage": _detect_one(["coverage"]),
         "audit": _detect_one(["vulture", "knip"]),
         "slack_notify": {"available": _which("slack-notify") is not None, "path": _which("slack-notify")},
+        "opa": _detect_one(["opa"]),
     }
 
 
@@ -86,7 +87,7 @@ def check_environment(pcp_dir: Path, fatal_on_missing_required: bool = True) -> 
             sys.exit(2)
 
     optional_missing = [
-        k for k in ("test_runner", "lint", "sast", "coverage", "audit")
+        k for k in ("test_runner", "lint", "sast", "coverage", "audit", "opa")
         if not tools[k]["available"]
     ]
     if optional_missing:
@@ -134,6 +135,7 @@ def doctor(project_path: str | None, check_only: bool):
     _row("Coverage", tools["coverage"])
     _row("Dead-code audit", tools["audit"])
     _row("Slack notifications", tools["slack_notify"])
+    _row("OPA (policy/decision layer)", tools["opa"])
     console.print(table)
     console.print("[dim]Browser automation (for `pcp uat`): assumed available via this environment's MCP tools — not directly verified.[/dim]")
 
