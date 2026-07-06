@@ -21,7 +21,10 @@ import yaml
 from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, get_ontology_state, NoPCPDir
-from pcp.ontology import to_display_items, apply_review_action, ReviewError
+from pcp.ontology import (
+    to_display_items, apply_review_action, apply_bulk_review_action,
+    community_summary, ReviewError,
+)
 
 console = Console()
 
@@ -78,34 +81,65 @@ def _make_handler(pcp_dir: Path, project_name: str):
                     "nodes": [i for i in items if i["kind"] == "node"],
                     "edges": [i for i in items if i["kind"] == "edge"],
                 })
+            elif self.path == "/api/communities":
+                state_path = get_ontology_state(pcp_dir)
+                if not state_path.exists():
+                    self._send_json(200, [])
+                    return
+                state = yaml.safe_load(state_path.read_text()) or {}
+                self._send_json(200, community_summary(state))
             else:
                 self._send_json(404, {"error": "not found"})
 
-        def do_POST(self):
-            if self.path != "/api/review":
-                self._send_json(404, {"error": "not found"})
-                return
+        def _read_json_body(self):
             length = int(self.headers.get("Content-Length", 0) or 0)
-            try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
-            except json.JSONDecodeError:
-                self._send_json(400, {"error": "invalid JSON body"})
-                return
+            return json.loads(self.rfile.read(length) or b"{}")
 
-            item_id = payload.get("id")
-            action = payload.get("action")
-            new_label = payload.get("new_label")
-            if not item_id or action not in ("approve", "reject", "edit"):
-                self._send_json(400, {"error": "id and action (approve/reject/edit) required"})
-                return
+        def do_POST(self):
+            if self.path == "/api/review":
+                try:
+                    payload = self._read_json_body()
+                except json.JSONDecodeError:
+                    self._send_json(400, {"error": "invalid JSON body"})
+                    return
 
-            try:
-                result = apply_review_action(pcp_dir, item_id, action, new_label)
-            except ReviewError as e:
-                self._send_json(400, {"error": str(e)})
-                return
+                item_id = payload.get("id")
+                action = payload.get("action")
+                new_label = payload.get("new_label")
+                if not item_id or action not in ("approve", "reject", "edit"):
+                    self._send_json(400, {"error": "id and action (approve/reject/edit) required"})
+                    return
 
-            self._send_json(200, result)
+                try:
+                    result = apply_review_action(pcp_dir, item_id, action, new_label)
+                except ReviewError as e:
+                    self._send_json(400, {"error": str(e)})
+                    return
+
+                self._send_json(200, result)
+
+            elif self.path == "/api/review-bulk":
+                try:
+                    payload = self._read_json_body()
+                except json.JSONDecodeError:
+                    self._send_json(400, {"error": "invalid JSON body"})
+                    return
+
+                item_ids = payload.get("ids")
+                action = payload.get("action")
+                if not item_ids or action not in ("approve", "reject"):
+                    self._send_json(400, {"error": "ids (non-empty list) and action (approve/reject) required"})
+                    return
+
+                try:
+                    result = apply_bulk_review_action(pcp_dir, item_ids, action)
+                except ReviewError as e:
+                    self._send_json(400, {"error": str(e)})
+                    return
+
+                self._send_json(200, result)
+            else:
+                self._send_json(404, {"error": "not found"})
 
     return Handler
 

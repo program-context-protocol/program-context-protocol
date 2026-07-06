@@ -82,6 +82,33 @@
   #toast.show { transform: translateX(-50%) translateY(0); }
   #toast.err { border-color: var(--red); color: var(--red); }
   #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 0.85rem; }
+
+  #community-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 30;
+    display: flex; align-items: center; justify-content: center; padding: 2rem;
+  }
+  #community-modal {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    width: min(760px, 100%); max-height: 85vh; display: flex; flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  }
+  #community-modal-header {
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem;
+    padding: 1.1rem 1.3rem; border-bottom: 1px solid var(--border);
+  }
+  #community-modal-header h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+  #community-list { overflow-y: auto; padding: 0.6rem 1.3rem 1.3rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .community-row {
+    display: flex; align-items: center; gap: 0.7rem; padding: 0.6rem 0.8rem; border: 1px solid var(--border);
+    border-radius: 10px; cursor: pointer; font-size: 0.78rem;
+  }
+  .community-row:hover { background: var(--bg); }
+  .community-row .cr-main { flex: 1; min-width: 0; }
+  .community-row .cr-samples { color: var(--muted); font-size: 0.7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .community-row .cr-counts { display: flex; gap: 0.35rem; flex: none; }
+  .community-row .cr-actions { display: flex; gap: 0.3rem; flex: none; }
+  .community-row .cr-actions .act-btn { padding: 0.3rem 0.55rem; font-size: 0.68rem; flex: none; }
+  .cr-total { font-weight: 700; font-size: 0.85rem; flex: none; width: 2.4rem; text-align: right; }
 </style>
 </head>
 <body>
@@ -93,6 +120,7 @@
     </div>
     <input class="search" id="search" placeholder="Highlight nodes…" />
     <button class="chip" id="chip-semantic" style="--dot: var(--accent)" title="Hide code nodes + structural edges (contains/calls/references/imports_from/uses) — show only rationale/concept/document nodes and the meaning-carrying edges (rationale_for/conceptually_related_to/semantically_similar_to/shares_data_with)">Semantic only <span id="c-semantic">0</span></button>
+    <button class="chip" id="chip-communities" style="--dot: var(--accent)" title="Too many items to review one at a time — decide per group instead. Approve or reject a whole community in one action.">Review by group</button>
     <div class="stats" role="group" aria-label="Filter by status">
       <button class="chip" id="chip-all" style="--dot: var(--text)">All <span id="c-all">0</span></button>
       <button class="chip" id="chip-red" style="--dot: var(--red); --chip-bg: var(--red-bg)">Red <span id="c-red">0</span></button>
@@ -109,6 +137,19 @@
   </div>
 </div>
 <div id="toast"></div>
+
+<div id="community-overlay" style="display:none;">
+  <div id="community-modal">
+    <div id="community-modal-header">
+      <div>
+        <h2>Review by group</h2>
+        <div class="eyebrow" style="margin-top:0.2rem;">One decision per community instead of one per item — approve or reject everything in a group at once. Click a row to preview it in the graph first.</div>
+      </div>
+      <button class="act-btn" id="community-close" style="flex:none; padding:0.4rem 0.8rem;">Close</button>
+    </div>
+    <div id="community-list"></div>
+  </div>
+</div>
 
 <script>
 let allNodes = [], allEdges = [];
@@ -344,6 +385,82 @@ document.getElementById('chip-semantic').addEventListener('click', () => {
   document.getElementById('loading').style.display = 'flex';
   document.getElementById('loading').textContent = 'Re-laying out…';
   loadGraph();
+});
+
+// --- Review by group (community batch decisions) ---
+// The point: 249+ individual items is too many decisions for a human to
+// make one at a time. graphify's own clustering (community) is the natural
+// grouping unit -- one approve/reject decision cascades to every member,
+// with a click-to-preview in the main graph before committing.
+async function loadCommunities() {
+  const res = await fetch('/api/communities');
+  const groups = await res.json();
+  const list = document.getElementById('community-list');
+  if (!groups.length) {
+    list.innerHTML = '<div class="field placeholder">No ontology data yet.</div>';
+    return;
+  }
+  list.innerHTML = groups.map(g => {
+    const label = g.community === 'ungrouped' ? 'Ungrouped' : `Community ${g.community}`;
+    const samples = g.sample_names.slice(0, 3).join(', ');
+    const idsJson = esc(JSON.stringify(g.item_ids));
+    return `
+    <div class="community-row" onclick="previewCommunity(event, '${idsJson}')">
+      <span class="cr-total">${g.total}</span>
+      <div class="cr-main">
+        <div>${esc(label)}</div>
+        <div class="cr-samples">${esc(samples)}</div>
+      </div>
+      <div class="cr-counts">
+        <span class="pill red">${g.red}</span>
+        <span class="pill blue">${g.blue}</span>
+        <span class="pill green">${g.green}</span>
+      </div>
+      <div class="cr-actions">
+        <button class="act-btn approve" onclick="bulkAct(event, '${idsJson}', 'approve')">Approve all</button>
+        <button class="act-btn reject" onclick="bulkAct(event, '${idsJson}', 'reject')">Reject all</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function previewCommunity(evt, idsJson) {
+  if (evt.target.closest('.cr-actions')) return; // action buttons handle their own click
+  const ids = JSON.parse(idsJson.replace(/&quot;/g, '"'));
+  closeCommunityOverlay();
+  network.selectNodes(ids.filter(id => nodesDS.get(id)));
+  if (ids.length) network.fit({ nodes: ids.filter(id => nodesDS.get(id)), animation: true });
+}
+
+async function bulkAct(evt, idsJson, action) {
+  evt.stopPropagation();
+  const ids = JSON.parse(idsJson.replace(/&quot;/g, '"'));
+  if (action === 'reject' && !window.confirm(`Reject all ${ids.length} items in this group? This removes them from the ontology.`)) return;
+  try {
+    const res = await fetch('/api/review-bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, action }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'request failed');
+    showToast(`${action} applied to ${data.applied} item(s)`);
+    await loadCommunities();
+    await loadGraph();
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+function closeCommunityOverlay() {
+  document.getElementById('community-overlay').style.display = 'none';
+}
+document.getElementById('chip-communities').addEventListener('click', () => {
+  document.getElementById('community-overlay').style.display = 'flex';
+  loadCommunities();
+});
+document.getElementById('community-close').addEventListener('click', closeCommunityOverlay);
+document.getElementById('community-overlay').addEventListener('click', e => {
+  if (e.target.id === 'community-overlay') closeCommunityOverlay();
 });
 
 loadGraph();

@@ -93,6 +93,86 @@ def apply_review_action(pcp_dir: Path, item_id: str, action: str, new_label: str
     return {"kind": kind, "action": action}
 
 
+def apply_bulk_review_action(pcp_dir: Path, item_ids: list[str], action: str) -> dict:
+    """Bulk approve/reject across many ids in one state read/write (not N
+    separate ones), with one audit-log entry per item so each item's own
+    confidence snapshot is still preserved individually. This is the answer
+    to "too many items to review one at a time": a human decides once per
+    community.py-style group (see community_summary below), this cascades
+    the decision to every member. Edit is deliberately unsupported in bulk
+    -- each item would need its own distinct label, which isn't a group
+    decision anymore."""
+    if action not in ("approve", "reject"):
+        raise ReviewError("bulk review only supports approve/reject (edit needs a per-item label)")
+
+    state_path = get_ontology_state(pcp_dir)
+    if not state_path.exists():
+        raise ReviewError("No ontology_state.yaml — run `pcp ontology-extract` first.")
+
+    state = yaml.safe_load(state_path.read_text()) or {}
+    id_set = set(item_ids)
+    applied_ids = []
+
+    def _process(items, kind):
+        kept = []
+        for item in items:
+            if item["id"] not in id_set:
+                kept.append(item)
+                continue
+            applied_ids.append(item["id"])
+            ontology_review_log.record(
+                pcp_dir, item_id=item["id"], kind=kind, action=action,
+                original_confidence_score=item.get("confidence_score"), new_label=None,
+            )
+            if action == "approve":
+                item["review_status"] = "green"
+                kept.append(item)
+            # reject: dropped, not re-appended
+        return kept
+
+    nodes = _process(state.get("nodes", []), "node")
+    edges = _process(state.get("edges", []), "edge")
+
+    state_path.write_text(yaml.dump(
+        {"generated_at": state.get("generated_at"), "nodes": nodes, "edges": edges},
+        default_flow_style=False, sort_keys=False,
+    ))
+
+    skipped = [i for i in item_ids if i not in set(applied_ids)]
+    return {"applied": len(applied_ids), "skipped": skipped, "action": action}
+
+
+def community_summary(state: dict) -> list[dict]:
+    """Aggregates nodes+edges by graphify's own community id (Leiden/Louvain
+    clustering, present when a deep /graphify run produced graph.json):
+    {community, total, red, blue, green, sample_names, item_ids}. Edges are
+    attributed to their source node's community (best-effort -- a cross-
+    community edge is credited to its source side). This is the grouping a
+    human actually reviews at: one bulk decision per community, drilling
+    into individual items only for a community that looks mixed/wrong."""
+    node_community = {n["id"]: n.get("community") for n in state.get("nodes", [])}
+    groups: dict = {}
+
+    def _bucket(community, item, label_source):
+        key = community if community is not None else "ungrouped"
+        g = groups.setdefault(key, {
+            "community": key, "total": 0, "red": 0, "blue": 0, "green": 0,
+            "sample_names": [], "item_ids": [],
+        })
+        g["total"] += 1
+        g[item["review_status"]] += 1
+        g["item_ids"].append(item["id"])
+        if label_source and len(g["sample_names"]) < 5:
+            g["sample_names"].append(label_source)
+
+    for n in state.get("nodes", []):
+        _bucket(n.get("community"), n, n.get("label", n["id"]))
+    for e in state.get("edges", []):
+        _bucket(node_community.get(e["source"]), e, None)
+
+    return sorted(groups.values(), key=lambda g: -g["total"])
+
+
 def extract_ontology(project_root: Path) -> dict:
     """Returns {"available": False} if graphify isn't installed (same
     try/except-ImportError shape as coupling.py's compute_communities).
@@ -164,6 +244,12 @@ def _normalize_node(n: dict) -> dict:
         "source_file": n.get("source_file"),
         "rationale": n.get("rationale"),
         "review_status": "blue",
+        # community: graphify's own clustering (Leiden/Louvain), present only
+        # when the deep /graphify pipeline produced graph.json -- null on the
+        # plain-AST fallback path, which never runs clustering. This is the
+        # grouping axis batch review uses: humans decide per-community, not
+        # per-node, one bulk decision cascades to every member.
+        "community": n.get("community"),
     }
 
 

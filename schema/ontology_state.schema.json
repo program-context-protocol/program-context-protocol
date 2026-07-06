@@ -20,7 +20,8 @@
           "file_type": { "type": "string" },
           "source_file": { "type": ["string", "null"] },
           "rationale": { "type": ["string", "null"] },
-          "review_status": { "type": "string", "enum": ["red", "blue", "green"] }
+          "review_status": { "type": "string", "enum": ["red", "blue", "green"] },
+          "community": { "type": ["integer", "null"] }
         }
       }
     },
