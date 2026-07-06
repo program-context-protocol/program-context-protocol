@@ -246,10 +246,11 @@ def to_display_items(state: dict) -> list[dict]:
             "name": f"{e['source']} -{e['relation']}-> {e['target']}",
             "detail": e.get("confidence") or "", "file": e.get("source_file") or "",
             "status": e["review_status"],
-            # from/to: unused by the table view, needed by the graph view
-            # (vis-network requires an edge's endpoints as distinct fields,
-            # not embeddable in "name") -- kept on the same shared item shape
-            # rather than a second flatten function, so both UIs stay in sync.
-            "from": e["source"], "to": e["target"],
+            # from/to/relation: unused by the table view, needed by the graph
+            # view (vis-network requires an edge's endpoints as distinct
+            # fields, and a semantic-vs-structural filter needs the relation
+            # word without regex-parsing "name") -- kept on the same shared
+            # item shape rather than a second flatten function.
+            "from": e["source"], "to": e["target"], "relation": e["relation"],
         })
     return items

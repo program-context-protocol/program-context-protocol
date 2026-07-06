@@ -92,6 +92,7 @@
       <h1 id="title">Ontology Graph</h1>
     </div>
     <input class="search" id="search" placeholder="Highlight nodes…" />
+    <button class="chip" id="chip-semantic" style="--dot: var(--accent)" title="Hide code nodes + structural edges (contains/calls/references/imports_from/uses) — show only rationale/concept/document nodes and the meaning-carrying edges (rationale_for/conceptually_related_to/semantically_similar_to/shares_data_with)">Semantic only <span id="c-semantic">0</span></button>
     <div class="stats" role="group" aria-label="Filter by status">
       <button class="chip" id="chip-all" style="--dot: var(--text)">All <span id="c-all">0</span></button>
       <button class="chip" id="chip-red" style="--dot: var(--red); --chip-bg: var(--red-bg)">Red <span id="c-red">0</span></button>
@@ -114,6 +115,16 @@ let allNodes = [], allEdges = [];
 let nodesDS, edgesDS, network;
 let statusFilter = 'all';
 let selected = null;
+let semanticOnly = false;
+
+// "code" nodes are structural (functions, files, schema keys); rationale/
+// concept/document nodes carry actual meaning. Same split for edges:
+// contains/calls/references/imports_from/uses/method are AST-derived
+// structure; the rest are the semantic subagent's own relation vocabulary.
+const SEMANTIC_NODE_TYPES = new Set(['rationale', 'concept', 'document']);
+const SEMANTIC_RELATIONS = new Set(['rationale_for', 'conceptually_related_to', 'semantically_similar_to', 'shares_data_with']);
+function isSemanticNode(n) { return SEMANTIC_NODE_TYPES.has(n.detail); }
+function isSemanticEdge(e) { return SEMANTIC_RELATIONS.has(e.relation); }
 
 const COLOR = {
   red: { background: getVar('--red'), border: getVar('--red') },
@@ -139,17 +150,32 @@ async function loadGraph() {
   allEdges = data.edges;
 
   const counts = { all: allNodes.length + allEdges.length, red: 0, blue: 0, green: 0 };
+  let semanticCount = 0;
   for (const it of [...allNodes, ...allEdges]) counts[it.status]++;
+  for (const n of allNodes) if (isSemanticNode(n)) semanticCount++;
+  for (const e of allEdges) if (isSemanticEdge(e)) semanticCount++;
   document.getElementById('c-all').textContent = counts.all.toLocaleString();
   document.getElementById('c-red').textContent = counts.red.toLocaleString();
   document.getElementById('c-blue').textContent = counts.blue.toLocaleString();
   document.getElementById('c-green').textContent = counts.green.toLocaleString();
+  document.getElementById('c-semantic').textContent = semanticCount.toLocaleString();
+
+  // Semantic-only mode: keep semantic edges, plus any node that either IS
+  // semantically typed or is an endpoint of a kept edge -- a code node that
+  // bridges to a concept via conceptually_related_to/shares_data_with is
+  // exactly the interesting cross-link, hiding it would erase the bridge.
+  const keptEdgeIds = new Set(allEdges.filter(isSemanticEdge).map(e => e.id));
+  const nodeIsBridgeEndpoint = new Set();
+  for (const e of allEdges) {
+    if (keptEdgeIds.has(e.id)) { nodeIsBridgeEndpoint.add(e.from); nodeIsBridgeEndpoint.add(e.to); }
+  }
+  function nodeVisibleInSemanticMode(n) { return isSemanticNode(n) || nodeIsBridgeEndpoint.has(n.id); }
 
   const visNodes = allNodes.map(n => ({
     id: n.id, label: n.kind === 'node' ? truncate(n.name, 22) : '',
     shape: n.kind === 'node' ? 'dot' : 'dot', size: n.kind === 'node' ? 9 : 3,
     color: COLOR[n.status], font: { size: n.kind === 'node' ? 11 : 0, color: getVar('--text') },
-    title: n.name, _raw: n,
+    title: n.name, hidden: semanticOnly && !nodeVisibleInSemanticMode(n), _raw: n,
   }));
   nodesDS = new vis.DataSet(visNodes);
 
@@ -158,7 +184,7 @@ async function loadGraph() {
     color: { color: COLOR[e.status].background, opacity: 0.55 },
     width: e.status === 'green' ? 2 : 1,
     arrows: { to: { enabled: true, scaleFactor: 0.4 } },
-    title: e.name, _raw: e,
+    title: e.name, hidden: semanticOnly && !keptEdgeIds.has(e.id), _raw: e,
   }));
   edgesDS = new vis.DataSet(visEdges);
 
@@ -192,9 +218,7 @@ function nodeName(id) {
 }
 
 function edgeRelation(raw) {
-  // raw.name is "source -relation-> target" (ids) -- pull just the relation word out
-  const m = raw.name.match(/-(.+?)->/);
-  return m ? m[1] : (raw.detail || 'related_to');
+  return raw.relation || 'related_to';
 }
 
 function connectionsHtml(nodeId) {
@@ -312,6 +336,15 @@ Object.keys(chipMap).forEach(id => {
   });
 });
 document.getElementById('chip-all').classList.add('active');
+
+document.getElementById('chip-semantic').addEventListener('click', () => {
+  semanticOnly = !semanticOnly;
+  document.getElementById('chip-semantic').classList.toggle('active', semanticOnly);
+  clearPanel();
+  document.getElementById('loading').style.display = 'flex';
+  document.getElementById('loading').textContent = 'Re-laying out…';
+  loadGraph();
+});
 
 loadGraph();
 </script>
