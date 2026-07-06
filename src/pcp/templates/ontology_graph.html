@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>PCP Ontology Graph</title>
+<script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js"></script>
+<style>
+  :root {
+    --bg: #f5f4f0; --surface: #ffffff; --border: #dcdad2; --text: #1c1d1f; --muted: #6b6d74;
+    --accent: #a3742f; --red: #b3382c; --blue: #2559a8; --green: #1f7a4d;
+    --red-bg: #f8e2df; --blue-bg: #dfe8f8; --green-bg: #dcf0e4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #10131a; --surface: #181d27; --border: #2a3140; --text: #e7eaf0; --muted: #8b93a7;
+      --accent: #d1a35c; --red: #ff8078; --blue: #7db0ff; --green: #6bd99a;
+      --red-bg: #3a1e1d; --blue-bg: #1c2a42; --green-bg: #16332470;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  .shell { display: flex; flex-direction: column; height: 100%; }
+  header {
+    display: flex; align-items: center; gap: 1rem; padding: 0.75rem 1.1rem;
+    border-bottom: 1px solid var(--border); background: var(--surface); flex-wrap: wrap;
+  }
+  h1 { font-size: 1rem; font-weight: 600; margin: 0; white-space: nowrap; }
+  .eyebrow { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
+  .stats { display: flex; gap: 0.5rem; margin-left: auto; }
+  .chip {
+    display: flex; align-items: center; gap: 0.35rem; border: 1px solid var(--border); border-radius: 999px;
+    padding: 0.3rem 0.7rem; font-size: 0.75rem; cursor: pointer; background: var(--surface); color: var(--text);
+  }
+  .chip::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--dot, var(--muted)); }
+  .chip.active { border-color: var(--dot, var(--accent)); background: var(--chip-bg, transparent); }
+  .search {
+    border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 0.7rem; font-size: 0.8rem;
+    background: var(--surface); color: var(--text); width: 220px;
+  }
+  .body { flex: 1; display: flex; min-height: 0; }
+  #graph { flex: 1; }
+  #panel {
+    width: 320px; border-left: 1px solid var(--border); background: var(--surface);
+    padding: 1rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.6rem;
+  }
+  #panel .placeholder { color: var(--muted); font-size: 0.82rem; }
+  .field { font-size: 0.78rem; line-height: 1.5; }
+  .field b { display: block; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 0.15rem; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.15rem 0.5rem; border-radius: 999px;
+    font-size: 0.68rem; font-weight: 600;
+  }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .pill.red { color: var(--red); background: var(--red-bg); }
+  .pill.blue { color: var(--blue); background: var(--blue-bg); }
+  .pill.green { color: var(--green); background: var(--green-bg); }
+  .actions { display: flex; gap: 0.4rem; margin-top: 0.3rem; }
+  .act-btn {
+    flex: 1; font-size: 0.72rem; font-weight: 600; border-radius: 6px; padding: 0.4rem 0.3rem;
+    cursor: pointer; border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  }
+  .act-btn.approve:hover { border-color: var(--green); color: var(--green); }
+  .act-btn.reject:hover { border-color: var(--red); color: var(--red); }
+  .act-btn.edit:hover { border-color: var(--accent); color: var(--accent); }
+  .act-btn:disabled { opacity: 0.4; cursor: default; }
+  #toast {
+    position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%) translateY(120%);
+    background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.9rem;
+    border-radius: 8px; font-size: 0.78rem; transition: transform 0.2s ease; z-index: 20;
+  }
+  #toast.show { transform: translateX(-50%) translateY(0); }
+  #toast.err { border-color: var(--red); color: var(--red); }
+  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div>
+      <span class="eyebrow">pcp ontology-serve · graph</span>
+      <h1 id="title">Ontology Graph</h1>
+    </div>
+    <input class="search" id="search" placeholder="Highlight nodes…" />
+    <div class="stats" role="group" aria-label="Filter by status">
+      <button class="chip" id="chip-all" style="--dot: var(--text)">All <span id="c-all">0</span></button>
+      <button class="chip" id="chip-red" style="--dot: var(--red); --chip-bg: var(--red-bg)">Red <span id="c-red">0</span></button>
+      <button class="chip" id="chip-blue" style="--dot: var(--blue); --chip-bg: var(--blue-bg)">Blue <span id="c-blue">0</span></button>
+      <button class="chip" id="chip-green" style="--dot: var(--green); --chip-bg: var(--green-bg)">Green <span id="c-green">0</span></button>
+    </div>
+  </header>
+  <div class="body">
+    <div style="position:relative; flex:1;">
+      <div id="graph" style="width:100%; height:100%;"></div>
+      <div id="loading">Loading graph…</div>
+    </div>
+    <div id="panel"><div class="placeholder">Click a node or edge to inspect it.</div></div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+let allNodes = [], allEdges = [];
+let nodesDS, edgesDS, network;
+let statusFilter = 'all';
+let selected = null;
+
+const COLOR = {
+  red: { background: getVar('--red'), border: getVar('--red') },
+  blue: { background: getVar('--blue'), border: getVar('--blue') },
+  green: { background: getVar('--green'), border: getVar('--green') },
+};
+function getVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function showToast(msg, isErr) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = isErr ? 'show err' : 'show';
+  setTimeout(() => t.className = '', 2600);
+}
+
+async function loadGraph() {
+  const res = await fetch('/api/graph');
+  const data = await res.json();
+  document.getElementById('title').textContent = `Ontology Graph — ${data.project_name || 'project'}`;
+
+  allNodes = data.nodes;
+  allEdges = data.edges;
+
+  const counts = { all: allNodes.length + allEdges.length, red: 0, blue: 0, green: 0 };
+  for (const it of [...allNodes, ...allEdges]) counts[it.status]++;
+  document.getElementById('c-all').textContent = counts.all.toLocaleString();
+  document.getElementById('c-red').textContent = counts.red.toLocaleString();
+  document.getElementById('c-blue').textContent = counts.blue.toLocaleString();
+  document.getElementById('c-green').textContent = counts.green.toLocaleString();
+
+  const visNodes = allNodes.map(n => ({
+    id: n.id, label: n.kind === 'node' ? truncate(n.name, 22) : '',
+    shape: n.kind === 'node' ? 'dot' : 'dot', size: n.kind === 'node' ? 9 : 3,
+    color: COLOR[n.status], font: { size: n.kind === 'node' ? 11 : 0, color: getVar('--text') },
+    title: n.name, _raw: n,
+  }));
+  nodesDS = new vis.DataSet(visNodes);
+
+  const visEdges = allEdges.map(e => ({
+    id: e.id, from: e.from, to: e.to,
+    color: { color: COLOR[e.status].background, opacity: 0.55 },
+    width: e.status === 'green' ? 2 : 1,
+    arrows: { to: { enabled: true, scaleFactor: 0.4 } },
+    title: e.name, _raw: e,
+  }));
+  edgesDS = new vis.DataSet(visEdges);
+
+  const container = document.getElementById('graph');
+  network = new vis.Network(container, { nodes: nodesDS, edges: edgesDS }, {
+    physics: {
+      enabled: true, solver: 'forceAtlas2Based',
+      forceAtlas2Based: { gravitationalConstant: -60, centralGravity: 0.005, springLength: 120, springConstant: 0.08, damping: 0.4, avoidOverlap: 0.8 },
+      stabilization: { iterations: 200, fit: true },
+    },
+    interaction: { hover: true, tooltipDelay: 100, hideEdgesOnDrag: true, navigationButtons: false, keyboard: false },
+    nodes: { shape: 'dot', borderWidth: 1.5 },
+    edges: { smooth: { type: 'continuous', roundness: 0.2 }, selectionWidth: 3 },
+  });
+  network.once('stabilizationIterationsDone', () => {
+    network.setOptions({ physics: { enabled: false } });
+    document.getElementById('loading').style.display = 'none';
+  });
+  network.on('click', params => {
+    if (params.nodes.length) showPanel(params.nodes[0], 'node');
+    else if (params.edges.length) showPanel(params.edges[0], 'edge');
+    else clearPanel();
+  });
+}
+
+function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+function showPanel(id, kind) {
+  const ds = kind === 'node' ? nodesDS : edgesDS;
+  const item = ds.get(id);
+  const raw = item._raw;
+  selected = { id, kind };
+  const panel = document.getElementById('panel');
+  panel.innerHTML = `
+    <div class="field"><b>${kind}</b><span class="pill ${raw.status}">${raw.status}</span></div>
+    <div class="field"><b>Name</b>${esc(raw.name)}</div>
+    <div class="field"><b>Id</b>${esc(raw.id)}</div>
+    ${raw.detail ? `<div class="field"><b>${kind === 'edge' ? 'Confidence' : 'Type'}</b>${esc(raw.detail)}</div>` : ''}
+    ${raw.file ? `<div class="field"><b>File</b>${esc(raw.file)}</div>` : ''}
+    <div class="actions">
+      <button class="act-btn approve" onclick="act('approve')">Approve</button>
+      <button class="act-btn edit" onclick="onEdit()">Edit</button>
+      <button class="act-btn reject" onclick="act('reject')">Reject</button>
+    </div>
+  `;
+}
+function clearPanel() {
+  selected = null;
+  document.getElementById('panel').innerHTML = '<div class="placeholder">Click a node or edge to inspect it.</div>';
+}
+function onEdit() {
+  const label = window.prompt('New label / relation:');
+  if (label && label.trim()) act('edit', label.trim());
+}
+async function act(action, label) {
+  if (!selected) return;
+  try {
+    const res = await fetch('/api/review', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: selected.id, action, new_label: label || null }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'request failed');
+    showToast(`${action} applied to ${data.kind} '${selected.id}'`);
+    clearPanel();
+    await loadGraph();
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+document.getElementById('search').addEventListener('input', e => {
+  const q = e.target.value.trim().toLowerCase();
+  if (!q) { nodesDS.forEach(n => nodesDS.update({ id: n.id, font: { ...n.font, size: n.label ? 11 : 0 } })); return; }
+  const matches = allNodes.filter(n => n.name.toLowerCase().includes(q) || n.id.toLowerCase().includes(q)).map(n => n.id);
+  if (matches.length) network.selectNodes(matches);
+});
+
+const chipMap = { 'chip-all': 'all', 'chip-red': 'red', 'chip-blue': 'blue', 'chip-green': 'green' };
+Object.keys(chipMap).forEach(id => {
+  document.getElementById(id).addEventListener('click', () => {
+    document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    const status = chipMap[id];
+    if (status === 'all') { nodesDS.forEach(n => {}); network.unselectAll(); return; }
+    const ids = allNodes.filter(n => n.status === status).map(n => n.id);
+    network.selectNodes(ids);
+  });
+});
+document.getElementById('chip-all').classList.add('active');
+
+loadGraph();
+</script>
+</body>
+</html>

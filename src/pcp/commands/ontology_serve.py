@@ -25,7 +25,8 @@ from pcp.ontology import to_display_items, apply_review_action, ReviewError
 
 console = Console()
 
-TEMPLATE_PATH = Path(__file__).parent.parent / "templates" / "ontology_dashboard.html"
+GRAPH_TEMPLATE_PATH = Path(__file__).parent.parent / "templates" / "ontology_graph.html"
+TABLE_TEMPLATE_PATH = Path(__file__).parent.parent / "templates" / "ontology_dashboard.html"
 
 
 def _make_handler(pcp_dir: Path, project_name: str):
@@ -41,14 +42,19 @@ def _make_handler(pcp_dir: Path, project_name: str):
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_html(self, path: Path) -> None:
+            html = path.read_text().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+
         def do_GET(self):
             if self.path in ("/", ""):
-                html = TEMPLATE_PATH.read_text().encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(html)))
-                self.end_headers()
-                self.wfile.write(html)
+                self._send_html(GRAPH_TEMPLATE_PATH)
+            elif self.path == "/table":
+                self._send_html(TABLE_TEMPLATE_PATH)
             elif self.path == "/api/state":
                 state_path = get_ontology_state(pcp_dir)
                 if not state_path.exists():
@@ -59,6 +65,18 @@ def _make_handler(pcp_dir: Path, project_name: str):
                     "generated_at": state.get("generated_at"),
                     "project_name": project_name,
                     "items": to_display_items(state),
+                })
+            elif self.path == "/api/graph":
+                state_path = get_ontology_state(pcp_dir)
+                if not state_path.exists():
+                    self._send_json(200, {"project_name": project_name, "nodes": [], "edges": []})
+                    return
+                state = yaml.safe_load(state_path.read_text()) or {}
+                items = to_display_items(state)
+                self._send_json(200, {
+                    "project_name": project_name,
+                    "nodes": [i for i in items if i["kind"] == "node"],
+                    "edges": [i for i in items if i["kind"] == "edge"],
                 })
             else:
                 self._send_json(404, {"error": "not found"})
@@ -107,8 +125,8 @@ def ontology_serve(project_path: str | None, port: int, no_open: bool):
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(2)
 
-    if not TEMPLATE_PATH.exists():
-        console.print(f"[red]Error:[/red] template missing at {TEMPLATE_PATH}")
+    if not GRAPH_TEMPLATE_PATH.exists() or not TABLE_TEMPLATE_PATH.exists():
+        console.print(f"[red]Error:[/red] template missing under {GRAPH_TEMPLATE_PATH.parent}")
         sys.exit(2)
 
     project_name = pcp_dir.parent.name
@@ -117,6 +135,7 @@ def ontology_serve(project_path: str | None, port: int, no_open: bool):
     url = f"http://127.0.0.1:{port}/"
 
     console.print(f"[green]pcp ontology-serve[/green] listening on [bold]{url}[/bold] (127.0.0.1 only)")
+    console.print(f"[dim]Graph view (default): {url}  ·  Searchable table: {url}table[/dim]")
     console.print("[dim]Ctrl+C to stop.[/dim]")
 
     if not no_open:
