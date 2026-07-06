@@ -29,6 +29,7 @@ from pcp.commands.takeover import takeover
 from pcp.commands.ontology_extract import ontology_extract
 from pcp.commands.ontology_review import ontology_review
 from pcp.commands.ontology_status import ontology_status
+from pcp.commands.process_cmd import process_worker
 
 
 @click.group()
@@ -68,3 +69,4 @@ cli.add_command(takeover)
 cli.add_command(ontology_extract, name="ontology-extract")
 cli.add_command(ontology_review, name="ontology-review")
 cli.add_command(ontology_status, name="ontology-status")
+cli.add_command(process_worker, name="process-worker")

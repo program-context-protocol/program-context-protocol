@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "program-context-protocol"
-version = "0.1.17"
+version = "0.1.18"
 description = "PCP — prevent LLM hallucination and context drift across dev sessions"
 requires-python = ">=3.10"
 dependencies = [
@@ -21,6 +21,13 @@ dependencies = [
 # declared dependencies. Optional: pulls in numpy + ~20 tree-sitter grammars,
 # not needed for the core coupling computation, which only needs networkx.
 graph = ["graphifyy>=0.8"]
+# Process/workflow layer (Tier 2, Phase C): durability/retry spine wrapping
+# pcp build's existing per-module loop as a Temporal Activity/Workflow.
+# Only imported if `pcp process-worker` is actually invoked — everything
+# else in PCP works with zero awareness of this extra. Also requires the
+# separate `temporal` CLI (not pip-installable) for `temporal server
+# start-dev` locally; not needed just to install this extra.
+process = ["temporalio>=1.30"]
 
 [project.scripts]
 pcp = "pcp.cli:cli"
