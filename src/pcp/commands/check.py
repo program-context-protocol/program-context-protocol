@@ -19,29 +19,26 @@ BYPASS_LOG = "bypass_log.yaml"
 
 
 def _read_bypass_reason(commit_msg_file: Path | None) -> str | None:
-    """Only recognizes the marker in the commit message's trailer block (the
-    last contiguous run of non-blank lines, same convention as a git trailer
-    like Co-Authored-By). Confirmed bug: searching the whole message body let
-    a commit message that merely *describes* the marker in prose (e.g. "add
-    [pcp-bypass: reason] to your commit message") self-trigger a real bypass.
-    Scoping to the trailer block keeps that description safe while still
-    matching the documented usage (the marker as its own line at the end)."""
+    """Only recognizes the marker when it occupies an ENTIRE line by itself
+    (any line in the message, not just the last one). Confirmed bug, twice:
+    a paragraph-scoped version of this still self-triggered on a commit
+    message whose body was one unbroken multi-line block (no blank line
+    inside it) that merely *mentioned* the marker mid-sentence while
+    describing this exact fix. Requiring a full-line match is both simpler
+    and tighter: prose like "...scope the [pcp-bypass: reason] match to..."
+    shares its line with other text and can never match, while genuine usage
+    -- the marker alone on its own line, anywhere in the message -- always
+    does, matching the documented convention."""
     if not commit_msg_file or not commit_msg_file.exists():
         return None
     msg = commit_msg_file.read_text()
-    lines = [line for line in msg.splitlines() if not line.lstrip().startswith("#")]
-
-    trailer_lines: list[str] = []
-    for line in reversed(lines):
-        if not line.strip():
-            if trailer_lines:
-                break
+    for line in msg.splitlines():
+        if line.lstrip().startswith("#"):
             continue
-        trailer_lines.insert(0, line)
-
-    trailer_block = "\n".join(trailer_lines)
-    m = BYPASS_MARKER.search(trailer_block)
-    return m.group(1).strip() if m else None
+        m = BYPASS_MARKER.fullmatch(line.strip())
+        if m:
+            return m.group(1).strip()
+    return None
 
 
 def _log_bypass(pcp_dir: Path, reason: str, rules_checked: list[str]) -> None:
