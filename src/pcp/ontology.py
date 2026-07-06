@@ -98,7 +98,22 @@ def extract_ontology(project_root: Path) -> dict:
     try/except-ImportError shape as coupling.py's compute_communities).
     Otherwise {"available": True, "nodes": [...], "edges": [...]} in PCP's
     own normalized shape, all review_status defaulted (nothing starts green —
-    green is only ever reached via an explicit human review decision)."""
+    green is only ever reached via an explicit human review decision).
+
+    Prefers `graphify-out/graph.json` when it exists — the output of a full
+    `/graphify` skill run (structural AST + semantic subagent extraction),
+    which carries the actual meaning layer (rationale/concept nodes,
+    conceptually_related_to/semantically_similar_to edges, real AMBIGUOUS-
+    confidence items). Confirmed bug, found by actually looking: the plain
+    graphify.extract() library call this used to always go through is
+    AST-only — it can never produce a red item, because pure code structure
+    has no ambiguity to flag. Falls back to that plain call only when no
+    `/graphify` run has ever produced graph.json, so `pcp ontology-extract`
+    still works standalone without requiring the heavier skill pipeline."""
+    graph_json_path = project_root / "graphify-out" / "graph.json"
+    if graph_json_path.exists():
+        return _extract_from_graph_json(graph_json_path)
+
     try:
         from graphify.extract import extract, collect_files
     except ImportError:
@@ -112,6 +127,19 @@ def extract_ontology(project_root: Path) -> dict:
 
     nodes = [_normalize_node(n) for n in raw.get("nodes", [])]
     edges = [_normalize_edge(e) for e in raw.get("edges", [])]
+    return {"available": True, "nodes": nodes, "edges": edges}
+
+
+def _extract_from_graph_json(graph_json_path: Path) -> dict:
+    """graph.json is networkx node-link format: nodes carry file_type/label/
+    source_file same as the plain extract() output; edges live under "links"
+    (not "edges") but with the identical field shape (source/target/relation/
+    confidence/confidence_score/source_file) — _normalize_node/_normalize_edge
+    apply unchanged."""
+    import json
+    data = json.loads(graph_json_path.read_text())
+    nodes = [_normalize_node(n) for n in data.get("nodes", [])]
+    edges = [_normalize_edge(e) for e in data.get("links", [])]
     return {"available": True, "nodes": nodes, "edges": edges}
 
 
