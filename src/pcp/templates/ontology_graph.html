@@ -64,6 +64,16 @@
   .act-btn.reject:hover { border-color: var(--red); color: var(--red); }
   .act-btn.edit:hover { border-color: var(--accent); color: var(--accent); }
   .act-btn:disabled { opacity: 0.4; cursor: default; }
+  .conn-list { display: flex; flex-direction: column; gap: 0.3rem; }
+  .conn-row {
+    display: flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.5rem; border-radius: 6px;
+    border: 1px solid var(--border); cursor: pointer; font-size: 0.75rem;
+  }
+  .conn-row:hover { background: var(--bg); }
+  .conn-arrow { color: var(--muted); font-weight: 700; }
+  .conn-name { flex: 1; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+  .conn-rel { color: var(--muted); font-size: 0.68rem; white-space: nowrap; }
+  .field .conn-name, .field .conn-rel { display: inline; }
   #toast {
     position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%) translateY(120%);
     background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.9rem;
@@ -176,23 +186,86 @@ async function loadGraph() {
 
 function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 
+function nodeName(id) {
+  const n = nodesDS.get(id);
+  return n ? n._raw.name : id;
+}
+
+function edgeRelation(raw) {
+  // raw.name is "source -relation-> target" (ids) -- pull just the relation word out
+  const m = raw.name.match(/-(.+?)->/);
+  return m ? m[1] : (raw.detail || 'related_to');
+}
+
+function connectionsHtml(nodeId) {
+  const edgeIds = network.getConnectedEdges(nodeId);
+  if (!edgeIds.length) return '<div class="field placeholder">No connections.</div>';
+  const rows = edgeIds.map(eid => {
+    const e = edgesDS.get(eid);
+    if (!e) return '';
+    const raw = e._raw;
+    const outgoing = raw.from === nodeId;
+    const otherId = outgoing ? raw.to : raw.from;
+    const arrow = outgoing ? '&rarr;' : '&larr;';
+    const relation = edgeRelation(raw);
+    return `<div class="conn-row" onclick="focusNode('${otherId.replace(/'/g, "\\'")}')">
+      <span class="conn-arrow">${arrow}</span>
+      <span class="conn-name">${esc(nodeName(otherId))}</span>
+      <span class="conn-rel">${esc(relation)}</span>
+      <span class="pill ${raw.status}" style="font-size:0.6rem;">${raw.status}</span>
+    </div>`;
+  }).join('');
+  return `<div class="conn-list">${rows}</div>`;
+}
+
+function focusNode(id) {
+  if (!nodesDS.get(id)) return;
+  network.selectNodes([id]);
+  network.focus(id, { scale: 1.2, animation: true });
+  showPanel(id, 'node');
+}
+
 function showPanel(id, kind) {
   const ds = kind === 'node' ? nodesDS : edgesDS;
   const item = ds.get(id);
   const raw = item._raw;
   selected = { id, kind };
   const panel = document.getElementById('panel');
+
+  if (kind === 'edge') {
+    const relation = edgeRelation(raw);
+    panel.innerHTML = `
+      <div class="field"><b>edge</b><span class="pill ${raw.status}">${raw.status}</span></div>
+      <div class="field"><b>What connects</b>
+        <span class="conn-name" onclick="focusNode('${raw.from.replace(/'/g, "\\'")}')">${esc(nodeName(raw.from))}</span>
+        <span class="conn-rel">&rarr; ${esc(relation)} &rarr;</span>
+        <span class="conn-name" onclick="focusNode('${raw.to.replace(/'/g, "\\'")}')">${esc(nodeName(raw.to))}</span>
+      </div>
+      <div class="field"><b>Confidence</b>${esc(raw.detail || 'unknown')}</div>
+      ${raw.file ? `<div class="field"><b>File</b>${esc(raw.file)}</div>` : ''}
+      <div class="field"><b>Id</b>${esc(raw.id)}</div>
+      <div class="actions">
+        <button class="act-btn approve" onclick="act('approve')">Approve</button>
+        <button class="act-btn edit" onclick="onEdit()">Edit</button>
+        <button class="act-btn reject" onclick="act('reject')">Reject</button>
+      </div>
+    `;
+    return;
+  }
+
   panel.innerHTML = `
-    <div class="field"><b>${kind}</b><span class="pill ${raw.status}">${raw.status}</span></div>
-    <div class="field"><b>Name</b>${esc(raw.name)}</div>
-    <div class="field"><b>Id</b>${esc(raw.id)}</div>
-    ${raw.detail ? `<div class="field"><b>${kind === 'edge' ? 'Confidence' : 'Type'}</b>${esc(raw.detail)}</div>` : ''}
+    <div class="field"><b>node</b><span class="pill ${raw.status}">${raw.status}</span></div>
+    <div class="field"><b>Name / meaning</b>${esc(raw.name)}</div>
+    <div class="field"><b>Type</b>${esc(raw.detail || 'code')}</div>
     ${raw.file ? `<div class="field"><b>File</b>${esc(raw.file)}</div>` : ''}
+    <div class="field"><b>Id</b>${esc(raw.id)}</div>
     <div class="actions">
       <button class="act-btn approve" onclick="act('approve')">Approve</button>
       <button class="act-btn edit" onclick="onEdit()">Edit</button>
       <button class="act-btn reject" onclick="act('reject')">Reject</button>
     </div>
+    <div class="field"><b>Connections (in / out)</b></div>
+    ${connectionsHtml(id)}
   `;
 }
 function clearPanel() {
