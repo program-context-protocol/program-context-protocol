@@ -26,6 +26,9 @@ from pcp.commands.deploy import deploy
 from pcp.commands.capture import capture
 from pcp.commands.provenance import provenance
 from pcp.commands.takeover import takeover
+from pcp.commands.ontology_extract import ontology_extract
+from pcp.commands.ontology_review import ontology_review
+from pcp.commands.ontology_status import ontology_status
 
 
 @click.group()
@@ -62,3 +65,6 @@ cli.add_command(deploy)
 cli.add_command(capture)
 cli.add_command(provenance)
 cli.add_command(takeover)
+cli.add_command(ontology_extract, name="ontology-extract")
+cli.add_command(ontology_review, name="ontology-review")
+cli.add_command(ontology_status, name="ontology-status")

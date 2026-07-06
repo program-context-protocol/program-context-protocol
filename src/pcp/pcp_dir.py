@@ -29,3 +29,7 @@ def get_objective(pcp_dir: Path) -> Path:
 
 def get_decomposition(pcp_dir: Path) -> Path:
     return pcp_dir / "strategy" / "decomposition.md"
+
+
+def get_ontology_state(pcp_dir: Path) -> Path:
+    return pcp_dir / "ontology_state.yaml"

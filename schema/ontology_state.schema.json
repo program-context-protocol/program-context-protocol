@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pcp-protocol.com/schema/ontology_state.schema.json",
+  "title": "PCP Ontology State",
+  "type": "object",
+  "required": ["generated_at", "nodes", "edges"],
+  "additionalProperties": false,
+  "properties": {
+    "generated_at": { "type": "string" },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "id", "label", "review_status"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "type": "string", "enum": ["node"] },
+          "id": { "type": "string" },
+          "label": { "type": "string" },
+          "file_type": { "type": "string" },
+          "source_file": { "type": ["string", "null"] },
+          "rationale": { "type": ["string", "null"] },
+          "review_status": { "type": "string", "enum": ["red", "blue", "green"] }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "id", "source", "target", "relation", "review_status"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "type": "string", "enum": ["edge"] },
+          "id": { "type": "string" },
+          "source": { "type": "string" },
+          "target": { "type": "string" },
+          "relation": { "type": "string" },
+          "confidence": { "type": ["string", "null"], "enum": ["EXTRACTED", "INFERRED", "AMBIGUOUS", null] },
+          "confidence_score": { "type": ["number", "null"] },
+          "source_file": { "type": ["string", "null"] },
+          "review_status": { "type": "string", "enum": ["red", "blue", "green"] }
+        }
+      }
+    }
+  }
+}
