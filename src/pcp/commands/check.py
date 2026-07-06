@@ -1,5 +1,6 @@
 """pcp check — Layer 1 pre-commit gate (deterministic, no LLM, <1s)."""
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -18,10 +19,28 @@ BYPASS_LOG = "bypass_log.yaml"
 
 
 def _read_bypass_reason(commit_msg_file: Path | None) -> str | None:
+    """Only recognizes the marker in the commit message's trailer block (the
+    last contiguous run of non-blank lines, same convention as a git trailer
+    like Co-Authored-By). Confirmed bug: searching the whole message body let
+    a commit message that merely *describes* the marker in prose (e.g. "add
+    [pcp-bypass: reason] to your commit message") self-trigger a real bypass.
+    Scoping to the trailer block keeps that description safe while still
+    matching the documented usage (the marker as its own line at the end)."""
     if not commit_msg_file or not commit_msg_file.exists():
         return None
     msg = commit_msg_file.read_text()
-    m = BYPASS_MARKER.search(msg)
+    lines = [line for line in msg.splitlines() if not line.lstrip().startswith("#")]
+
+    trailer_lines: list[str] = []
+    for line in reversed(lines):
+        if not line.strip():
+            if trailer_lines:
+                break
+            continue
+        trailer_lines.insert(0, line)
+
+    trailer_block = "\n".join(trailer_lines)
+    m = BYPASS_MARKER.search(trailer_block)
     return m.group(1).strip() if m else None
 
 
@@ -72,6 +91,24 @@ def _run_ast_rule(rule: dict, staged_files: list[str], project_root: Path) -> li
             line_no = content[: m.start()].count("\n") + 1
             violations.append(f"{rel_path}:{line_no}: matched pattern /{rule['pattern']}/")
 
+    return violations
+
+
+def run_protected_path_rule(rule: dict, staged_files: list[str]) -> list[str]:
+    """Violations for a check:protected_path ci_rule. Only enforced inside a
+    pcp-build agent session (PCP_AGENT_SESSION=1 in the environment, set by
+    build.py before spawning the coding agent) — a human's own interactive
+    commit (pcp pm, direct editing) never sets this and is never blocked."""
+    if os.environ.get("PCP_AGENT_SESSION") != "1":
+        return []
+    scope = rule.get("scope", [])
+    violations = []
+    for rel_path in staged_files:
+        if _match_scope(rel_path, scope):
+            violations.append(
+                f"{rel_path}: protected spec file modified by an agent session "
+                "(human-owned, never agent-writable)"
+            )
     return violations
 
 
@@ -149,17 +186,18 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
     data = load_yaml(ci_rules_path)
     rules = [r for r in data.get("rules", []) if r.get("check") == "ast_pattern"]
     file_rules = [r for r in data.get("rules", []) if r.get("check") == "file_exists"]
+    protected_rules = [r for r in data.get("rules", []) if r.get("check") == "protected_path"]
     module_names = get_module_names(pcp_dir)
 
-    if not rules and not file_rules:
-        console.print("[dim]No ast_pattern or file_exists rules in ci_rules.yaml.[/dim]")
+    if not rules and not file_rules and not protected_rules:
+        console.print("[dim]No ast_pattern, file_exists, or protected_path rules in ci_rules.yaml.[/dim]")
         sys.exit(0)
 
     # Check for bypass
     msg_file = Path(commit_msg_file) if commit_msg_file else None
     bypass_reason = _read_bypass_reason(msg_file)
     if bypass_reason:
-        rule_ids = [r["id"] for r in rules + file_rules]
+        rule_ids = [r["id"] for r in rules + file_rules + protected_rules]
         _log_bypass(pcp_dir, bypass_reason, rule_ids)
         from pcp import telemetry
         telemetry.record(
@@ -226,6 +264,21 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
 
     for rule in rules:
         violations = _run_ast_rule(rule, staged, project_root)
+        if staged_only and baseline_keys:
+            violations = [v for v in violations if v not in baseline_keys]
+        if not violations:
+            continue
+        severity = rule.get("severity", "advisory")
+        entry = {"rule": rule, "violations": violations}
+        if severity == "hard_block":
+            hard_violations.append(entry)
+        else:
+            advisory_violations.append(entry)
+
+    # protected_path rules are diff-scoped, like ast_pattern — only fire inside
+    # a pcp-build agent session (see run_protected_path_rule's env-var check).
+    for rule in protected_rules:
+        violations = run_protected_path_rule(rule, staged)
         if staged_only and baseline_keys:
             violations = [v for v in violations if v not in baseline_keys]
         if not violations:

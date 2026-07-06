@@ -21,7 +21,7 @@
           "name": { "type": "string" },
           "check": {
             "type": "string",
-            "enum": ["ast_pattern", "file_exists", "llm_semantic"]
+            "enum": ["ast_pattern", "file_exists", "llm_semantic", "protected_path"]
           },
           "pattern": { "type": "string" },
           "target": { "type": "string" },
@@ -48,6 +48,10 @@
           {
             "if": { "properties": { "check": { "const": "llm_semantic" } } },
             "then": { "required": ["description"] }
+          },
+          {
+            "if": { "properties": { "check": { "const": "protected_path" } } },
+            "then": { "required": ["scope"] }
           }
         ]
       }

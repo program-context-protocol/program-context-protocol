@@ -308,12 +308,21 @@ def _run_layer1_check(pcp_dir: Path, changed_files: list[str], ctx: dict) -> lis
         data = load_yaml(ci_rules_path)
         ast_rules = [r for r in data.get("rules", []) if r.get("check") == "ast_pattern"]
         file_rules = [r for r in data.get("rules", []) if r.get("check") == "file_exists"]
-        from pcp.commands.check import _run_ast_rule, run_file_exists_rule, get_module_names
+        protected_rules = [r for r in data.get("rules", []) if r.get("check") == "protected_path"]
+        from pcp.commands.check import _run_ast_rule, run_file_exists_rule, run_protected_path_rule, get_module_names
         for r in ast_rules:
             if r.get("severity") == "hard_block":
                 v = _run_ast_rule(r, changed_files, pcp_dir.parent)
                 if v:
                     msg = f"AST Rule [{r['id']}] {r['name']} violation: {', '.join(v)}"
+                    if r.get("message"):
+                        msg += f" → Fix: {r['message']}"
+                    violations.append(msg)
+        for r in protected_rules:
+            if r.get("severity") == "hard_block":
+                v = run_protected_path_rule(r, changed_files)
+                if v:
+                    msg = f"Protected Path Rule [{r['id']}] {r['name']} violation: {', '.join(v)}"
                     if r.get("message"):
                         msg += f" → Fix: {r['message']}"
                     violations.append(msg)
@@ -486,6 +495,13 @@ def build(module_name: str | None, project_path: str | None):
     if num_waves > 1:
         order_desc = ", ".join(f"{m['name']}(w{wave_of[m['name']]})" for m in modules_to_build)
         console.print(f"[dim]Build order: {num_waves} wave(s) by dependency — {order_desc}[/dim]")
+
+    # Marks this process (and any subprocess it spawns — the coding agent, and
+    # any git commit that agent runs via its own shell access) as an automated
+    # build-agent session. check.py's protected_path rule (R003) only hard-blocks
+    # spec-file edits when this is set — a human's own interactive commit never
+    # sets it and is never blocked from editing spec files directly.
+    os.environ["PCP_AGENT_SESSION"] = "1"
 
     max_sessions = _max_build_sessions()
     session_count = 0

@@ -39,6 +39,11 @@ def capture(project_path: str | None, transcript_file: str | None):
 
     if transcript_file:
         transcript_path = Path(transcript_file)
+        # Claude Code transcripts are always named <session-id>.jsonl (same
+        # convention pcp.capture.find_transcript_for_session relies on) — derive
+        # it from the filename so manual/testing runs still get real traceability
+        # instead of session_id=None / source="session:unknown".
+        session_id = transcript_path.stem
     else:
         raw = sys.stdin.read() if not sys.stdin.isatty() else ""
         if raw.strip():

@@ -167,14 +167,28 @@ def _next_brd_id(items: list[dict]) -> str:
     return f"BRD-{max(nums, default=0) + 1:03d}"
 
 
+def _normalize_desc(s: str) -> str:
+    return " ".join(s.split()).strip().lower()
+
+
 def apply_business_items(pcp_dir: Path, items: list[dict], source: str) -> Path:
     """Merge distilled business items into brd_items.yaml, mark supersessions,
-    regenerate brd.md. Returns the brd.md path."""
+    regenerate brd.md. Returns the brd.md path.
+
+    Dedupes against already-active items by normalized description text. Fixes
+    a confirmed bug: the classifier can (and did, in one real run) emit the same
+    substantive point twice — once per mention across a long transcript — with
+    byte-identical description text; nothing previously stopped both copies
+    from becoming separate BRD-NNN entries."""
     existing = _load_brd_items(pcp_dir)
     by_id = {i["id"]: i for i in existing}
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    seen_active = {_normalize_desc(i["description"]) for i in existing if i.get("status") == "active"}
 
     for item in items:
+        desc_key = _normalize_desc(item["description"])
+        if desc_key in seen_active:
+            continue
         supersedes = item.get("supersedes")
         new_id = _next_brd_id(existing)
         if supersedes and supersedes in by_id:
@@ -193,6 +207,7 @@ def apply_business_items(pcp_dir: Path, items: list[dict], source: str) -> Path:
         }
         existing.append(new_entry)
         by_id[new_id] = new_entry
+        seen_active.add(desc_key)
 
     (pcp_dir / "brd_items.yaml").write_text(yaml.dump({"items": existing}, default_flow_style=False))
     return _write_brd_md(pcp_dir, existing, now)
