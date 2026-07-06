@@ -20,9 +20,77 @@ Never touches objective.md/spec.yaml/etc. — same "advisory, additive only"
 posture as pcp audit/pcp capture.
 """
 
+import yaml
 from pathlib import Path
 
+from pcp.pcp_dir import get_ontology_state
+from pcp import ontology_review_log
+
 AMBIGUOUS_SCORE_THRESHOLD = 0.65
+
+
+class ReviewError(Exception):
+    pass
+
+
+def apply_review_action(pcp_dir: Path, item_id: str, action: str, new_label: str | None = None) -> dict:
+    """Shared logic behind `pcp ontology-review` and `pcp ontology-serve`'s
+    approve/reject/edit buttons — one implementation, two callers, so the
+    CLI and the live dashboard can never drift apart on what an action does.
+
+    action: "approve" | "reject" | "edit" (edit requires new_label).
+    Raises ReviewError with a human-readable message on any failure (no
+    state file, unknown id, missing label for edit) — callers translate
+    that into a CLI exit code or an HTTP error response as appropriate.
+    Returns {"kind": "node"|"edge", "action": action}.
+    """
+    if action == "edit" and not new_label:
+        raise ReviewError("--edit requires a new label")
+
+    state_path = get_ontology_state(pcp_dir)
+    if not state_path.exists():
+        raise ReviewError("No ontology_state.yaml — run `pcp ontology-extract` first.")
+
+    state = yaml.safe_load(state_path.read_text()) or {}
+    nodes = state.get("nodes", [])
+    edges = state.get("edges", [])
+
+    item = next((n for n in nodes if n["id"] == item_id), None)
+    collection, kind = nodes, "node"
+    if item is None:
+        item = next((e for e in edges if e["id"] == item_id), None)
+        collection, kind = edges, "edge"
+
+    if item is None:
+        raise ReviewError(f"no node or edge with id '{item_id}' in ontology_state.yaml.")
+
+    original_confidence_score = item.get("confidence_score")
+
+    if action == "reject":
+        collection.remove(item)
+    elif action == "approve":
+        item["review_status"] = "green"
+    elif action == "edit":
+        if kind == "node":
+            item["label"] = new_label
+        else:
+            item["relation"] = new_label
+        item["review_status"] = "green"
+    else:
+        raise ReviewError(f"unknown action '{action}' (must be approve/reject/edit)")
+
+    state_path.write_text(yaml.dump(
+        {"generated_at": state.get("generated_at"), "nodes": nodes, "edges": edges},
+        default_flow_style=False, sort_keys=False,
+    ))
+
+    ontology_review_log.record(
+        pcp_dir, item_id=item_id, kind=kind, action=action,
+        original_confidence_score=original_confidence_score,
+        new_label=new_label if action == "edit" else None,
+    )
+
+    return {"kind": kind, "action": action}
 
 
 def extract_ontology(project_root: Path) -> dict:
@@ -130,3 +198,25 @@ def merge_with_existing(fresh: dict, existing: dict | None, rejected_ids: set[st
         merged_edges.append(merged)
 
     return {"available": True, "nodes": merged_nodes, "edges": merged_edges}
+
+
+def to_display_items(state: dict) -> list[dict]:
+    """Flattens nodes+edges from ontology_state.yaml into one list shaped for
+    a review UI: {id, kind, name, detail, file, status}. Shared by the
+    ontology-serve API and any future consumer that needs the same flat
+    display shape (avoids re-deriving this per caller)."""
+    items = []
+    for n in state.get("nodes", []):
+        items.append({
+            "id": n["id"], "kind": "node", "name": n.get("label", n["id"]),
+            "detail": n.get("file_type", ""), "file": n.get("source_file") or "",
+            "status": n["review_status"],
+        })
+    for e in state.get("edges", []):
+        items.append({
+            "id": e["id"], "kind": "edge",
+            "name": f"{e['source']} -{e['relation']}-> {e['target']}",
+            "detail": e.get("confidence") or "", "file": e.get("source_file") or "",
+            "status": e["review_status"],
+        })
+    return items

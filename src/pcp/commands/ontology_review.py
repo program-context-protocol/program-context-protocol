@@ -11,11 +11,10 @@ import sys
 from pathlib import Path
 
 import click
-import yaml
 from rich.console import Console
 
-from pcp.pcp_dir import find_pcp_dir, get_ontology_state, NoPCPDir
-from pcp import ontology_review_log
+from pcp.pcp_dir import find_pcp_dir, NoPCPDir
+from pcp.ontology import apply_review_action, ReviewError
 
 console = Console()
 
@@ -42,51 +41,13 @@ def ontology_review(item_id: str, approve: bool, reject: bool, new_label: str | 
         console.print("[red]Error:[/red] pass exactly one of --approve, --reject, --edit <label>.")
         sys.exit(2)
 
-    state_path = get_ontology_state(pcp_dir)
-    if not state_path.exists():
-        console.print("[dim]No ontology_state.yaml — run `pcp ontology-extract` first.[/dim]")
-        sys.exit(0)
+    action = "reject" if reject else "approve" if approve else "edit"
 
-    state = yaml.safe_load(state_path.read_text()) or {}
-    nodes = state.get("nodes", [])
-    edges = state.get("edges", [])
-
-    item = next((n for n in nodes if n["id"] == item_id), None)
-    collection, kind = nodes, "node"
-    if item is None:
-        item = next((e for e in edges if e["id"] == item_id), None)
-        collection, kind = edges, "edge"
-
-    if item is None:
-        console.print(f"[red]Error:[/red] no node or edge with id '{item_id}' in ontology_state.yaml.")
+    try:
+        result = apply_review_action(pcp_dir, item_id, action, new_label)
+    except ReviewError as e:
+        console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
 
-    original_confidence_score = item.get("confidence_score")
-
-    if reject:
-        collection.remove(item)
-        action = "reject"
-    elif approve:
-        item["review_status"] = "green"
-        action = "approve"
-    else:
-        if kind == "node":
-            item["label"] = new_label
-        else:
-            item["relation"] = new_label
-        item["review_status"] = "green"
-        action = "edit"
-
-    state_path.write_text(yaml.dump(
-        {"generated_at": state.get("generated_at"), "nodes": nodes, "edges": edges},
-        default_flow_style=False, sort_keys=False,
-    ))
-
-    ontology_review_log.record(
-        pcp_dir, item_id=item_id, kind=kind, action=action,
-        original_confidence_score=original_confidence_score,
-        new_label=new_label if action == "edit" else None,
-    )
-
-    console.print(f"[green]{action}[/green] applied to {kind} '{item_id}'.")
+    console.print(f"[green]{result['action']}[/green] applied to {result['kind']} '{item_id}'.")
     sys.exit(0)

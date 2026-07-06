@@ -31,6 +31,7 @@ from pcp.commands.ontology_review import ontology_review
 from pcp.commands.ontology_status import ontology_status
 from pcp.commands.process_cmd import process_worker
 from pcp.commands.observatory import observatory
+from pcp.commands.ontology_serve import ontology_serve
 
 
 @click.group()
@@ -72,3 +73,4 @@ cli.add_command(ontology_review, name="ontology-review")
 cli.add_command(ontology_status, name="ontology-status")
 cli.add_command(process_worker, name="process-worker")
 cli.add_command(observatory)
+cli.add_command(ontology_serve, name="ontology-serve")
