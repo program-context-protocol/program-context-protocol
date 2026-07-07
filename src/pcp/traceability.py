@@ -57,7 +57,7 @@ class TraceabilityError(Exception):
     pass
 
 
-def _load_active_brd_items(pcp_dir: Path) -> list[dict]:
+def load_active_brd_items(pcp_dir: Path) -> list[dict]:
     path = pcp_dir / "brd_items.yaml"
     if not path.exists():
         return []
@@ -65,7 +65,7 @@ def _load_active_brd_items(pcp_dir: Path) -> list[dict]:
     return [i for i in data.get("items", []) if i.get("status") == "active"]
 
 
-def _load_modules_info(pcp_dir: Path) -> list[dict]:
+def load_modules_info(pcp_dir: Path) -> list[dict]:
     modules_dir = get_modules_dir(pcp_dir)
     if not modules_dir.exists():
         return []
@@ -78,11 +78,12 @@ def _load_modules_info(pcp_dir: Path) -> list[dict]:
             "name": spec.get("module", spec_path.parent.name),
             "description": (spec.get("description") or "").strip(),
             "objective_coverage": spec.get("objective_coverage") or [],
+            "dependencies": spec.get("dependencies") or [],
         })
     return modules
 
 
-def _module_criteria(pcp_dir: Path, module_name: str) -> list[dict]:
+def module_criteria(pcp_dir: Path, module_name: str) -> list[dict]:
     """Confirmed bug, same pattern as observatory.py's earlier one: raw
     acceptance.yaml status is the pre-scan default ("pending"), not the
     actually-recorded outcome. Must apply the current_state.md overlay the
@@ -113,8 +114,8 @@ def build_traceability(pcp_dir: Path) -> dict:
     {"available": True, "links": [...]} or {"available": False} if there
     are no active BRD items / no modules to match against (nothing to
     classify, not an error)."""
-    items = _load_active_brd_items(pcp_dir)
-    modules = _load_modules_info(pcp_dir)
+    items = load_active_brd_items(pcp_dir)
+    modules = load_modules_info(pcp_dir)
     if not items or not modules:
         return {"available": False}
 
@@ -223,10 +224,10 @@ def build_full_view(pcp_dir: Path) -> dict:
     the current suggested/reviewed links. Small data volume (features and
     modules are both single-digit-to-low-double-digit counts) -- no
     pagination needed, unlike the code ontology's ~2500 items."""
-    features = _load_active_brd_items(pcp_dir)
-    modules = _load_modules_info(pcp_dir)
+    features = load_active_brd_items(pcp_dir)
+    modules = load_modules_info(pcp_dir)
     for m in modules:
-        m["criteria"] = _module_criteria(pcp_dir, m["name"])
+        m["criteria"] = module_criteria(pcp_dir, m["name"])
 
     state_path = get_traceability_map(pcp_dir)
     links = []

@@ -35,6 +35,7 @@ from pcp.commands.ontology_serve import ontology_serve
 from pcp.commands.trace_map import trace_map
 from pcp.commands.trace_review import trace_review
 from pcp.commands.trace_serve import trace_serve
+from pcp.commands.domain_serve import domain_serve
 
 
 @click.group()
@@ -80,3 +81,4 @@ cli.add_command(ontology_serve, name="ontology-serve")
 cli.add_command(trace_map, name="trace-map")
 cli.add_command(trace_review, name="trace-review")
 cli.add_command(trace_serve, name="trace-serve")
+cli.add_command(domain_serve, name="domain-serve")
