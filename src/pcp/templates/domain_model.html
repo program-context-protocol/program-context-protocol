@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <title>PCP Domain Model</title>
+<script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js"></script>
 <style>
   :root {
     --bg: #f5f4f0; --surface: #ffffff; --surface-2: #ecebe6; --border: #dcdad2;
@@ -56,6 +57,22 @@
   .gate-eval { font-size: 0.76rem; color: var(--muted); margin-top: 0.3rem; display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .gate-eval .stat { font-family: ui-monospace, monospace; }
   .empty-note { color: var(--muted); font-size: 0.82rem; }
+
+  #graph-canvas { width: 100%; height: 460px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+  .builder-hint { font-size: 0.76rem; color: var(--muted); margin-top: 0.6rem; line-height: 1.5; }
+  .builder-hint b { color: var(--text); }
+  #toast {
+    position: fixed; bottom: 1.25rem; left: 50%; transform: translateX(-50%) translateY(120%);
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    padding: 0.6rem 1rem; border-radius: 8px; box-shadow: var(--shadow);
+    font-size: 0.8rem; transition: transform 0.2s ease; z-index: 20;
+  }
+  #toast.show { transform: translateX(-50%) translateY(0); }
+  #toast.err { border-color: var(--red); color: var(--red); }
+  /* vis-network's default manipulation toolbar, lightly themed to match */
+  div.vis-manipulation { background: var(--surface); border-bottom: 1px solid var(--border); }
+  div.vis-button { box-shadow: none; }
+  div.vis-close { background-color: transparent; }
 </style>
 </head>
 <body>
@@ -67,51 +84,17 @@
   </header>
 
   <section>
-    <h2>The Model</h2>
-    <svg id="diagram" viewBox="0 0 800 380" style="width:100%; height:auto; max-width:640px; display:block; margin:0 auto;">
-      <defs>
-        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"></path>
-        </marker>
-      </defs>
-      <g stroke="var(--accent)" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
-        <path d="M400,150 L400,80"></path>
-        <path d="M400,200 L400,290"></path>
-        <path d="M250,150 L340,150"></path>
-        <path d="M560,290 L470,290"></path>
-        <path d="M470,160 C 540,160 540,190 470,190"></path>
-      </g>
-      <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" font-size="12" fill="var(--muted)" text-anchor="middle">
-        <text x="400" y="115">covers</text>
-        <text x="400" y="265">contains</text>
-        <text x="295" y="140">maps to</text>
-        <text x="515" y="280">evaluates</text>
-        <text x="545" y="165">depends on</text>
-      </g>
-      <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif">
-        <g>
-          <rect x="330" y="30" width="140" height="50" rx="10" fill="var(--surface-2)" stroke="var(--border)"></rect>
-          <text x="400" y="60" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Objective</text>
-        </g>
-        <g>
-          <rect x="330" y="150" width="140" height="50" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
-          <text x="400" y="180" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Module</text>
-        </g>
-        <g>
-          <rect x="330" y="290" width="140" height="50" rx="10" fill="var(--surface-2)" stroke="var(--border)"></rect>
-          <text x="400" y="320" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Criterion</text>
-        </g>
-        <g>
-          <rect x="110" y="125" width="140" height="50" rx="10" fill="var(--surface-2)" stroke="var(--border)"></rect>
-          <text x="180" y="155" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Requirement</text>
-        </g>
-        <g>
-          <rect x="560" y="265" width="140" height="50" rx="10" fill="var(--surface-2)" stroke="var(--border)"></rect>
-          <text x="630" y="295" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Gate</text>
-        </g>
-      </g>
-    </svg>
-    <div class="subtitle" style="text-align:center; margin-top:0.6rem;">5 objects, 5 relationships. Everything below is real data flowing through this exact shape.</div>
+    <h2>The Model — Visual Builder</h2>
+    <div id="graph-canvas"></div>
+    <div class="builder-hint">
+      <b>Drag</b> a Requirement onto a Module to propose it implements that requirement (starts unreviewed, blue).
+      <b>Double-click</b> a Module or Requirement to edit its description directly.
+      <b>Select an edge + delete</b> to reject a proposed/confirmed link.
+      Click any Requirement→Module edge to approve it. Objective/Gate/Criterion aren't editable here.
+      <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--red); margin-left:0.5rem;"></span> unmapped
+      <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--blue); margin-left:0.3rem;"></span> proposed
+      <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--green); margin-left:0.3rem;"></span> confirmed
+    </div>
   </section>
 
   <section>
@@ -185,9 +168,147 @@ async function load() {
       <div class="gate-eval">${evalHtml}</div>
     </div>`;
   }).join('') || '<div class="empty-note">No gates catalogued.</div>';
+
+  renderGraph(d);
+}
+
+let network = null;
+let toastTimer = null;
+
+function showToast(msg, isErr) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.toggle('err', !!isErr);
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+async function postJson(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'request failed');
+  return data;
+}
+
+function renderGraph(d) {
+  const nodes = [];
+  const edges = [];
+  const accent = cssVar('--accent'), accentSoft = cssVar('--accent-soft'), muted = cssVar('--muted');
+  const red = cssVar('--red'), redBg = cssVar('--red-bg'), blue = cssVar('--blue'), blueBg = cssVar('--blue-bg');
+  const green = cssVar('--green'), greenBg = cssVar('--green-bg');
+
+  nodes.push({ id: 'objective', label: 'Objective', kind: 'objective',
+    shape: 'box', color: { background: accentSoft, border: accent }, font: { color: cssVar('--text') } });
+
+  d.modules.forEach(m => {
+    nodes.push({ id: `module:${m.name}`, label: m.name, title: m.description, kind: 'module', refId: m.name,
+      shape: 'box', color: { background: accentSoft, border: accent }, font: { color: cssVar('--text') } });
+    edges.push({ id: `covers:${m.name}`, from: `module:${m.name}`, to: 'objective', arrows: 'to',
+      label: 'covers', font: { size: 9, color: muted, strokeWidth: 0 }, color: { color: muted }, static: true });
+  });
+
+  d.requirements.forEach(r => {
+    const mapped = r.maps_to_modules.length > 0;
+    nodes.push({ id: `req:${r.id}`, label: r.id, title: r.description, kind: 'requirement', refId: r.id,
+      shape: 'ellipse', color: { background: mapped ? greenBg : redBg, border: mapped ? green : red },
+      font: { color: cssVar('--text') } });
+  });
+
+  (d.links || []).forEach(l => {
+    const color = l.review_status === 'green' ? green : l.review_status === 'blue' ? blue : red;
+    edges.push({ id: `link:${l.id}`, from: `req:${l.feature_id}`, to: `module:${l.module}`, arrows: 'to',
+      color: { color }, linkId: l.id, status: l.review_status,
+      label: l.review_status === 'green' ? '' : l.review_status, font: { size: 9, color, strokeWidth: 0 } });
+  });
+
+  const container = document.getElementById('graph-canvas');
+  const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+
+  const options = {
+    autoResize: true,
+    physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -60, springLength: 130, springConstant: 0.06 },
+      stabilization: { iterations: 150 } },
+    interaction: { hover: true },
+    manipulation: {
+      enabled: true,
+      addNode: function (nodeData, callback) {
+        const desc = window.prompt('New requirement description:');
+        if (desc && desc.trim()) {
+          postJson('/api/model/add-requirement', { description: desc.trim() })
+            .then(() => { showToast('Requirement added.'); load(); })
+            .catch(e => showToast(e.message, true));
+        }
+        callback(null);
+      },
+      addEdge: function (edgeData, callback) {
+        const from = data.nodes.get(edgeData.from), to = data.nodes.get(edgeData.to);
+        let featureId = null, module = null;
+        if (from && from.kind === 'requirement' && to && to.kind === 'module') { featureId = from.refId; module = to.refId; }
+        else if (from && from.kind === 'module' && to && to.kind === 'requirement') { featureId = to.refId; module = from.refId; }
+        if (featureId && module) {
+          postJson('/api/model/propose-link', { feature_id: featureId, module })
+            .then(() => { showToast('Link proposed (unreviewed).'); load(); })
+            .catch(e => showToast(e.message, true));
+        } else {
+          showToast('Only Requirement ↔ Module connections are supported.', true);
+        }
+        callback(null);
+      },
+      editNode: function (nodeData, callback) {
+        const node = data.nodes.get(nodeData.id);
+        if (!node || (node.kind !== 'module' && node.kind !== 'requirement')) {
+          showToast('Only Module/Requirement descriptions are editable here.', true);
+          callback(null);
+          return;
+        }
+        const current = node.title || '';
+        const text = window.prompt(`Edit ${node.kind} description:`, current);
+        if (text !== null && text.trim()) {
+          postJson('/api/model/edit-text', { kind: node.kind, id: node.refId, text: text.trim() })
+            .then(() => { showToast('Description updated.'); load(); })
+            .catch(e => showToast(e.message, true));
+        }
+        callback(null);
+      },
+      deleteEdge: function (edgeData, callback) {
+        edgeData.edges.forEach(id => {
+          const edge = data.edges.get(id);
+          if (!edge) return;
+          if (edge.static) { showToast('"covers" edges are derived, not editable.', true); return; }
+          if (edge.linkId) {
+            postJson('/api/model/review-link', { id: edge.linkId, action: 'reject' })
+              .then(() => { showToast('Link rejected.'); load(); })
+              .catch(e => showToast(e.message, true));
+          }
+        });
+        callback(null);
+      },
+      deleteNode: function (nodeData, callback) {
+        showToast('Deleting nodes isn’t supported here.', true);
+        callback(null);
+      },
+    },
+  };
+
+  if (network) network.destroy();
+  network = new vis.Network(container, data, options);
+  network.on('click', params => {
+    if (params.edges.length === 1 && params.nodes.length === 0) {
+      const edge = data.edges.get(params.edges[0]);
+      if (edge && edge.linkId && edge.status !== 'green') {
+        postJson('/api/model/review-link', { id: edge.linkId, action: 'approve' })
+          .then(() => { showToast('Link approved.'); load(); })
+          .catch(e => showToast(e.message, true));
+      }
+    }
+  });
 }
 
 load();
 </script>
+<div id="toast"></div>
 </body>
 </html>

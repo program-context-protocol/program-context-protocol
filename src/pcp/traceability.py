@@ -217,6 +217,103 @@ def apply_review_action(pcp_dir: Path, link_id: str, action: str, new_label: str
     return {"action": action}
 
 
+def propose_link(pcp_dir: Path, feature_id: str, module: str) -> dict:
+    """A human connecting a Requirement node to a Module node in the visual
+    builder proposes a link -- it does NOT write it in as confirmed. Starts
+    "blue" (unreviewed) same as an LLM-suggested match, going through the
+    exact same apply_review_action approve/reject path. A human drawing the
+    connection is a strong signal, not an audit-proof one -- still needs its
+    own explicit approve click, same governance as every other edge in this
+    system, no shortcut for coming from the UI instead of the classifier."""
+    state_path = get_traceability_map(pcp_dir)
+    state = yaml.safe_load(state_path.read_text()) or {} if state_path.exists() else {}
+    links = state.get("links", [])
+
+    link_id = f"{feature_id}__{module}"
+    if any(l["id"] == link_id for l in links):
+        raise TraceabilityError(f"link '{link_id}' already exists.")
+
+    features = {f["id"]: f for f in load_active_brd_items(pcp_dir)}
+    feature = features.get(feature_id)
+    if feature is None:
+        raise TraceabilityError(f"no active requirement with id '{feature_id}'.")
+
+    links.append({
+        "id": link_id,
+        "feature_id": feature_id,
+        "feature_description": feature["description"],
+        "module": module,
+        "confidence_score": 1.0,
+        "rationale": "Proposed manually via the domain model visual builder.",
+        "review_status": "blue",
+    })
+
+    from datetime import datetime, timezone
+    state_path.write_text(yaml.dump(
+        {"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "links": links},
+        default_flow_style=False, sort_keys=False,
+    ))
+    return {"id": link_id}
+
+
+def update_module_description(pcp_dir: Path, module_name: str, new_description: str) -> None:
+    """Human-edited via the visual builder -- writes directly to spec.yaml,
+    same as a human editing the file in a text editor would. Consistent
+    with PCP's own rule: spec files are human-authored, this IS a human
+    authoring it, just through a different interface."""
+    from pcp.pcp_dir import get_modules_dir
+    spec_path = get_modules_dir(pcp_dir) / module_name / "spec.yaml"
+    if not spec_path.exists():
+        raise TraceabilityError(f"no module '{module_name}' found.")
+    spec = yaml.safe_load(spec_path.read_text()) or {}
+    spec["description"] = new_description
+    spec_path.write_text(yaml.dump(spec, default_flow_style=False, sort_keys=False))
+
+
+def update_requirement_description(pcp_dir: Path, feature_id: str, new_description: str) -> None:
+    """Human-edited via the visual builder -- writes directly to
+    brd_items.yaml for that BRD item, bumping last_updated."""
+    from datetime import datetime, timezone
+    path = pcp_dir / "brd_items.yaml"
+    if not path.exists():
+        raise TraceabilityError("No brd_items.yaml found.")
+    data = yaml.safe_load(path.read_text()) or {}
+    items = data.get("items", [])
+    item = next((i for i in items if i["id"] == feature_id), None)
+    if item is None:
+        raise TraceabilityError(f"no requirement with id '{feature_id}'.")
+    item["description"] = new_description
+    item["last_updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path.write_text(yaml.dump({"items": items}, default_flow_style=False, sort_keys=False))
+
+
+def create_requirement(pcp_dir: Path, description: str) -> dict:
+    """Adds a new requirement directly via the visual builder -- same
+    id-numbering/status/timestamp shape as capture.py's apply_business_items,
+    but a human is authoring it now, not the transcript classifier."""
+    from datetime import datetime, timezone
+    path = pcp_dir / "brd_items.yaml"
+    data = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
+    items = data.get("items", [])
+
+    nums = []
+    for i in items:
+        try:
+            nums.append(int(str(i["id"]).split("-")[-1]))
+        except (KeyError, ValueError):
+            continue
+    new_id = f"BRD-{max(nums, default=0) + 1:03d}"
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    items.append({
+        "id": new_id, "description": description, "status": "active",
+        "superseded_by": None, "first_seen": now, "last_updated": now,
+        "source": "ui:domain-model-builder", "drift_flag": None,
+    })
+    path.write_text(yaml.dump({"items": items}, default_flow_style=False, sort_keys=False))
+    return {"id": new_id}
+
+
 def build_full_view(pcp_dir: Path) -> dict:
     """Everything the review UI needs in one call: active features, the
     modules catalog (each with its acceptance criteria so an approved link

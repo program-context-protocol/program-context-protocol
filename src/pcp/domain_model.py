@@ -41,7 +41,7 @@ def _load_traceability_links(pcp_dir: Path) -> list[dict]:
     if not path.exists():
         return []
     data = yaml.safe_load(path.read_text()) or {}
-    return [l for l in data.get("links", []) if l.get("review_status") == "green"]
+    return data.get("links", [])
 
 
 def _gate_evaluates(pcp_dir: Path) -> dict:
@@ -75,7 +75,8 @@ def build_domain_model(pcp_dir: Path) -> dict:
     links = _load_traceability_links(pcp_dir)
     req_to_modules = defaultdict(list)
     for l in links:
-        req_to_modules[l["feature_id"]].append(l["module"])
+        if l.get("review_status") == "green":
+            req_to_modules[l["feature_id"]].append(l["module"])
     for r in requirements:
         r["maps_to_modules"] = req_to_modules.get(r["id"], [])
 
@@ -95,4 +96,5 @@ def build_domain_model(pcp_dir: Path) -> dict:
         "modules": modules,
         "requirements": requirements,
         "gates": gates,
+        "links": links,
     }
