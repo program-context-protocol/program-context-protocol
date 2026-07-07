@@ -32,6 +32,9 @@ from pcp.commands.ontology_status import ontology_status
 from pcp.commands.process_cmd import process_worker
 from pcp.commands.observatory import observatory
 from pcp.commands.ontology_serve import ontology_serve
+from pcp.commands.trace_map import trace_map
+from pcp.commands.trace_review import trace_review
+from pcp.commands.trace_serve import trace_serve
 
 
 @click.group()
@@ -74,3 +77,6 @@ cli.add_command(ontology_status, name="ontology-status")
 cli.add_command(process_worker, name="process-worker")
 cli.add_command(observatory)
 cli.add_command(ontology_serve, name="ontology-serve")
+cli.add_command(trace_map, name="trace-map")
+cli.add_command(trace_review, name="trace-review")
+cli.add_command(trace_serve, name="trace-serve")
