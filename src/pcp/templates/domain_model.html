@@ -67,6 +67,54 @@
   </header>
 
   <section>
+    <h2>The Model</h2>
+    <svg id="diagram" viewBox="0 0 800 380" style="width:100%; height:auto; max-width:640px; display:block; margin:0 auto;">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+      <g stroke="var(--accent)" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+        <path d="M400,150 L400,80"></path>
+        <path d="M400,200 L400,290"></path>
+        <path d="M250,150 L340,150"></path>
+        <path d="M560,290 L470,290"></path>
+        <path d="M470,160 C 540,160 540,190 470,190"></path>
+      </g>
+      <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" font-size="12" fill="var(--muted)" text-anchor="middle">
+        <text x="400" y="115">covers</text>
+        <text x="400" y="265">contains</text>
+        <text x="295" y="140">maps to</text>
+        <text x="515" y="280">evaluates</text>
+        <text x="545" y="165">depends on</text>
+      </g>
+      <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif">
+        <g>
+          <rect x="330" y="30" width="140" height="50" rx="10" fill="var(--surface-2)" stroke="var(--border)"></rect>
+          <text x="400" y="60" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Objective</text>
+        </g>
+        <g>
+          <rect x="330" y="150" width="140" height="50" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+          <text x="400" y="180" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Module</text>
+        </g>
+        <g>
+          <rect x="330" y="290" width="140" height="50" rx="10" fill="var(--surface-2)" stroke="var(--border)"></rect>
+          <text x="400" y="320" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Criterion</text>
+        </g>
+        <g>
+          <rect x="110" y="125" width="140" height="50" rx="10" fill="var(--surface-2)" stroke="var(--border)"></rect>
+          <text x="180" y="155" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Requirement</text>
+        </g>
+        <g>
+          <rect x="560" y="265" width="140" height="50" rx="10" fill="var(--surface-2)" stroke="var(--border)"></rect>
+          <text x="630" y="295" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Gate</text>
+        </g>
+      </g>
+    </svg>
+    <div class="subtitle" style="text-align:center; margin-top:0.6rem;">5 objects, 5 relationships. Everything below is real data flowing through this exact shape.</div>
+  </section>
+
+  <section>
     <h2>Objective</h2>
     <div class="objective-text" id="objective"></div>
   </section>
