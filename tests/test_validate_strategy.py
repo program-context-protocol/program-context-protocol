@@ -150,3 +150,49 @@ def test_coupling_color_falls_back_when_no_policy_scaffolded(tmp_path):
     assert _coupling_color(pcp_dir, 0.9) == "green"
     assert _coupling_color(pcp_dir, 0.7) == "yellow"
     assert _coupling_color(pcp_dir, 0.3) == "red"
+
+
+# ── coverage_audit integration (Goodhart mitigation) ──
+
+def test_inconsistent_coverage_score_surfaced_as_warning(tmp_path):
+    """A high coverage_score alongside real open gaps is internally
+    inconsistent -- must be surfaced, never silently trusted."""
+    pcp_dir = _init_pcp(tmp_path)
+    _write_module(pcp_dir, "add")
+    with patch("pcp.llm.client.call_json") as mock_llm:
+        mock_llm.return_value = {
+            **MOCK_COVERAGE_FULL,
+            "coverage_gaps": [{"area": "subtraction", "quote": "supports subtraction"}],
+            "coverage_score": 0.9,
+        }
+        runner = CliRunner()
+        result = runner.invoke(cli, ["validate-strategy", "--path", str(tmp_path)])
+    assert "internally" in result.output
+    assert "inconsistent" in result.output
+    assert (pcp_dir / "coverage_audit.jsonl").exists()
+
+
+def test_coverage_audit_findings_included_in_json_output(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    _write_module(pcp_dir, "add")
+    with patch("pcp.llm.client.call_json") as mock_llm:
+        mock_llm.return_value = {
+            **MOCK_COVERAGE_FULL,
+            "coverage_gaps": [{"area": "x", "quote": "y"}],
+            "coverage_score": 0.95,
+        }
+        runner = CliRunner()
+        result = runner.invoke(cli, ["validate-strategy", "--path", str(tmp_path), "--json"])
+    output = json.loads(result.output)
+    assert len(output["coverage_audit_findings"]) == 1
+
+
+def test_consistent_coverage_score_no_warning(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    _write_module(pcp_dir, "add")
+    with patch("pcp.llm.client.call_json") as mock_llm:
+        mock_llm.return_value = dict(MOCK_COVERAGE_FULL)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["validate-strategy", "--path", str(tmp_path)])
+    assert "internally inconsistent" not in result.output
+    assert "drifted" not in result.output

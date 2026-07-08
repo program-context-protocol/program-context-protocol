@@ -105,6 +105,18 @@ def _add_coupling(result: dict, modules: dict[str, dict]) -> dict:
     return result
 
 
+def _add_coverage_audit(pcp_dir: Path, result: dict, objective: str, modules: dict[str, dict]) -> dict:
+    """Goodhart mitigation on the LLM-judged coverage_score (see coverage_audit.py):
+    never corrects the score, only surfaces internal-inconsistency and drift
+    findings so a high score can't quietly substitute for a real gap-free check."""
+    from pcp import coverage_audit
+    findings = coverage_audit.record(
+        pcp_dir, result.get("coverage_score", 0.0), result.get("coverage_gaps", []), objective, modules,
+    )
+    result["coverage_audit_findings"] = findings
+    return result
+
+
 def _coupling_color(pcp_dir: Path, coupling_score: float) -> str:
     """Prefer the human-editable Rego policy (.pcp/policies/coupling_threshold.rego)
     over the hardcoded bands below -- falls back to the hardcoded bands if opa
@@ -134,6 +146,8 @@ def _render_results(pcp_dir: Path, result: dict, output_json: bool) -> int:
     coupling_color = _coupling_color(pcp_dir, coupling_score)
 
     console.print(f"\n[bold]Coverage score:[/bold]  [{score_color}]{score:.0%}[/{score_color}]")
+    for finding in result.get("coverage_audit_findings", []):
+        console.print(f"  [yellow]⚠  {finding}[/yellow]")
     console.print(f"[bold]Coupling score:[/bold]  [{coupling_color}]{coupling_score:.0%}[/{coupling_color}]  "
                   f"[dim](1.0 = fully decoupled, pivots are cheap)[/dim]\n")
 
@@ -212,7 +226,8 @@ def run_validate_strategy(pcp_dir: Path, command: str = "validate-strategy") -> 
         return None
     user_prompt = _build_user_prompt(objective, decomposition, modules)
     result = llm.call_json(SYSTEM_PROMPT, user_prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command=command)
-    return _add_coupling(result, modules)
+    result = _add_coupling(result, modules)
+    return _add_coverage_audit(pcp_dir, result, objective, modules)
 
 
 @click.command()
@@ -260,6 +275,7 @@ def validate_strategy(output_json: bool, project_path: str | None):
         sys.exit(2)
 
     result = _add_coupling(result, modules)
+    result = _add_coverage_audit(pcp_dir, result, objective, modules)
 
     exit_code = _render_results(pcp_dir, result, output_json)
     sys.exit(exit_code)
