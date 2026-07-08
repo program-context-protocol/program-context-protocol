@@ -74,8 +74,8 @@ Status
 ------
 Not yet public. Per this project's own governance rule, launch (domain
 registration, GitHub org, PyPI/npm publish) is gated on validating PCP
-across three real dogfood projects (miniG, SlicePay, The Ledger) — not
-yet complete. No LICENSE file yet — add one before any public push.
+across three real dogfood projects — not yet complete. No LICENSE file
+yet — add one before any public push.
 
 This repository has no deploy pipeline. It ships as a git repo / pip
 package, not a hosted service.

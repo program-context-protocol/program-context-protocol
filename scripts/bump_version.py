@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Bump PCP's own package version according to version_rules.json.
-Ported from Postcar's version-control discipline (2026-07-01).
+Ported from another project's version-control discipline (2026-07-01).
 
 Rules:
   z increments on each commit.
