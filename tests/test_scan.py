@@ -1,6 +1,10 @@
+import http.server
+import threading
 from pathlib import Path
 
-from pcp.commands.scan import _check_ast_pattern, _check_file_exists, _SOURCE_FILES_CACHE, _FILE_CONTENT_CACHE
+import pytest
+
+from pcp.commands.scan import _check_ast_pattern, _check_file_exists, _evaluate_criterion, _SOURCE_FILES_CACHE, _FILE_CONTENT_CACHE
 
 
 def _reset_caches():
@@ -69,3 +73,45 @@ def test_file_exists_false_when_truly_absent(tmp_path):
     ok, detail = _check_file_exists("nowhere.py", tmp_path)
 
     assert ok is False
+
+
+@pytest.fixture(scope="module")
+def local_server():
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"<html><body>Welcome to the app</body></html>")
+
+        def log_message(self, format, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+
+
+def test_evaluate_criterion_url_responds_complete(local_server):
+    criterion = {"id": "A001", "check": "url_responds", "url": f"{local_server}/health"}
+    status, detail = _evaluate_criterion(criterion, "mod", Path("."), {}, {})
+    assert status == "complete"
+
+
+def test_evaluate_criterion_url_responds_pending_when_unreachable():
+    criterion = {"id": "A001", "check": "url_responds", "url": "http://127.0.0.1:1/nope"}
+    status, detail = _evaluate_criterion(criterion, "mod", Path("."), {}, {})
+    assert status == "pending"
+
+
+def test_evaluate_criterion_dom_contains_complete(local_server):
+    criterion = {"id": "A001", "check": "dom_contains", "url": local_server, "selector": "Welcome to the app"}
+    status, detail = _evaluate_criterion(criterion, "mod", Path("."), {}, {})
+    assert status == "complete"
+
+
+def test_evaluate_criterion_dom_contains_pending_when_text_absent(local_server):
+    criterion = {"id": "A001", "check": "dom_contains", "url": local_server, "selector": "Goodbye"}
+    status, detail = _evaluate_criterion(criterion, "mod", Path("."), {}, {})
+    assert status == "pending"

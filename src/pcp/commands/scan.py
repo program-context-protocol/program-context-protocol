@@ -13,6 +13,7 @@ from pcp.schema.validator import validate_file, load_yaml
 from pcp.pcp_status import write_pcp_md
 from pcp.discovery.scanner import detect_stack, collect_source_files
 from pcp import qa
+from pcp import uat
 
 console = Console()
 
@@ -117,7 +118,15 @@ def _evaluate_criterion(
     elif check == "test_passes":
         return criterion.get("status", "pending"), "test_passes: preserved (run tests to update)"
 
-    else:  # manual
+    elif check == "url_responds":
+        ok, detail = uat.check_url_responds(criterion.get("url", ""))
+        return ("complete" if ok else "pending"), detail
+
+    elif check == "dom_contains":
+        ok, detail = uat.check_dom_contains(criterion.get("url", ""), criterion.get("selector", ""))
+        return ("complete" if ok else "pending"), detail
+
+    else:  # manual, visual
         key = f"{module_name.upper()}/{cid}"
         prior = prior_manual.get(key)
         if prior:
