@@ -320,6 +320,25 @@ def _build_agent_prompt(
         "- .pcp/architect_persona.md (architecture review principles — your code must satisfy these)",
         "- .pcp/current_state.md   (what's already built)",
         "",
+    ]
+
+    # This criterion's own acceptance.yaml already declares the file it's
+    # about (`target`, and `pattern` for ast_pattern checks) — found
+    # 2026-07-08 that without this hint the agent spent several turns per
+    # criterion re-discovering it via `find`/`grep`, real turns/cache_read
+    # volume for information already on disk.
+    target = criterion.get("target")
+    if target:
+        prompt_parts.append(
+            f"This criterion's target file is `{target}` — start there instead of "
+            f"searching the repo for it. If it doesn't exist yet, create it there."
+        )
+        pattern = criterion.get("pattern")
+        if pattern:
+            prompt_parts.append(f"It must satisfy this pattern: `{pattern}`")
+        prompt_parts.append("")
+
+    prompt_parts += [
         "## Module Specification",
         yaml.dump(spec, default_flow_style=False),
         "",
