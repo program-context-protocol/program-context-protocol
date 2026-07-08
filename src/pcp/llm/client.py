@@ -67,6 +67,16 @@ def call(system: str, user: str, model: str | None = None, pcp_dir: Path | None 
     if resolved_model:
         cmd += ["--model", resolved_model]
 
+    # Real bug, found 2026-07-08: this call never passed cwd, so it always
+    # ran in whatever the calling PROCESS's actual OS cwd happened to be --
+    # not necessarily the target project. Harmless when the CLI is invoked
+    # from the project root (the common case), actively wrong otherwise: a
+    # test process (or any caller) with a different cwd would silently run
+    # the agent against the wrong directory. pcp_dir is already passed by
+    # every call site for token-ledger logging, so it doubles as the correct
+    # anchor here — project_root = pcp_dir.parent.
+    cwd = Path(pcp_dir).parent if pcp_dir else None
+
     try:
         result = subprocess.run(
             cmd,
@@ -74,6 +84,7 @@ def call(system: str, user: str, model: str | None = None, pcp_dir: Path | None 
             capture_output=True,
             text=True,
             timeout=_timeout(),
+            cwd=cwd,
         )
     except FileNotFoundError:
         raise RuntimeError(

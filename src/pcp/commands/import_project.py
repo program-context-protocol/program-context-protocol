@@ -53,6 +53,7 @@ def _generate_module_spec(
     files: list[str],
     cross_edges: dict[tuple[str, str], int],
     pm_description: str,
+    pcp_dir: Path | None = None,
 ) -> dict:
     deps = sorted({
         b for (a, b), count in cross_edges.items()
@@ -72,7 +73,7 @@ Files in cluster ({len(files)} files):
 Cross-cluster imports to/from: {deps or ["none detected"]}
 """
     try:
-        raw = llm.call(GENERATE_SPEC_PROMPT, user_prompt)
+        raw = llm.call(GENERATE_SPEC_PROMPT, user_prompt, pcp_dir=pcp_dir, command="import-generate-spec")
         spec = yaml.safe_load(raw)
         if not isinstance(spec, dict):
             raise ValueError("not a dict")
@@ -246,7 +247,7 @@ def import_project(description: str, project_path: str | None, dry_run: bool, sk
                 "constraints": [],
             }
         else:
-            spec = _generate_module_spec(cluster_name, cluster_files, cross_edges, description)
+            spec = _generate_module_spec(cluster_name, cluster_files, cross_edges, description, pcp_dir=pcp_dir)
 
         (module_dir / "spec.yaml").write_text(
             "# DRAFT — review and remove _generated: true when correct\n"
