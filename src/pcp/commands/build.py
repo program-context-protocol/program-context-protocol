@@ -101,6 +101,36 @@ def _git_head(project_root: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else "HEAD"
 
 
+def gather_modules_to_build(pcp_dir: Path, module_name: str | None = None) -> list[dict]:
+    """Public — reused by external orchestrators (e.g. a multi-user/Temporal
+    build layer) that want this run's exact module/criteria selection logic
+    without duplicating it. Kept in sync with `build()`'s own gathering step
+    by construction, since `build()` calls this too."""
+    modules_dir = get_modules_dir(pcp_dir)
+    modules_to_build = []
+    for spec_path in sorted(modules_dir.glob("*/spec.yaml")):
+        m_name = spec_path.parent.name
+        if module_name and m_name != module_name:
+            continue
+        spec = load_yaml(spec_path)
+        if spec.get("deprecated"):
+            continue
+        acc_path = spec_path.parent / "acceptance.yaml"
+        if not acc_path.exists():
+            continue
+        acc_data = load_yaml(acc_path)
+        pending = [c for c in acc_data.get("criteria", []) if c.get("status", "pending") == "pending"]
+        if pending:
+            modules_to_build.append({
+                "name": m_name,
+                "spec_path": spec_path,
+                "acc_path": acc_path,
+                "spec": spec,
+                "pending_criteria": pending
+            })
+    return modules_to_build
+
+
 def _compute_waves(modules_to_build: list[dict]) -> dict[str, int]:
     """{module_name: wave_number} via topological sort on each module's spec
     'dependencies' field. No in-set dependencies = wave 0. A module whose
@@ -125,6 +155,11 @@ def _compute_waves(modules_to_build: list[dict]) -> dict[str, int]:
     for m in modules_to_build:
         compute(m["name"], frozenset())
     return wave_of
+
+
+# Public alias — external orchestrators reuse this alongside
+# gather_modules_to_build() rather than reaching into a private name.
+compute_waves = _compute_waves
 
 
 # ── Worktree isolation for parallel module builds ──────────────────────────
@@ -820,28 +855,7 @@ def build(module_name: str | None, project_path: str | None):
 
     project_root = pcp_dir.parent
 
-    # Gather modules to run
-    modules_to_build = []
-    for spec_path in sorted(modules_dir.glob("*/spec.yaml")):
-        m_name = spec_path.parent.name
-        if module_name and m_name != module_name:
-            continue
-        spec = load_yaml(spec_path)
-        if spec.get("deprecated"):
-            continue
-        acc_path = spec_path.parent / "acceptance.yaml"
-        if not acc_path.exists():
-            continue
-        acc_data = load_yaml(acc_path)
-        pending = [c for c in acc_data.get("criteria", []) if c.get("status", "pending") == "pending"]
-        if pending:
-            modules_to_build.append({
-                "name": m_name,
-                "spec_path": spec_path,
-                "acc_path": acc_path,
-                "spec": spec,
-                "pending_criteria": pending
-            })
+    modules_to_build = gather_modules_to_build(pcp_dir, module_name)
 
     if not modules_to_build:
         console.print("[green]All acceptance criteria are complete. Nothing to build![/green]")
