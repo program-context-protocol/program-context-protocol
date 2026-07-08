@@ -52,6 +52,8 @@ def build_dashboard_data(pcp_dir: Path) -> dict:
     modules_dir = get_modules_dir(pcp_dir)
     prior_manual = _load_prior_manual_status(pcp_dir / "current_state.md")
 
+    qa_by_criterion, wave_gates = _qa_lookup(pcp_dir)
+
     acceptance_files = sorted(modules_dir.glob("*/acceptance.yaml")) if modules_dir.exists() else []
     modules_for_waves = []
     modules = []
@@ -61,6 +63,8 @@ def build_dashboard_data(pcp_dir: Path) -> dict:
         spec = load_yaml(spec_path) if spec_path.exists() else {}
         result = _scan_module(module_name, af, project_root, prior_manual)
         modules_for_waves.append({"name": module_name, "spec": spec})
+        for c in result["criteria"]:
+            c["qa"] = qa_by_criterion.get((module_name, c["id"]), {})
         total = len(result["criteria"])
         complete = sum(1 for c in result["criteria"] if c["status"] == "complete")
         modules.append({
@@ -117,7 +121,50 @@ def build_dashboard_data(pcp_dir: Path) -> dict:
         "brd_summary": ps._extract_brd_summary(pcp_dir),
         "decision_log_summary": ps._extract_decision_log_summary(pcp_dir),
         "chain_integrity": _check_chain_integrity(pcp_dir),
+        "wave_gates": wave_gates,
     }
+
+
+CHECK_LABEL = {
+    "layer1": "Layer 1", "test-suite": "Tests", "lint": "Lint", "sast": "SAST",
+    "architect-review": "Architect", "gate": "PR Gate", "escalation": "Escalation",
+    "wave-contract": "Contract", "wave-test-suite": "Wave Tests",
+    "wave-validate-strategy": "Wave Strategy", "wave-architect-review": "Wave Architect",
+}
+
+
+def _qa_lookup(pcp_dir: Path) -> tuple[dict, list]:
+    """Returns ((module, criterion_id) -> {check: latest_record}, wave-level
+    gate records) from telemetry.jsonl. Keeps only the latest record per
+    (criterion, check) or per wave-level check — the dashboard shows current
+    QA status, not the full retry history (that's what .pcp/evidence/ and
+    telemetry.jsonl itself are for)."""
+    from pcp import telemetry
+
+    per_criterion: dict[tuple, dict[str, dict]] = {}
+    wave_latest: dict[str, dict] = {}
+    for r in telemetry.load(pcp_dir):
+        if r.get("cycle") != "qa":
+            continue
+        check = r.get("check")
+        if not check:
+            continue
+        ts = r.get("timestamp", "")
+        if check.startswith("wave-"):
+            existing = wave_latest.get(check)
+            if not existing or ts >= existing.get("timestamp", ""):
+                wave_latest[check] = r
+            continue
+        module, criterion_id = r.get("module"), r.get("criterion_id")
+        if not module or not criterion_id:
+            continue
+        checks = per_criterion.setdefault((module, criterion_id), {})
+        existing = checks.get(check)
+        if not existing or ts >= existing.get("timestamp", ""):
+            checks[check] = r
+
+    wave_gates = sorted(wave_latest.values(), key=lambda r: r.get("check", ""))
+    return per_criterion, wave_gates
 
 
 CSS = """
@@ -205,10 +252,23 @@ section { margin-bottom: 2.25rem; }
 .deps { font-size: 0.72rem; color: var(--ink-dim); }
 .deps .dep { font-family: var(--mono); background: var(--pending-soft); padding: 0.05rem 0.35rem; border-radius: 5px; margin-right: 0.2rem; }
 .criteria-list { list-style: none; margin: 0; padding: 0 1rem 0.9rem; border-top: 1px solid var(--border); }
-.criteria-list li { display: flex; gap: 0.5rem; padding: 0.4rem 0; font-size: 0.82rem; border-bottom: 1px dashed var(--border); }
+.criteria-list li { padding: 0.4rem 0; font-size: 0.82rem; border-bottom: 1px dashed var(--border); }
 .criteria-list li:last-child { border-bottom: none; }
+.crit-row { display: flex; gap: 0.5rem; }
 .crit-id { font-family: var(--mono); color: var(--ink-dim); flex: 0 0 auto; }
-.crit-status { flex: 0 0 auto; }
+.crit-status { flex: 0 0 auto; margin-left: auto; }
+.qa-chips { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-top: 0.35rem; }
+.qa-chip {
+  font-family: var(--mono); font-size: 0.65rem; font-weight: 600; padding: 0.1rem 0.4rem;
+  border-radius: 5px; text-decoration: none; white-space: nowrap;
+}
+.qa-chip.complete { background: var(--complete-soft); color: var(--complete); }
+.qa-chip.blocked { background: var(--blocked-soft); color: var(--blocked); }
+.qa-chip.pending { background: var(--pending-soft); color: var(--pending); }
+.qa-chip.progress { background: var(--progress-soft); color: var(--progress); }
+a.qa-chip:hover { text-decoration: underline; }
+
+.wave-gates { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 
 .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.85rem; }
 .info-card { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 0.9rem 1rem; font-size: 0.85rem; }
@@ -237,13 +297,31 @@ def _milestone_html(p: dict) -> str:
   </div>"""
 
 
+RESULT_CLASS = {"pass": "complete", "block": "blocked", "error": "blocked", "skipped": "pending", "bypassed": "progress"}
+
+
+def _qa_chip_html(check: str, record: dict) -> str:
+    cls = RESULT_CLASS.get(record.get("result"), "pending")
+    label = escape(CHECK_LABEL.get(check, check))
+    evidence_path = record.get("evidence_path")
+    if evidence_path:
+        return f'<a class="qa-chip {cls}" href=".pcp/{escape(evidence_path)}" title="{escape(record.get("result", ""))}">{label}</a>'
+    return f'<span class="qa-chip {cls}" title="{escape(record.get("result", ""))}">{label}</span>'
+
+
 def _criterion_html(c: dict) -> str:
     status = c.get("status", "pending")
     mark = {"complete": "✓", "pending": "—"}.get(status, "—")
+    qa = c.get("qa") or {}
+    chips = "".join(_qa_chip_html(check, rec) for check, rec in sorted(qa.items()))
+    chips_html = f'<div class="qa-chips">{chips}</div>' if chips else ""
     return f"""
-      <li><span class="crit-id">{escape(c["id"])}</span>
+      <li>
+        <div class="crit-row"><span class="crit-id">{escape(c["id"])}</span>
           <span>{escape(c["description"])}</span>
-          <span class="crit-status">{mark}</span></li>"""
+          <span class="crit-status">{mark}</span></div>
+        {chips_html}
+      </li>"""
 
 
 def _module_card_html(m: dict) -> str:
@@ -317,6 +395,12 @@ def render_html(data: dict) -> str:
         f'<div class="info-card"><h3>{escape(t)}</h3><div>{escape(v)}</div></div>' for t, v in info_cards
     )
 
+    wave_gates_html = "".join(_qa_chip_html(r.get("check", ""), r) for r in data["wave_gates"])
+    wave_gates_section = (
+        f'<section><h2>Wave Gates</h2><div class="info-card"><div class="wave-gates">{wave_gates_html}</div></div></section>'
+        if data["wave_gates"] else ""
+    )
+
     bypass_html = ""
     if data["recent_bypasses"]:
         items = "".join(
@@ -362,6 +446,8 @@ def render_html(data: dict) -> str:
     <h2>Evidence Integrity</h2>
     <div class="info-card">{"".join(ci_lines)}</div>
   </section>
+
+  {wave_gates_section}
 
   {"<section><h2>Activity</h2><div class='info-grid'>" + info_cards_html + bypass_html + "</div></section>" if (info_cards or bypass_html) else ""}
 

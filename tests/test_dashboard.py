@@ -117,3 +117,88 @@ def test_dashboard_cli_no_pcp_dir_exits_2(tmp_path):
     runner = CliRunner()
     result = runner.invoke(cli, ["dashboard", "--path", str(tmp_path)])
     assert result.exit_code == 2
+
+
+# ── QA status + evidence links per criterion ──
+
+def test_criterion_carries_qa_records_keyed_by_check(tmp_path):
+    from pcp import telemetry, evidence
+
+    pcp_dir = _init_pcp(tmp_path)
+    _write_module(pcp_dir, "add", [], [("A001", "core add", "complete")])
+    ev = evidence.store(pcp_dir, "add", "A001", 1, "test-suite", "5 passed")
+    telemetry.record(pcp_dir, cycle="qa", module="add", criterion_id="A001",
+                      check="test-suite", control_id="CTRL-001", result="pass", evidence_path=ev)
+
+    data = build_dashboard_data(pcp_dir)
+    crit = data["modules"][0]["criteria"][0]
+    assert "test-suite" in crit["qa"]
+    assert crit["qa"]["test-suite"]["evidence_path"] == ev
+
+
+def test_qa_lookup_keeps_latest_record_per_check(tmp_path):
+    from pcp import telemetry, evidence
+
+    pcp_dir = _init_pcp(tmp_path)
+    _write_module(pcp_dir, "add", [], [("A001", "core add", "pending")])
+    ev1 = evidence.store(pcp_dir, "add", "A001", 1, "test-suite", "attempt 1 failed")
+    telemetry.record(pcp_dir, cycle="qa", module="add", criterion_id="A001",
+                      check="test-suite", control_id="CTRL-001", result="block", evidence_path=ev1)
+    ev2 = evidence.store(pcp_dir, "add", "A001", 2, "test-suite", "attempt 2 passed")
+    telemetry.record(pcp_dir, cycle="qa", module="add", criterion_id="A001",
+                      check="test-suite", control_id="CTRL-001", result="pass", evidence_path=ev2)
+
+    data = build_dashboard_data(pcp_dir)
+    crit = data["modules"][0]["criteria"][0]
+    assert crit["qa"]["test-suite"]["result"] == "pass"
+    assert crit["qa"]["test-suite"]["evidence_path"] == ev2
+
+
+def test_render_html_links_to_evidence_file(tmp_path):
+    from pcp import telemetry, evidence
+
+    pcp_dir = _init_pcp(tmp_path)
+    _write_module(pcp_dir, "add", [], [("A001", "core add", "complete")])
+    ev = evidence.store(pcp_dir, "add", "A001", 1, "test-suite", "5 passed")
+    telemetry.record(pcp_dir, cycle="qa", module="add", criterion_id="A001",
+                      check="test-suite", control_id="CTRL-001", result="pass", evidence_path=ev)
+
+    data = build_dashboard_data(pcp_dir)
+    html = render_html(data)
+    assert f'href=".pcp/{ev}"' in html
+    assert "qa-chip complete" in html
+
+
+def test_render_html_marks_blocked_check_distinctly(tmp_path):
+    from pcp import telemetry, evidence
+
+    pcp_dir = _init_pcp(tmp_path)
+    _write_module(pcp_dir, "add", [], [("A001", "core add", "pending")])
+    ev = evidence.store(pcp_dir, "add", "A001", 1, "lint", "issue found")
+    telemetry.record(pcp_dir, cycle="qa", module="add", criterion_id="A001",
+                      check="lint", control_id="CTRL-002", result="block", evidence_path=ev)
+
+    html = render_html(build_dashboard_data(pcp_dir))
+    assert "qa-chip blocked" in html
+
+
+def test_wave_gates_section_shows_latest_wave_check(tmp_path):
+    from pcp import telemetry, evidence
+
+    pcp_dir = _init_pcp(tmp_path)
+    ev = evidence.store(pcp_dir, "_wave", "wave_0", 0, "test-suite", "wave suite output")
+    telemetry.record(pcp_dir, cycle="qa", check="wave-test-suite", control_id="CTRL-001",
+                      result="pass", evidence_path=ev, cycle_number=0)
+
+    data = build_dashboard_data(pcp_dir)
+    assert len(data["wave_gates"]) == 1
+    assert data["wave_gates"][0]["check"] == "wave-test-suite"
+    html = render_html(data)
+    assert "Wave Gates" in html
+    assert f'href=".pcp/{ev}"' in html
+
+
+def test_no_wave_gates_section_when_none_recorded(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    html = render_html(build_dashboard_data(pcp_dir))
+    assert "Wave Gates" not in html
