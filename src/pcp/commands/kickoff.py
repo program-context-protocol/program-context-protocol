@@ -89,6 +89,7 @@ Output schema:
       }
     }
   ],
+  "_comment_criteria_enums": "Every criterion's check MUST be exactly one of: ast_pattern, file_exists, test_passes, manual, dom_contains, url_responds, visual. Every criterion's status MUST be exactly one of: pending, complete, deferred, blocked-ci, blocked-secret, blocked-regression. Do not invent other values (e.g. 'automated' or 'done') even if they seem descriptive -- these are the only ones a validator will accept. When generating a strategy from a vision doc (not yet built), every criterion's status should be 'pending' unless the vision explicitly states something is already implemented.",
   "ci_rules": {
     "version": "1.0",
     "rules": [
@@ -109,6 +110,37 @@ Output schema:
 def _write_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+
+
+VALID_CHECKS = {"ast_pattern", "file_exists", "test_passes", "manual", "dom_contains", "url_responds", "visual"}
+VALID_STATUSES = {"pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"}
+# Best-effort mapping for common LLM-invented values that don't match the
+# closed schema enum but have an obvious intended meaning.
+_STATUS_ALIASES = {"done": "complete", "finished": "complete", "in_progress": "pending", "todo": "pending"}
+_CHECK_ALIASES = {"automated": "manual", "auto": "manual", "unit_test": "test_passes", "integration_test": "test_passes"}
+
+
+def _normalize_acceptance(acceptance: dict, module_name: str) -> list[str]:
+    """Coerces check/status values outside the schema's closed enum to a
+    safe default in place, returns a list of human-readable warnings for
+    anything it had to coerce. Found necessary 2026-07-08: kickoff's LLM
+    generation invented plausible-but-invalid values ('automated', 'done')
+    for a real, more complex vision doc -- validate_file was imported here
+    but never actually called, so these silently reached disk and only
+    surfaced later, opaquely, whenever `pcp scan` happened to run next."""
+    warnings = []
+    for c in acceptance.get("criteria", []):
+        check = c.get("check")
+        if check not in VALID_CHECKS:
+            fixed = _CHECK_ALIASES.get(check, "manual")
+            warnings.append(f"{module_name}/{c.get('id', '?')}: check '{check}' is not valid, coerced to '{fixed}'")
+            c["check"] = fixed
+        status = c.get("status")
+        if status not in VALID_STATUSES:
+            fixed = _STATUS_ALIASES.get(status, "pending")
+            warnings.append(f"{module_name}/{c.get('id', '?')}: status '{status}' is not valid, coerced to '{fixed}'")
+            c["status"] = fixed
+    return warnings
 
 
 @click.command()
@@ -161,12 +193,30 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     _write_file(pcp_dir / "kb" / "domain" / "general.md", DOMAIN_KB_TEMPLATE)
 
     # Write module specs and acceptance criteria
+    coercion_warnings = []
     for m in result.get("modules", []):
         mod_dir = pcp_dir / "strategy" / "modules" / m["name"]
+        coercion_warnings += _normalize_acceptance(m["acceptance"], m["name"])
         _write_file(mod_dir / "spec.yaml", yaml.dump(m["spec"], default_flow_style=False))
         _write_file(mod_dir / "acceptance.yaml", yaml.dump(m["acceptance"], default_flow_style=False))
 
     console.print("[green]✓[/green] Generated PCP files under [cyan].pcp/[/cyan]")
+
+    if coercion_warnings:
+        console.print(f"[yellow]⚠  {len(coercion_warnings)} criterion field(s) didn't match the schema, coerced to a safe default:[/yellow]")
+        for w in coercion_warnings:
+            console.print(f"   {w}")
+
+    # Schema-validate what actually landed on disk -- advisory, matches
+    # scan.py's own posture (warn, don't block), but at least surfaces any
+    # remaining issue right here instead of only on the next `pcp scan`.
+    for m in result.get("modules", []):
+        mod_dir = pcp_dir / "strategy" / "modules" / m["name"]
+        errors = validate_file(mod_dir / "acceptance.yaml", "module_acceptance")
+        if errors:
+            console.print(f"[yellow]⚠  {m['name']}/acceptance.yaml still has schema issues after coercion:[/yellow]")
+            for e in errors:
+                console.print(f"   {e}")
 
     # Run validate-strategy automatically
     console.print("\n[bold]Running validate-strategy...[/bold]")

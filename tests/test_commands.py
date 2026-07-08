@@ -115,6 +115,64 @@ def test_kickoff_success(temp_project):
         assert sdlc["phases"][0]["exit_criteria"][0]["status"] == "complete"
 
 
+def test_kickoff_coerces_invalid_check_and_status_values(temp_project):
+    """Real bug found dogfooding kickoff against a real, complex vision doc:
+    the LLM invented plausible-but-invalid enum values ('automated', 'done')
+    that aren't in module_acceptance's schema. Confirms the fix coerces them
+    to a safe default and warns, instead of silently writing invalid YAML
+    that only surfaces opaquely on the next `pcp scan`."""
+    vision_file = temp_project / "vision.md"
+    vision_file.write_text("Build a simple calculator app.")
+
+    mock_kickoff_response = {
+        "objective": "# Program Objective", "target_state": "# Target State",
+        "architecture": "# Architecture", "decomposition": "# Strategy Decomposition",
+        "sdlc_phase": {"version": "1.0", "current_phase": "planning", "phases": [
+            {"name": "planning", "exit_criteria": [{"id": "E001", "description": "d", "check": "manual", "status": "pending"}]},
+            {"name": "alpha", "exit_criteria": [{"id": "E001", "description": "d", "check": "manual", "status": "pending"}]},
+        ]},
+        "modules": [{
+            "name": "add",
+            "spec": {"version": "1.0", "module": "add", "description": "Adds numbers.",
+                     "objective_coverage": ["addition"], "dependencies": [], "constraints": []},
+            "acceptance": {"version": "1.0", "module": "add", "criteria": [
+                {"id": "A001", "description": "Add works.", "check": "automated", "status": "done"},
+                {"id": "A002", "description": "Subtract works.", "check": "manual", "status": "pending"},
+            ]},
+        }],
+        "ci_rules": {"version": "1.0", "rules": []},
+        "architect_persona": "# Architect Persona",
+    }
+    mock_val_response = {"coverage_gaps": [], "contradictions": [], "overlaps": [], "missing_modules": [], "coverage_score": 1.0}
+
+    with patch("pcp.llm.client.call_json") as mock_call_json:
+        mock_call_json.side_effect = [mock_kickoff_response, mock_val_response]
+        runner = CliRunner()
+        result = runner.invoke(cli, ["kickoff", str(vision_file), "--path", str(temp_project)], input="y\n")
+
+    assert result.exit_code == 0
+    assert "didn't match the schema, coerced" in result.output
+    assert "check 'automated' is not valid, coerced to 'manual'" in result.output
+    assert "status 'done' is not valid, coerced to 'complete'" in result.output
+
+    acc = yaml.safe_load((temp_project / ".pcp" / "strategy" / "modules" / "add" / "acceptance.yaml").read_text())
+    assert acc["criteria"][0]["check"] == "manual"
+    assert acc["criteria"][0]["status"] == "complete"
+    assert acc["criteria"][1]["check"] == "manual"  # untouched, already valid
+
+    # No leftover schema errors after coercion.
+    assert "still has schema issues after coercion" not in result.output
+
+
+def test_normalize_acceptance_returns_no_warnings_when_already_valid():
+    from pcp.commands.kickoff import _normalize_acceptance
+
+    acc = {"criteria": [{"id": "A001", "check": "manual", "status": "pending"}]}
+    warnings = _normalize_acceptance(acc, "add")
+    assert warnings == []
+    assert acc["criteria"][0]["check"] == "manual"
+
+
 def test_pm_command(temp_project):
     pcp_dir = temp_project / ".pcp"
     pcp_dir.mkdir()
