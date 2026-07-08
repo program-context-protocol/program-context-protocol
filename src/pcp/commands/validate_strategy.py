@@ -105,7 +105,18 @@ def _add_coupling(result: dict, modules: dict[str, dict]) -> dict:
     return result
 
 
-def _render_results(result: dict, output_json: bool) -> int:
+def _coupling_color(pcp_dir: Path, coupling_score: float) -> str:
+    """Prefer the human-editable Rego policy (.pcp/policies/coupling_threshold.rego)
+    over the hardcoded bands below -- falls back to the hardcoded bands if opa
+    isn't installed or no policy is scaffolded, so this never hard-depends on OPA."""
+    from pcp import policy
+    decision = policy.evaluate(pcp_dir, "data.pcp.coupling.coupling_color", {"coupling_score": coupling_score})
+    if decision.get("available") and not decision.get("undefined") and decision.get("value"):
+        return decision["value"]
+    return "green" if coupling_score >= 0.8 else "yellow" if coupling_score >= 0.6 else "red"
+
+
+def _render_results(pcp_dir: Path, result: dict, output_json: bool) -> int:
     if output_json:
         click.echo(json.dumps(result, indent=2))
         gaps = result.get("coverage_gaps", [])
@@ -120,7 +131,7 @@ def _render_results(result: dict, output_json: bool) -> int:
     coupling_violations = result.get("coupling_violations", [])
 
     score_color = "green" if score >= 0.8 else "yellow" if score >= 0.5 else "red"
-    coupling_color = "green" if coupling_score >= 0.8 else "yellow" if coupling_score >= 0.6 else "red"
+    coupling_color = _coupling_color(pcp_dir, coupling_score)
 
     console.print(f"\n[bold]Coverage score:[/bold]  [{score_color}]{score:.0%}[/{score_color}]")
     console.print(f"[bold]Coupling score:[/bold]  [{coupling_color}]{coupling_score:.0%}[/{coupling_color}]  "
@@ -250,5 +261,5 @@ def validate_strategy(output_json: bool, project_path: str | None):
 
     result = _add_coupling(result, modules)
 
-    exit_code = _render_results(result, output_json)
+    exit_code = _render_results(pcp_dir, result, output_json)
     sys.exit(exit_code)

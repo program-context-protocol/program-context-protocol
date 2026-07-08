@@ -213,3 +213,79 @@ def test_check_cli_schema_error_blocks(tmp_path):
     result = runner.invoke(cli, ["check", "--path", str(tmp_path)])
     assert result.exit_code == 1
     assert "schema errors" in result.output
+
+
+# ── bypass, backed by real OPA policy (.pcp/policies/bypass_approval.rego) ──
+
+import shutil
+import pytest
+
+HAS_OPA = shutil.which("opa") is not None
+
+
+def _write_bypass_policy(pcp_dir):
+    policies_dir = pcp_dir / "policies"
+    policies_dir.mkdir(parents=True, exist_ok=True)
+    real = Path(".pcp") / "policies" / "bypass_approval.rego"
+    (policies_dir / "bypass_approval.rego").write_text(real.read_text())
+
+
+@pytest.mark.skipif(not HAS_OPA, reason="opa binary not installed")
+def test_check_cli_opa_rejects_placeholder_bypass_reason(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "SEC_001", "name": "No hardcoded secrets", "check": "ast_pattern",
+         "pattern": r"password\s*=\s*['\"]", "severity": "hard_block", "scope": ["*.py"]},
+    ])
+    _write_bypass_policy(pcp_dir)
+    (tmp_path / "bad.py").write_text("password = 'hunter2'\n")
+    msg_file = _write_commit_msg(tmp_path, "Fix\n\n[pcp-bypass: reason]\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "check", "--path", str(tmp_path), "--files", "bad.py", "--commit-msg-file", str(msg_file),
+    ])
+    assert result.exit_code == 1
+    assert "rejected" in result.output
+    assert not (pcp_dir / "bypass_log.yaml").exists()
+
+
+@pytest.mark.skipif(not HAS_OPA, reason="opa binary not installed")
+def test_check_cli_opa_approves_real_bypass_reason(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "SEC_001", "name": "No hardcoded secrets", "check": "ast_pattern",
+         "pattern": r"password\s*=\s*['\"]", "severity": "hard_block", "scope": ["*.py"]},
+    ])
+    _write_bypass_policy(pcp_dir)
+    (tmp_path / "bad.py").write_text("password = 'hunter2'\n")
+    msg_file = _write_commit_msg(tmp_path, "Fix\n\n[pcp-bypass: known false positive, verified safe by security team]\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "check", "--path", str(tmp_path), "--files", "bad.py", "--commit-msg-file", str(msg_file),
+    ])
+    assert result.exit_code == 0
+    assert (pcp_dir / "bypass_log.yaml").exists()
+
+
+def test_check_cli_bypass_permissive_without_opa_policy(tmp_path):
+    """No .pcp/policies/ scaffolded (the common case) -- bypass stays
+    permissive, exactly as before OPA was wired in."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "SEC_001", "name": "No hardcoded secrets", "check": "ast_pattern",
+         "pattern": r"password\s*=\s*['\"]", "severity": "hard_block", "scope": ["*.py"]},
+    ])
+    (tmp_path / "bad.py").write_text("password = 'hunter2'\n")
+    msg_file = _write_commit_msg(tmp_path, "Fix\n\n[pcp-bypass: reason]\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "check", "--path", str(tmp_path), "--files", "bad.py", "--commit-msg-file", str(msg_file),
+    ])
+    assert result.exit_code == 0
+    assert (pcp_dir / "bypass_log.yaml").exists()

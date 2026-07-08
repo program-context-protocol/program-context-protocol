@@ -185,7 +185,7 @@ def kickoff(vision_file: str, project_path: str, force: bool):
         val_result = None
 
     if val_result:
-        render_val_results(val_result, output_json=False)
+        render_val_results(pcp_dir, val_result, output_json=False)
 
     # PM approval step
     if click.confirm("\nApprove this strategy and proceed to alpha phase?"):

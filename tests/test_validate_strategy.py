@@ -127,3 +127,26 @@ def test_json_output_includes_coupling_fields(tmp_path):
     assert "coupling_score" in output
     assert "coverage_score" in output
     assert result.exit_code == 0
+
+
+def test_coupling_color_uses_opa_policy_when_scaffolded(tmp_path):
+    """Proves the coupling color is actually routed through OPA, not just
+    coincidentally matching the hardcoded bands -- the policy here returns
+    a value the hardcoded logic would never produce."""
+    from pcp.commands.validate_strategy import _coupling_color
+    with patch("pcp.policy.evaluate") as mock_eval:
+        mock_eval.return_value = {"available": True, "undefined": False, "value": "purple"}
+        color = _coupling_color(tmp_path / ".pcp", 0.9)
+    assert color == "purple"
+    mock_eval.assert_called_once_with(
+        tmp_path / ".pcp", "data.pcp.coupling.coupling_color", {"coupling_score": 0.9},
+    )
+
+
+def test_coupling_color_falls_back_when_no_policy_scaffolded(tmp_path):
+    from pcp.commands.validate_strategy import _coupling_color
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    assert _coupling_color(pcp_dir, 0.9) == "green"
+    assert _coupling_color(pcp_dir, 0.7) == "yellow"
+    assert _coupling_color(pcp_dir, 0.3) == "red"

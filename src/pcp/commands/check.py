@@ -194,6 +194,16 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
     msg_file = Path(commit_msg_file) if commit_msg_file else None
     bypass_reason = _read_bypass_reason(msg_file)
     if bypass_reason:
+        from pcp import policy
+        decision = policy.evaluate(pcp_dir, "data.pcp.bypass.approved", {"reason": bypass_reason})
+        if decision.get("available") and not decision.get("undefined") and decision.get("value") is False:
+            console.print(
+                f"[red]pcp-bypass rejected:[/red] '{bypass_reason}' reads as a placeholder, "
+                "not a real reason (policy: .pcp/policies/bypass_approval.rego)."
+            )
+            console.print("[dim]Give a specific, verifiable reason — not \"reason\"/\"todo\"/\"test\"/\"fixme\".[/dim]")
+            sys.exit(1)
+
         rule_ids = [r["id"] for r in rules + file_rules + protected_rules]
         _log_bypass(pcp_dir, bypass_reason, rule_ids)
         from pcp import telemetry

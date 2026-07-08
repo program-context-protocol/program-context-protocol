@@ -15,11 +15,29 @@ def test_init_scaffolds_expected_files(tmp_path):
         "objective.md", "target_state.md", "architecture.md", "ci_rules.yaml",
         "controls.yaml", "SDLC_phase.yaml", "strategy/decomposition.md",
         "architect_persona.md", "kb/adr/ADR-001-example.md", "kb/domain/general.md",
+        "policies/escalation.rego", "policies/bypass_approval.rego", "policies/coupling_threshold.rego",
     ]:
         assert (pcp / rel).exists(), f"missing {rel}"
 
     assert (tmp_path / "CLAUDE.md").exists()
     assert (tmp_path / ".gitattributes").exists()
+
+
+def test_init_scaffolded_policies_are_valid_rego(tmp_path):
+    """Real opa parse check, not just 'the file exists' -- a syntax error in a
+    scaffolded policy would silently degrade to {"available": True, "undefined":
+    True} everywhere it's queried, never surfacing as an error."""
+    import shutil
+    import subprocess
+    import pytest
+    if not shutil.which("opa"):
+        pytest.skip("opa binary not installed")
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "--path", str(tmp_path)])
+    policies_dir = tmp_path / ".pcp" / "policies"
+    result = subprocess.run(["opa", "eval", "-d", str(policies_dir), "data.pcp"],
+                             capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_init_generated_ci_rules_is_schema_valid(tmp_path):

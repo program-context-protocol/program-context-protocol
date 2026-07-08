@@ -438,6 +438,42 @@ def _run_gate_check(pcp_dir: Path, diff: str, ctx: dict) -> list[str]:
     return issues
 
 
+def _record_escalation(pcp_dir: Path, module_name: str, criterion_id: str, block_findings: list[str]) -> None:
+    """Route this criterion's final-attempt failure through OPA's escalation
+    policy (.pcp/policies/escalation.rego) -- advisory only, doesn't change
+    control flow (a 3rd-attempt failure already stops the build and hands
+    back to a human either way). Confidence is a simple proxy: how many
+    distinct gate categories still had violations on the last attempt.
+    high_stakes fires on any SEC_* (secrets/eval/sql-injection) finding --
+    those should never be treated as routine, low-stakes retries.
+
+    Degrades silently if opa isn't installed or no escalation.rego is
+    scaffolded -- this is informational, never a hard dependency on OPA."""
+    from pcp import policy
+    gate_categories = 6  # test-suite, lint, sast, layer1, architect-review, gate
+    distinct_violations = len(block_findings)
+    confidence_score = max(0.0, 1.0 - (distinct_violations / gate_categories))
+    high_stakes = any(f.startswith("File Rule [SEC_") or f.startswith("AST Rule [SEC_") for f in block_findings)
+
+    decision = policy.evaluate(
+        pcp_dir, "data.pcp.escalation.route",
+        {"confidence_score": confidence_score, "high_stakes": high_stakes},
+    )
+    if not decision.get("available") or decision.get("undefined"):
+        return
+
+    route = decision.get("value", "human")
+    console.print(
+        f"[dim]Escalation policy: route={route} "
+        f"(confidence={confidence_score:.2f}, high_stakes={high_stakes})[/dim]"
+    )
+    telemetry.record(
+        pcp_dir, cycle="qa", cycle_number=None, check="escalation",
+        module=module_name, submodule=None, criterion_id=criterion_id,
+        files=[], result="pass", errors=[f"route={route}"], error_count=0,
+    )
+
+
 @click.command()
 @click.option("--module", "module_name", default=None,
               help="Build specific module only.")
@@ -679,6 +715,7 @@ def build(module_name: str | None, project_path: str | None):
                 write_pcp_md(pcp_dir, modules_results, timestamp, total, complete)
             else:
                 console.print(f"[red]✗ Failed to build Criterion [{c['id']}] after 3 attempts.[/red]")
+                _record_escalation(pcp_dir, mod["name"], c["id"], block_findings)
                 console.print("[bold red]Build execution stopped. Please resolve findings manually.[/bold red]")
                 sys.exit(1)
 

@@ -483,6 +483,47 @@ Accepted | Superseded | Deprecated
 [What this enables. What it constrains.]
 """
 
+POLICY_ESCALATION_TEMPLATE = """\
+package pcp.escalation
+
+# Confidence/stakes-gated routing: PCP's own asymmetric-failure-cost
+# principle (never silently treat "unsure" as "safe to automate") --
+# low confidence or an explicitly high-stakes action always escalates to
+# a human rather than resolving through the agent by default.
+
+default route := "agent"
+
+route := "human" if input.confidence_score < 0.65
+route := "human" if input.high_stakes == true
+"""
+
+POLICY_BYPASS_TEMPLATE = """\
+package pcp.bypass
+
+# Formalizes what ci_rules.yaml's [pcp-bypass: reason] mechanism treats as
+# ad-hoc otherwise -- rejects placeholder reasons before pcp check treats
+# a reason as adequate to log and accept a Layer 1 bypass.
+
+default approved := false
+
+approved if {
+	count(trim_space(input.reason)) > 0
+	not lower(trim_space(input.reason)) in {"reason", "todo", "test", "fixme"}
+}
+"""
+
+POLICY_COUPLING_TEMPLATE = """\
+package pcp.coupling
+
+# Mirrors validate_strategy.py's display thresholds (green >= 0.8,
+# yellow >= 0.6, else red) -- human-editable here instead of buried in
+# Python.
+
+coupling_color := "green" if input.coupling_score >= 0.8
+else := "yellow" if input.coupling_score >= 0.6
+else := "red"
+"""
+
 DOMAIN_KB_TEMPLATE = """\
 # Domain Knowledge: [Technology/Area]
 
@@ -530,6 +571,9 @@ def init(project_path: str, module_name: str | None, force: bool):
         pcp / "architect_persona.md": ARCHITECT_PERSONA_TEMPLATE,
         pcp / "kb" / "adr" / "ADR-001-example.md": ADR_EXAMPLE,
         pcp / "kb" / "domain" / "general.md": DOMAIN_KB_TEMPLATE,
+        pcp / "policies" / "escalation.rego": POLICY_ESCALATION_TEMPLATE,
+        pcp / "policies" / "bypass_approval.rego": POLICY_BYPASS_TEMPLATE,
+        pcp / "policies" / "coupling_threshold.rego": POLICY_COUPLING_TEMPLATE,
     }
 
     if module_name:
