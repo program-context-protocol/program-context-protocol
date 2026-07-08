@@ -23,6 +23,47 @@ def test_init_scaffolds_expected_files(tmp_path):
     assert (tmp_path / ".gitattributes").exists()
 
 
+def test_init_installs_commit_msg_hook_in_a_git_repo(tmp_path):
+    """Real intent: 'once a project opts into PCP, it's totally governed' --
+    a project shouldn't be able to have .pcp/ scaffolded but no Layer 1
+    enforcement just because installing the hook was a separate manual step
+    a human could forget."""
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["init", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "installed" in result.output.lower()
+
+    hook_path = tmp_path / ".git" / "hooks" / "commit-msg"
+    assert hook_path.exists()
+    assert "pcp check --commit-msg-file" in hook_path.read_text()
+    assert oct(hook_path.stat().st_mode)[-3:] == "755"
+
+
+def test_init_skips_hook_gracefully_outside_a_git_repo(tmp_path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["init", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "not a git repository" in result.output.lower()
+    assert not (tmp_path / ".git").exists()
+
+
+def test_init_does_not_duplicate_cron_side_effects(tmp_path):
+    """install_git_hook() (used by pcp init) must never touch crontab --
+    that's install_hook.py's own _install_cron_scripts(), deliberately
+    scoped to the explicit `pcp install-hook` CLI command only."""
+    import subprocess
+    from unittest.mock import patch
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+
+    with patch("pcp.commands.install_hook._install_cron_scripts") as mock_cron:
+        runner = CliRunner()
+        runner.invoke(cli, ["init", "--path", str(tmp_path)])
+    mock_cron.assert_not_called()
+
+
 def test_init_scaffolded_policies_are_valid_rego(tmp_path):
     """Real opa parse check, not just 'the file exists' -- a syntax error in a
     scaffolded policy would silently degrade to {"available": True, "undefined":

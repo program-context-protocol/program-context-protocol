@@ -3,6 +3,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from pcp.cli import cli
+from pcp.commands.install_hook import install_git_hook
 
 
 def _init_git_repo(tmp_path):
@@ -79,3 +80,41 @@ def test_install_hook_pre_commit_framework_skips_if_already_present(tmp_path):
         result = runner.invoke(cli, ["install-hook", "--path", str(tmp_path), "--pre-commit-framework"])
     assert result.exit_code == 0
     assert "already in" in result.output
+
+
+# ── install_git_hook() -- the pure, no-cron-side-effect function pcp init calls ──
+
+def test_install_git_hook_writes_hook_no_cron(tmp_path):
+    _init_git_repo(tmp_path)
+    with patch("pcp.commands.install_hook._install_cron_scripts") as mock_cron:
+        installed, msg = install_git_hook(tmp_path)
+    assert installed
+    assert "installed" in msg
+    hook_path = tmp_path / ".git" / "hooks" / "commit-msg"
+    assert hook_path.exists()
+    mock_cron.assert_not_called()
+
+
+def test_install_git_hook_returns_false_outside_git_repo(tmp_path):
+    installed, msg = install_git_hook(tmp_path)
+    assert not installed
+    assert "not a git repository" in msg
+
+
+def test_install_git_hook_idempotent_when_already_installed(tmp_path):
+    _init_git_repo(tmp_path)
+    install_git_hook(tmp_path)
+    installed, msg = install_git_hook(tmp_path)  # second call, no --force
+    assert installed
+    assert "already installed" in msg
+
+
+def test_install_git_hook_refuses_to_clobber_a_foreign_hook(tmp_path):
+    _init_git_repo(tmp_path)
+    hook_path = tmp_path / ".git" / "hooks" / "commit-msg"
+    hook_path.parent.mkdir(exist_ok=True)
+    hook_path.write_text("#!/bin/sh\necho some other tool's hook\n")
+    installed, msg = install_git_hook(tmp_path)
+    assert not installed
+    assert "already exists" in msg
+    assert hook_path.read_text() == "#!/bin/sh\necho some other tool's hook\n"

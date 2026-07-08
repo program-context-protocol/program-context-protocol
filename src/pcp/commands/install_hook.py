@@ -39,6 +39,48 @@ repos:
 """
 
 
+def _find_git_dir(project_root: Path) -> Path | None:
+    import subprocess
+    try:
+        r = subprocess.run(["git", "rev-parse", "--git-dir"],
+                           capture_output=True, text=True, cwd=project_root)
+        git_dir = Path(r.stdout.strip()) if r.returncode == 0 else None
+    except FileNotFoundError:
+        git_dir = None
+    if git_dir and not git_dir.is_absolute():
+        git_dir = project_root / git_dir
+    return git_dir
+
+
+def install_git_hook(project_root: Path, force: bool = False) -> tuple[bool, str]:
+    """Just the commit-msg hook file -- no cron side effects. Pulled out of
+    the CLI command so `pcp init` can call this directly and get a project
+    under real Layer-1 enforcement the moment it's scaffolded, without also
+    silently registering global crontab jobs every time `pcp init` runs
+    (that's `install_hook`'s own `_install_cron_scripts()`, deliberately
+    scoped to the explicit `pcp install-hook` CLI path only).
+
+    Returns (installed: bool, message: str) -- never raises, so callers
+    that want this to be a best-effort side effect (like init.py) can just
+    print the message and move on rather than handling exceptions."""
+    git_dir = _find_git_dir(project_root)
+    if not git_dir:
+        return False, "not a git repository yet -- skipped"
+
+    hooks_dir = git_dir / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    hook_path = hooks_dir / "commit-msg"
+
+    if hook_path.exists() and not force:
+        if "pcp check --commit-msg-file" in hook_path.read_text():
+            return True, f"already installed at {hook_path}"
+        return False, f"a different commit-msg hook already exists at {hook_path} -- run `pcp install-hook --force` to overwrite, or `--pre-commit-framework` to append"
+
+    hook_path.write_text(COMMIT_MSG_HOOK)
+    hook_path.chmod(0o755)
+    return True, f"installed {hook_path}"
+
+
 @click.command()
 @click.option("--path", "project_path", type=click.Path(), default=None)
 @click.option("--pre-commit-framework", is_flag=True,
@@ -69,21 +111,10 @@ def install_hook(project_path: str | None, pre_commit_framework: bool, force: bo
             console.print("[green]created[/green] .pre-commit-config.yaml with pcp-check")
         return
 
-    git_dir_result = None
-    try:
-        import subprocess
-        r = subprocess.run(["git", "rev-parse", "--git-dir"],
-                           capture_output=True, text=True, cwd=project_root)
-        git_dir = Path(r.stdout.strip()) if r.returncode == 0 else None
-    except FileNotFoundError:
-        git_dir = None
-
+    git_dir = _find_git_dir(project_root)
     if not git_dir:
         console.print("[red]Error:[/red] not a git repository.")
         sys.exit(2)
-
-    if not git_dir.is_absolute():
-        git_dir = project_root / git_dir
 
     hooks_dir = git_dir / "hooks"
     hooks_dir.mkdir(exist_ok=True)

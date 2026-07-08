@@ -633,6 +633,18 @@ def init(project_path: str, module_name: str | None, force: bool):
             f.write("\n" + "\n".join(additions) + "\n")
         console.print(f"  [green]updated[/green]  .gitattributes")
 
+    # Layer 1 enforcement wired up automatically, not left as a manual step a
+    # human could forget -- "this project has .pcp/" and "this project is
+    # actually governed" used to be two separate facts. Cron side effects
+    # (global intervention aggregation, skill upgrade check) deliberately
+    # NOT included here -- see install_git_hook()'s own docstring.
+    from pcp.commands.install_hook import install_git_hook
+    hook_installed, hook_msg = install_git_hook(root)
+    if hook_installed:
+        console.print(f"  [green]installed[/green]  commit-msg hook  ({hook_msg})")
+    else:
+        console.print(f"  [dim]hook not installed[/dim]  ({hook_msg})")
+
     console.print(f"\n[bold]PCP initialised at {pcp}[/bold]")
     console.print("\nNext steps:")
     console.print("  1. Edit [cyan].pcp/objective.md[/cyan] — describe WHY this program exists")
