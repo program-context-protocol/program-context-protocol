@@ -12,8 +12,16 @@ console = Console()
 
 COMMIT_MSG_HOOK = """\
 #!/bin/sh
-# PCP Layer 1 gate
+# PCP Layer 1 gate + commit hygiene
 # Installed by: pcp install-hook
+#
+# Strips any Co-Authored-By trailer referencing Claude/Anthropic before the
+# commit message is finalized -- defense in depth for "never attribute a
+# commit to Claude": even if some other tool, session, or human adds one by
+# habit, it never reaches the actual commit object. Uses perl, not sed -i,
+# because sed's in-place-edit flag syntax differs between BSD (macOS) and
+# GNU (Linux) sed -- perl -ni is identical on both.
+perl -ni -e 'print unless /^Co-Authored-By:.*(claude|anthropic)/i' "$1"
 #
 # Runs as a commit-msg hook, not pre-commit: git does not write the final
 # commit message to disk until after pre-commit runs (confirmed empirically —
