@@ -249,6 +249,15 @@ controls:
     enforcement: advisory
     description: "Every session transcript pcp capture is invoked on is copied (gzip-compressed) into .pcp/transcripts/ before classification runs — the full raw action record, not just the classifier's distilled BRD/decision-log summary, becomes part of this project's own durable evidence instead of living only in Claude Code's own ~/.claude/projects/ retention."
     ssdf_practice: ["PO.3.2"]
+
+  - id: CTRL-012
+    name: "Ticket automation (analyze/approve/reject/submit)"
+    layer: cross-cutting
+    mechanism: "program-context-protocol-team: tickets/analysis.py, tickets/actions.py"
+    tool: "LLM judge (JUDGE_MODEL) for analysis; Temporal for submission"
+    enforcement: advisory
+    description: "A ticket ingested via program-context-protocol-team's webhook is analyzed (root-cause hypothesis + fix options), and every human decision (approve one option / reject) is recorded here, with the LLM's full raw analysis response stored as evidence — same as any other QA judge call. A human always decides; nothing in this control auto-picks an option."
+    ssdf_practice: ["PW.4.1", "RV.1.1"]
 """
 
 SDLC_PHASE_TEMPLATE = """\
