@@ -1,5 +1,6 @@
 """pcp init — scaffold .pcp/ directory in a project."""
 
+import re
 import sys
 from pathlib import Path
 
@@ -7,6 +8,10 @@ import click
 from rich.console import Console
 
 console = Console()
+
+
+def _pascal_case(name: str) -> str:
+    return "".join(part.capitalize() for part in re.split(r"[_-]", name) if part)
 
 OBJECTIVE_TEMPLATE = """\
 # Program Objective
@@ -65,6 +70,7 @@ rules:
     pattern: "from \\\\.\\\\./(\\\\.\\\\./)?[^/]+/src/"
     severity: hard_block
     message: "Modules must communicate through interfaces/, not by importing each other's src/. Move shared types to interfaces/."
+    scope: ["*.py", "*.js", "*.jsx", "*.ts", "*.tsx", "*.go", "*.rb", "*.java", "*.php", "*.cs", "*.rs"]
 
   - id: MOD_002
     name: "No hardcoded module names as string literals in orchestrator"
@@ -73,6 +79,7 @@ rules:
     pattern: "require\\\\(['\\\"]\\\\.\\\\./"
     severity: hard_block
     message: "Use the module registry pattern — app.register(Module) not require('../module')."
+    scope: ["*.js", "*.jsx", "*.ts", "*.tsx"]
 
   - id: MOD_003
     name: "Every module must have a public interface file"
@@ -528,7 +535,9 @@ def init(project_path: str, module_name: str | None, force: bool):
     if module_name:
         mod_dir = pcp / "strategy" / "modules" / module_name
         files[mod_dir / "spec.yaml"] = MODULE_SPEC_TEMPLATE.format(name=module_name)
-        files[mod_dir / "acceptance.yaml"] = MODULE_ACCEPTANCE_TEMPLATE.format(name=module_name)
+        files[mod_dir / "acceptance.yaml"] = MODULE_ACCEPTANCE_TEMPLATE.format(
+            name=module_name, name_upper=module_name.upper(), name_pascal=_pascal_case(module_name),
+        )
 
     created = []
     skipped = []
