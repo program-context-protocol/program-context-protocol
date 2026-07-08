@@ -27,6 +27,7 @@ from pcp.commands.deploy import deploy
 from pcp.commands.capture import capture
 from pcp.commands.provenance import provenance
 from pcp.commands.takeover import takeover
+from pcp.commands.dashboard import dashboard
 
 
 @click.group()
@@ -64,3 +65,4 @@ cli.add_command(deploy)
 cli.add_command(capture)
 cli.add_command(provenance)
 cli.add_command(takeover)
+cli.add_command(dashboard)
