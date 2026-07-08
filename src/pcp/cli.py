@@ -27,6 +27,7 @@ from pcp.commands.capture import capture
 from pcp.commands.provenance import provenance
 from pcp.commands.takeover import takeover
 from pcp.commands.process_cmd import process_worker
+from pcp.commands.process_submit import process_submit
 
 
 @click.group()
@@ -64,3 +65,4 @@ cli.add_command(capture)
 cli.add_command(provenance)
 cli.add_command(takeover)
 cli.add_command(process_worker, name="process-worker")
+cli.add_command(process_submit)
