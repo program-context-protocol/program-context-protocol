@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "program-context-protocol"
-version = "0.3.1"
+version = "0.3.2"
 description = "PCP — prevent LLM hallucination and context drift across dev sessions"
 requires-python = ">=3.10"
 dependencies = [
@@ -34,6 +34,7 @@ pcp = "pcp.cli:cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pcp"]
+artifacts = ["src/pcp/skill_data/**/*.md"]
 
 [tool.hatch.envs.default]
 dependencies = [

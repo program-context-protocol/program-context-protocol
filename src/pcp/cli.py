@@ -12,6 +12,7 @@ from pcp.commands.context import context
 from pcp.commands.validate_module import validate_module
 from pcp.commands.report import report
 from pcp.commands.install_hook import install_hook
+from pcp.commands.install_skill import install_skill
 from pcp.commands.status import status
 from pcp.commands.architect_review import architect_review
 from pcp.commands.kickoff import kickoff
@@ -50,6 +51,7 @@ cli.add_command(validate_module, name="validate-module")
 cli.add_command(context)
 cli.add_command(report)
 cli.add_command(install_hook, name="install-hook")
+cli.add_command(install_skill)
 cli.add_command(status)
 cli.add_command(architect_review, name="architect-review")
 cli.add_command(kickoff)
