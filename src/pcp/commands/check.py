@@ -42,19 +42,22 @@ def _read_bypass_reason(commit_msg_file: Path | None) -> str | None:
 
 
 def _log_bypass(pcp_dir: Path, reason: str, rules_checked: list[str]) -> None:
+    from datetime import datetime, timezone
+    from pcp.evidence_chain import chain_entry
+
     log_path = pcp_dir / BYPASS_LOG
     existing = []
     if log_path.exists():
         data = yaml.safe_load(log_path.read_text()) or {}
         existing = data.get("bypasses", [])
 
-    from datetime import datetime, timezone
-    entry = {
+    prev_hash = existing[-1].get("entry_hash") if existing else None
+    fields = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": reason,
         "rules_bypassed": rules_checked,
     }
-    existing.append(entry)
+    existing.append(chain_entry(prev_hash, fields))
 
     with open(log_path, "w") as f:
         yaml.dump({"bypasses": existing}, f, default_flow_style=False)

@@ -94,3 +94,41 @@ def test_provenance_cli_json(tmp_path):
     result = runner.invoke(cli, ["provenance", "--path", str(tmp_path), "--json"])
     data = json.loads(result.output)
     assert data["per_file"]["a.py"]["CTRL-001"]["result"] == "pass"
+
+
+def test_chain_integrity_intact_for_normal_telemetry(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    telemetry.record(pcp_dir, cycle="qa", control_id="CTRL-001", result="pass", files=["a.py"])
+    telemetry.record(pcp_dir, cycle="qa", control_id="CTRL-001", result="block", files=["a.py"])
+    result = build_provenance(pcp_dir)
+    assert result["chain_integrity"]["telemetry.jsonl"] == []
+
+
+def test_chain_integrity_flags_tampered_telemetry(tmp_path):
+    import json as jsonmod
+
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    telemetry.record(pcp_dir, cycle="qa", control_id="CTRL-001", result="block", files=["a.py"])
+
+    path = pcp_dir / "telemetry.jsonl"
+    entry = jsonmod.loads(path.read_text().strip())
+    entry["result"] = "pass"  # tampered after the fact, hash not recomputed
+    path.write_text(jsonmod.dumps(entry) + "\n")
+
+    result = build_provenance(pcp_dir)
+    assert len(result["chain_integrity"]["telemetry.jsonl"]) == 1
+
+
+def test_chain_integrity_section_rendered_in_markdown(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    telemetry.record(pcp_dir, cycle="qa", control_id="CTRL-001", result="pass", files=["a.py"])
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["provenance", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+    md = (pcp_dir / "provenance.md").read_text()
+    assert "Chain Integrity" in md
+    assert "telemetry.jsonl`: intact" in md

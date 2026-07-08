@@ -12,6 +12,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from pcp.evidence_chain import chain_entry
+
 
 def record(pcp_dir: Path, **fields) -> None:
     """Append one JSONL record to .pcp/decision_log.jsonl.
@@ -20,10 +22,27 @@ def record(pcp_dir: Path, **fields) -> None:
     session_id, category (freeform, e.g. "library-choice"|"architecture"|"workaround"),
     summary, evidence (quoted excerpt), module, criterion_id.
     """
-    entry = {"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), **fields}
+    fields = {"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), **fields}
     path = Path(pcp_dir) / "decision_log.jsonl"
+    entry = chain_entry(_last_entry_hash(path), fields)
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+def _last_entry_hash(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    last_line = None
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line:
+            last_line = line
+    if not last_line:
+        return None
+    try:
+        return json.loads(last_line).get("entry_hash")
+    except json.JSONDecodeError:
+        return None
 
 
 def load(pcp_dir: Path) -> list[dict]:

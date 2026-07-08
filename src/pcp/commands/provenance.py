@@ -22,6 +22,8 @@ from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 from pcp import telemetry as telemetry_mod
+from pcp import decision_log as decision_log_mod
+from pcp.evidence_chain import verify_chain
 
 console = Console()
 
@@ -73,11 +75,31 @@ def _control_id_for(record: dict) -> str | None:
     return record.get("control_id") or CHECK_TO_CONTROL.get(record.get("check"))
 
 
+def _check_chain_integrity(pcp_dir: Path) -> dict:
+    """Verifies the hash chain on every append-only evidence log. Any non-empty
+    break list here means a record was edited, reordered, or deleted after
+    the fact — this is the one check in this whole document that isn't just
+    reporting what ran, it's reporting whether the report itself can be
+    trusted."""
+    telemetry_breaks = verify_chain(telemetry_mod.load(pcp_dir))
+    decision_breaks = verify_chain(decision_log_mod.load(pcp_dir))
+    bypass_breaks = verify_chain(_load_bypasses(pcp_dir))
+    return {
+        "telemetry.jsonl": telemetry_breaks,
+        "decision_log.jsonl": decision_breaks,
+        "bypass_log.yaml": bypass_breaks,
+    }
+
+
 def build_provenance(pcp_dir: Path) -> dict:
     """Pure aggregation — safe to call at any point, no side effects besides read."""
     controls = _load_controls(pcp_dir)
-    qa_records = [r for r in telemetry_mod.load(pcp_dir) if r.get("cycle") == "qa"]
+    # Not just cycle=="qa" -- cross-cutting controls (e.g. CTRL-011 transcript
+    # archival, recorded under cycle="capture") carry a control_id too and
+    # belong in the same per-file/per-control coverage view.
+    qa_records = [r for r in telemetry_mod.load(pcp_dir) if _control_id_for(r)]
     bypasses = _load_bypasses(pcp_dir)
+    chain_integrity = _check_chain_integrity(pcp_dir)
 
     per_file: dict[str, dict[str, dict]] = defaultdict(dict)
     per_control: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -111,6 +133,7 @@ def build_provenance(pcp_dir: Path) -> dict:
         "standing_gap_cids": sorted(standing_gap_cids),
         "never_exercised_cids": sorted(never_exercised_cids),
         "bypasses": bypasses,
+        "chain_integrity": chain_integrity,
     }
 
 
@@ -166,6 +189,24 @@ def _render_markdown(project_root: Path, data: dict, timestamp: str) -> str:
             lines.append(f"- `{b.get('timestamp', '')}` — {b.get('reason', '')} (rules: {rules})")
     else:
         lines.append("_No bypasses._")
+    lines.append("")
+
+    lines += ["## Chain Integrity", "", "Each evidence log is hash-chained — an entry's hash covers its own "
+              "content plus the previous entry's hash, so an edit/reorder/deletion after the fact is "
+              "detectable even though the files themselves are plain, editable JSON/YAML.", ""]
+    any_break = False
+    for log_name, breaks in data["chain_integrity"].items():
+        if not breaks:
+            lines.append(f"- `{log_name}`: intact.")
+        else:
+            any_break = True
+            lines.append(f"- `{log_name}`: **{len(breaks)} break(s) detected**")
+            for b in breaks:
+                lines.append(f"  - index {b['index']}: {b['issue']}")
+    if any_break:
+        lines.append("")
+        lines.append("**A break here means this evidence document cannot be trusted as-is — "
+                      "investigate before relying on anything above.**")
     lines.append("")
 
     lines += ["## SSDF Crosswalk", "", "| Control | SSDF Practice | Enforcement | Status |", "|---|---|---|---|"]

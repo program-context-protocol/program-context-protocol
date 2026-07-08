@@ -41,3 +41,14 @@ def test_record_appends_multiple_entries_in_order(tmp_path):
     decision_log.record(tmp_path, category="b", summary="second")
     records = decision_log.load(tmp_path)
     assert [r["summary"] for r in records] == ["first", "second"]
+
+
+def test_records_are_hash_chained(tmp_path):
+    from pcp.evidence_chain import verify_chain
+
+    decision_log.record(tmp_path, category="a", summary="first")
+    decision_log.record(tmp_path, category="b", summary="second")
+    records = decision_log.load(tmp_path)
+    assert records[0]["prev_hash"] == "genesis"
+    assert records[1]["prev_hash"] == records[0]["entry_hash"]
+    assert verify_chain(records) == []

@@ -84,7 +84,9 @@ def test_run_capture_never_raises_on_bad_transcript(tmp_path):
     bad_transcript = tmp_path / "empty.jsonl"
     bad_transcript.write_text("")
     result = capture.run_capture(pcp_dir, bad_transcript, source="session:x")
-    assert result == {"skipped": "empty transcript"}
+    assert result["skipped"] == "empty transcript"
+    # Archived anyway -- an empty/routine transcript is still a real record.
+    assert result["archived_path"] is not None
 
 
 def test_capture_cli_classifies_and_writes_artifacts(tmp_path):
@@ -119,3 +121,68 @@ def test_capture_cli_classifies_and_writes_artifacts(tmp_path):
     assert "1 technical item(s)" in result.output
     assert (pcp_dir / "brd.md").exists()
     assert (pcp_dir / "decision_log.jsonl").exists()
+
+
+# ── raw transcript archival (CTRL-011) ──
+
+def test_archive_transcript_writes_gzipped_copy(tmp_path):
+    import gzip
+
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"message": {"role": "user", "content": "hi"}}\n')
+
+    rel = capture.archive_transcript(pcp_dir, transcript, "abc123")
+    assert rel == "transcripts/abc123.jsonl.gz"
+    with gzip.open(pcp_dir / rel, "rt") as f:
+        assert f.read() == transcript.read_text()
+
+
+def test_archive_transcript_none_when_transcript_missing(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    assert capture.archive_transcript(pcp_dir, tmp_path / "nope.jsonl", "abc123") is None
+    assert capture.archive_transcript(pcp_dir, None, "abc123") is None
+
+
+def test_archive_transcript_falls_back_to_filename_without_session_id(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    transcript = tmp_path / "mysession.jsonl"
+    transcript.write_text("content")
+    rel = capture.archive_transcript(pcp_dir, transcript, None)
+    assert rel == "transcripts/mysession.jsonl.gz"
+
+
+def test_run_capture_records_archival_to_telemetry(tmp_path):
+    from pcp import telemetry
+
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Objective")
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("")  # empty -- classification skips, archival still runs
+
+    capture.run_capture(pcp_dir, transcript, source="session:x", session_id="sess1")
+
+    records = telemetry.load(pcp_dir)
+    archive_records = [r for r in records if r.get("check") == "transcript-archive"]
+    assert len(archive_records) == 1
+    assert archive_records[0]["control_id"] == "CTRL-011"
+    assert archive_records[0]["result"] == "pass"
+    assert archive_records[0]["evidence_path"] == "transcripts/sess1.jsonl.gz"
+
+
+def test_run_capture_includes_archived_path_on_success(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Objective")
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, [("user", "hello"), ("assistant", "hi")])
+
+    with patch("pcp.llm.client.call_json") as mock_call_json:
+        mock_call_json.return_value = {"business_items": [], "technical_items": []}
+        result = capture.run_capture(pcp_dir, transcript, source="session:x", session_id="sess2")
+
+    assert result["archived_path"] == "transcripts/sess2.jsonl.gz"

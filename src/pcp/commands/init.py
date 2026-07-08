@@ -240,6 +240,15 @@ controls:
     enforcement: override
     description: "A human can override CTRL-004 per-commit with `[pcp-bypass: reason]`. Every bypass is appended to bypass_log.yaml (reason + rules bypassed) and to telemetry.jsonl (result: bypassed) — never silent, always auditable."
     ssdf_practice: ["PO.5.1"]
+
+  - id: CTRL-011
+    name: "Session transcript archival"
+    layer: cross-cutting
+    mechanism: "capture.py archive_transcript()"
+    tool: "n/a"
+    enforcement: advisory
+    description: "Every session transcript pcp capture is invoked on is copied (gzip-compressed) into .pcp/transcripts/ before classification runs — the full raw action record, not just the classifier's distilled BRD/decision-log summary, becomes part of this project's own durable evidence instead of living only in Claude Code's own ~/.claude/projects/ retention."
+    ssdf_practice: ["PO.3.2"]
 """
 
 SDLC_PHASE_TEMPLATE = """\

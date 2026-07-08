@@ -194,6 +194,22 @@ def test_check_cli_bypass_logs_and_exits_zero(tmp_path):
     bypass_log = yaml.safe_load((pcp_dir / "bypass_log.yaml").read_text())
     assert len(bypass_log["bypasses"]) == 1
     assert bypass_log["bypasses"][0]["reason"] == "known false positive, verified safe"
+    assert bypass_log["bypasses"][0]["prev_hash"] == "genesis"
+    assert "entry_hash" in bypass_log["bypasses"][0]
+
+
+def test_bypass_log_entries_chain_across_multiple_bypasses(tmp_path):
+    from pcp.evidence_chain import verify_chain
+    from pcp.commands.check import _log_bypass
+
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _log_bypass(pcp_dir, "first bypass, reviewed by hand", ["SEC_001"])
+    _log_bypass(pcp_dir, "second bypass, unrelated finding", ["SEC_002"])
+
+    bypasses = yaml.safe_load((pcp_dir / "bypass_log.yaml").read_text())["bypasses"]
+    assert bypasses[1]["prev_hash"] == bypasses[0]["entry_hash"]
+    assert verify_chain(bypasses) == []
 
 
 def test_check_cli_no_ci_rules_skips(tmp_path):

@@ -19,6 +19,7 @@ from pcp.llm.client import _claude_bin, _log_usage
 from pcp.pcp_status import write_pcp_md
 from pcp import telemetry
 from pcp import qa
+from pcp import evidence
 from pcp.capture import find_transcript_for_session, run_capture
 
 console = Console()
@@ -204,7 +205,8 @@ def _cleanup_worktree(project_root: Path, module_name: str, wt_path: Path) -> No
 
 
 def _wave_record(pcp_dir: Path, wave_number: int, check: str, control_id: str, errors: list[str],
-                  files: list[str] | None = None, result: str | None = None) -> None:
+                  files: list[str] | None = None, result: str | None = None,
+                  evidence_path: str | None = None) -> None:
     """Wave-merge gates have no single criterion_id/attempt — record at cycle_number=wave_number
     so they still land in the same telemetry.jsonl audit trail as per-criterion QA checks,
     instead of only ever reaching the user as a console line."""
@@ -215,6 +217,7 @@ def _wave_record(pcp_dir: Path, wave_number: int, check: str, control_id: str, e
         cycle="qa", cycle_number=wave_number, check=f"wave-{check}", control_id=control_id,
         module=None, submodule=None, criterion_id=None,
         files=files or [], result=result, errors=errors, error_count=len(errors),
+        evidence_path=evidence_path,
     )
 
 
@@ -245,10 +248,15 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     # 2. Full integration test suite on the merged state.
     test_result = qa.run_test_suite(project_root)
     test_findings: list[str] = []
+    wave_evidence_path = None
+    if test_result["tool"]:
+        wave_evidence_path = evidence.store(
+            pcp_dir, "_wave", f"wave_{wave_number}", wave_number, "test-suite", test_result["output"],
+        )
     if test_result["tool"] and not test_result["passed"]:
-        test_findings.append(f"Wave integration suite ({test_result['tool']}) FAILED:\n{test_result['output'][-1500:]}")
+        test_findings.append(f"Wave integration suite ({test_result['tool']}) FAILED — full output: {wave_evidence_path}\n{test_result['output'][-1500:]}")
     _wave_record(pcp_dir, wave_number, "test-suite", "CTRL-001", test_findings, files=wave_mod_names,
-                 result="skipped" if not test_result["tool"] else None)
+                 result="skipped" if not test_result["tool"] else None, evidence_path=wave_evidence_path)
     findings += test_findings
 
     # 3. validate-strategy re-check — coverage/coupling after this wave's changes.
@@ -256,6 +264,10 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
         from pcp.commands.validate_strategy import run_validate_strategy
         vs = run_validate_strategy(pcp_dir, command="wave-validate-strategy")
         strategy_findings: list[str] = []
+        vs_evidence_path = evidence.store(
+            pcp_dir, "_wave", f"wave_{wave_number}", wave_number, "validate-strategy",
+            json.dumps(vs, indent=2, default=str) if vs else "(no result)",
+        )
         if vs:
             severe_coupling = [v for v in vs.get("coupling_violations", []) if v.get("type") in ("circular", "god_module", "shared_state")]
             if vs.get("coverage_gaps") or severe_coupling:
@@ -263,9 +275,11 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
                     f"validate-strategy: coverage={vs.get('coverage_score', 0):.0%}, "
                     f"coupling={vs.get('coupling_score', 1):.0%}, "
                     f"gaps={len(vs.get('coverage_gaps', []))}, "
-                    f"severe coupling violations={len(severe_coupling)} (circular/god_module/shared_state)"
+                    f"severe coupling violations={len(severe_coupling)} (circular/god_module/shared_state) — "
+                    f"full result: {vs_evidence_path}"
                 )
-        _wave_record(pcp_dir, wave_number, "validate-strategy", "CTRL-008", strategy_findings, files=wave_mod_names)
+        _wave_record(pcp_dir, wave_number, "validate-strategy", "CTRL-008", strategy_findings, files=wave_mod_names,
+                     evidence_path=vs_evidence_path)
         findings += strategy_findings
     except Exception as e:
         console.print(f"[yellow]Warning: wave validate-strategy check failed: {e}[/yellow]")
@@ -290,7 +304,11 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
             for f in res.get("findings", []):
                 if f.get("severity") == "BLOCK":
                     arch_findings.append(f"Wave architect-review: {f.get('location', 'general')}: {f.get('finding', '')} → Fix: {f.get('fix', '')}")
-            _wave_record(pcp_dir, wave_number, "architect-review", "CTRL-005", arch_findings, files=changed)
+            arch_evidence_path = evidence.store(
+                pcp_dir, "_wave", f"wave_{wave_number}", wave_number, "architect-review", json.dumps(res, indent=2),
+            )
+            _wave_record(pcp_dir, wave_number, "architect-review", "CTRL-005", arch_findings, files=changed,
+                         evidence_path=arch_evidence_path)
         findings += arch_findings
     except Exception as e:
         console.print(f"[yellow]Warning: wave architect-review failed: {e}[/yellow]")
@@ -408,12 +426,18 @@ _NOTSET = object()
 def _qa_record(
     pcp_dir: Path, ctx: dict, check: str, errors: list[str], meta: dict | None = None,
     *, control_id: str | None = None, files: list[str] | None = None,
-    tool: str | None = _NOTSET, result: str | None = None,
+    tool: str | None = _NOTSET, result: str | None = None, evidence_path: str | None = None,
 ) -> None:
     """Records one gate outcome. `result` resolution order: explicit override,
     then "skipped" if a tool-based check found no tool installed, then
     block/pass from `errors`. A skip must never collapse into "pass" — that's
-    what makes an unenforced control invisible in the audit trail."""
+    what makes an unenforced control invisible in the audit trail.
+
+    evidence_path: relative path (under pcp_dir) to the FULL, untruncated raw
+    artifact for this check (test output, lint issue list, judge response) —
+    see evidence.py. telemetry only ever stored a truncated error summary;
+    this is the pointer to actual proof, written on every outcome including
+    a pass, not just when something blocks."""
     if result is None:
         if tool is not _NOTSET and tool is None:
             result = "skipped"
@@ -426,7 +450,7 @@ def _qa_record(
             cycle="qa", cycle_number=ctx["attempt"], check=check, control_id=control_id,
             module=ctx["module"], submodule=ctx.get("submodule"), criterion_id=ctx["criterion_id"],
             files=files or ctx.get("files") or [],
-            result=result, errors=errors, error_count=len(errors),
+            result=result, errors=errors, error_count=len(errors), evidence_path=evidence_path,
             model=(meta or {}).get("model"), session_id=(meta or {}).get("session_id"),
             token_input=usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0),
             token_output=usage.get("output_tokens", 0),
@@ -487,11 +511,16 @@ def _run_test_suite_check(pcp_dir: Path, project_root: Path, ctx: dict) -> list[
     """Full regression suite — project-wide. Skips (never blocks) if no test runner detected."""
     result = qa.run_test_suite(project_root)
     violations: list[str] = []
+    evidence_path = None
+    if result["tool"]:
+        evidence_path = evidence.store(
+            pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "test-suite", result["output"],
+        )
     if result["tool"] and not result["passed"]:
         violations.append(
-            f"Test suite ({result['tool']}) FAILED:\n{result['output'][-1500:]}"
+            f"Test suite ({result['tool']}) FAILED — full output: {evidence_path}\n{result['output'][-1500:]}"
         )
-    _qa_record(pcp_dir, ctx, "test-suite", violations, control_id="CTRL-001", tool=result["tool"])
+    _qa_record(pcp_dir, ctx, "test-suite", violations, control_id="CTRL-001", tool=result["tool"], evidence_path=evidence_path)
     return violations
 
 
@@ -499,10 +528,15 @@ def _run_lint_check(pcp_dir: Path, project_root: Path, changed_files: list[str],
     """Lint on changed files only. Skips (never blocks) if no linter detected."""
     result = qa.run_lint(project_root, changed_files)
     violations: list[str] = []
+    evidence_path = None
+    if result["tool"]:
+        evidence_path = evidence.store(
+            pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "lint", "\n".join(result["issues"]),
+        )
     if result["tool"] and not result["passed"]:
         issues = "\n".join(result["issues"][:10])
-        violations.append(f"Lint ({result['tool']}) found issues:\n{issues}")
-    _qa_record(pcp_dir, ctx, "lint", violations, control_id="CTRL-002", files=changed_files, tool=result["tool"])
+        violations.append(f"Lint ({result['tool']}) found issues — full list: {evidence_path}\n{issues}")
+    _qa_record(pcp_dir, ctx, "lint", violations, control_id="CTRL-002", files=changed_files, tool=result["tool"], evidence_path=evidence_path)
     return violations
 
 
@@ -510,10 +544,15 @@ def _run_sast_check(pcp_dir: Path, project_root: Path, changed_files: list[str],
     """SAST + secret-scan via semgrep, if installed. Scoped to changed files."""
     result = qa.run_sast(project_root, changed_files)
     violations: list[str] = []
+    evidence_path = None
+    if result["tool"]:
+        evidence_path = evidence.store(
+            pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "sast", "\n".join(result["findings"]),
+        )
     if result["tool"] and not result["passed"]:
         findings = "\n".join(result["findings"][:10])
-        violations.append(f"SAST ({result['tool']}) found issues:\n{findings}")
-    _qa_record(pcp_dir, ctx, "sast", violations, control_id="CTRL-003", files=changed_files, tool=result["tool"])
+        violations.append(f"SAST ({result['tool']}) found issues — full list: {evidence_path}\n{findings}")
+    _qa_record(pcp_dir, ctx, "sast", violations, control_id="CTRL-003", files=changed_files, tool=result["tool"], evidence_path=evidence_path)
     return violations
 
 
@@ -542,7 +581,10 @@ def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ct
     for f in res.get("findings", []):
         if f.get("severity") == "BLOCK":
             blocks.append(f"{f.get('location', 'general')}: {f.get('finding', '')} (Principle: {f.get('principle', '')}) → Fix: {f.get('fix', '')}")
-    _qa_record(pcp_dir, ctx, "architect-review", blocks, meta, control_id="CTRL-005", files=changed_files)
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "architect-review", json.dumps(res, indent=2),
+    )
+    _qa_record(pcp_dir, ctx, "architect-review", blocks, meta, control_id="CTRL-005", files=changed_files, evidence_path=evidence_path)
     return blocks
 
 
@@ -574,7 +616,10 @@ def _run_gate_check(pcp_dir: Path, diff: str, ctx: dict) -> list[str]:
             issues.append(f"Regression: {r}")
         for v in res.get("llm_rule_violations", []):
             issues.append(f"Violation: {v}")
-    _qa_record(pcp_dir, ctx, "gate", issues, meta, control_id="CTRL-006")
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "gate", json.dumps(res, indent=2),
+    )
+    _qa_record(pcp_dir, ctx, "gate", issues, meta, control_id="CTRL-006", evidence_path=evidence_path)
     return issues
 
 

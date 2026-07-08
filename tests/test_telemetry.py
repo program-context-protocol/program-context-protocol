@@ -40,6 +40,39 @@ def test_load_returns_empty_when_missing(tmp_path):
     assert telemetry.load(tmp_path) == []
 
 
+def test_successive_records_are_hash_chained(tmp_path):
+    from pcp.evidence_chain import verify_chain
+
+    telemetry.record(tmp_path, cycle="build", module="add", criterion_id="A001")
+    telemetry.record(tmp_path, cycle="qa", module="add", criterion_id="A001", result="pass")
+    telemetry.record(tmp_path, cycle="qa", module="add", criterion_id="A001", result="block")
+
+    records = telemetry.load(tmp_path)
+    assert records[0]["prev_hash"] == "genesis"
+    assert records[1]["prev_hash"] == records[0]["entry_hash"]
+    assert records[2]["prev_hash"] == records[1]["entry_hash"]
+    assert verify_chain(records) == []
+
+
+def test_hand_edited_record_breaks_the_chain(tmp_path):
+    from pcp.evidence_chain import verify_chain
+
+    telemetry.record(tmp_path, cycle="build", module="add")
+    telemetry.record(tmp_path, cycle="qa", module="add", result="block")
+
+    path = tmp_path / "telemetry.jsonl"
+    lines = path.read_text().splitlines()
+    import json
+    tampered = json.loads(lines[1])
+    tampered["result"] = "pass"  # someone quietly "fixed" a block after the fact
+    lines[1] = json.dumps(tampered)
+    path.write_text("\n".join(lines) + "\n")
+
+    breaks = verify_chain(telemetry.load(tmp_path))
+    assert len(breaks) == 1
+    assert breaks[0]["index"] == 1
+
+
 def test_load_skips_corrupt_lines(tmp_path):
     path = tmp_path / "telemetry.jsonl"
     path.write_text('{"cycle": "build"}\n{{broken\n{"cycle": "qa"}\n')
