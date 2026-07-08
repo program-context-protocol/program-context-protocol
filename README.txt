@@ -4,10 +4,21 @@ PCP — Program Context Protocol
 Status: private, pre-launch. Not yet validated across the three dogfood
 projects required before public release (see "Status" below).
 
-What this is
-------------
+The problem
+-----------
+AI coding agents hallucinate and drift across long sessions: an agent
+three sessions deep has no reliable memory of what you originally asked
+for, quietly reinterprets requirements, contradicts a decision from
+yesterday, or reports "done" against a spec it drifted away from
+hours ago. Nothing catches this automatically — you find out when the
+feature is wrong, not when it goes wrong.
+
+What PCP is
+-----------
 PCP is a protocol and CLI that prevents LLM coding agents from drifting
-away from a project's original intent across long, multi-session builds.
+away from a project's original intent across long, multi-session,
+autonomous builds — machine-checkable context drift detection and
+prevention, not another prompting convention.
 
 It works by keeping three things separate and machine-checkable instead
 of trusting an agent's self-report:
@@ -25,8 +36,38 @@ Three gates enforce this across the lifecycle:
 Pioneer claim: `pcp validate-strategy` checks whether a project's module
 decomposition actually covers its stated objective (coverage_score,
 LLM-judged) and whether the modules are cleanly decoupled (coupling_score,
-deterministic graph math via networkx). No existing tool (BMAD, Kiro,
-Spec Kit, Cline Memory Bank) does both automatically.
+deterministic graph math via networkx). No existing tool does both
+automatically.
+
+How this compares
+------------------
+  Tool              Gap PCP closes
+  ----              --------------
+  BMAD              Drift reconciliation is a manual step (open issue)
+  Kiro               Proprietary AWS IDE — replaces your workflow, doesn't
+                      sit inside it
+  Spec Kit           `/reconcile` is a manual trigger, not automatic
+  Cline Memory Bank  Context persistence only — no CI gates, no drift check
+  Prompting/rules    Advisory only ("please stay on spec") — nothing
+  files              actually blocks a commit or a deploy that drifted
+
+PCP differentiator: open, vendor-neutral, deterministic gates that
+actually intervene (block a commit, block a deploy), plus the one
+automated check (`validate-strategy`) for whether your module plan
+still covers your stated objective at all.
+
+Quickstart
+----------
+  pip install -e .                       # from a clone, not on PyPI yet
+  cd your-project
+  pcp init                               # scaffolds .pcp/, CLAUDE.md governance block
+  pcp kickoff vision.md                  # vision doc -> objective.md + module specs
+  pcp build                              # autonomous build loop, gated end to end
+  pcp status --pm                        # plain-English progress report, any time
+
+Every criterion the build loop marks "complete" passed tests, lint,
+SAST, and an architecture-alignment check first — not just "the agent
+said so."
 
 Install
 -------
