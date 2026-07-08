@@ -26,16 +26,7 @@ from pcp.commands.deploy import deploy
 from pcp.commands.capture import capture
 from pcp.commands.provenance import provenance
 from pcp.commands.takeover import takeover
-from pcp.commands.ontology_extract import ontology_extract
-from pcp.commands.ontology_review import ontology_review
-from pcp.commands.ontology_status import ontology_status
 from pcp.commands.process_cmd import process_worker
-from pcp.commands.observatory import observatory
-from pcp.commands.ontology_serve import ontology_serve
-from pcp.commands.trace_map import trace_map
-from pcp.commands.trace_review import trace_review
-from pcp.commands.trace_serve import trace_serve
-from pcp.commands.domain_serve import domain_serve
 
 
 @click.group()
@@ -72,13 +63,4 @@ cli.add_command(deploy)
 cli.add_command(capture)
 cli.add_command(provenance)
 cli.add_command(takeover)
-cli.add_command(ontology_extract, name="ontology-extract")
-cli.add_command(ontology_review, name="ontology-review")
-cli.add_command(ontology_status, name="ontology-status")
 cli.add_command(process_worker, name="process-worker")
-cli.add_command(observatory)
-cli.add_command(ontology_serve, name="ontology-serve")
-cli.add_command(trace_map, name="trace-map")
-cli.add_command(trace_review, name="trace-review")
-cli.add_command(trace_serve, name="trace-serve")
-cli.add_command(domain_serve, name="domain-serve")
