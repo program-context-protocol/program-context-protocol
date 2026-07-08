@@ -217,14 +217,28 @@ def write_pcp_md(
     brd_summary = _extract_brd_summary(pcp_dir)
     decision_log_summary = _extract_decision_log_summary(pcp_dir)
 
-    # Objective — first non-heading paragraph from objective.md
+    # Objective — first non-heading body text from objective.md. Real bug,
+    # found 2026-07-08: a heading immediately followed by its body text on
+    # the very next line (no blank line between them -- completely normal
+    # markdown, e.g. "## Why This Exists\nBecause...") used to make the
+    # WHOLE block get rejected outright (the paragraph, heading+body glued
+    # together, "starts with #"), silently discarding real objective text
+    # and falling through to "No objective.md found" even though the file
+    # existed and had real content. Now strips leading heading line(s) off
+    # each paragraph block first, and only rejects a block if nothing but
+    # headings remain.
     obj_path = pcp_dir / "objective.md"
     obj_text = ""
     if obj_path.exists():
         raw = obj_path.read_text()
-        paragraphs = [p.strip() for p in re.split(r"\n{2,}", raw)
-                      if p.strip() and not p.strip().startswith("#")]
-        obj_text = paragraphs[0][:500] if paragraphs else ""
+        for block in re.split(r"\n{2,}", raw):
+            lines = block.strip().split("\n")
+            while lines and lines[0].strip().startswith("#"):
+                lines.pop(0)
+            body = "\n".join(lines).strip()
+            if body:
+                obj_text = body[:500]
+                break
 
     lines = [
         f"# PCP Governance — {project_name}",
