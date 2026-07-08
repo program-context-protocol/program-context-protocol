@@ -112,11 +112,11 @@ rules:
     scope: ["*.py", "*.js", "*.jsx", "*.ts", "*.tsx", "*.go", "*.rb", "*.java", "*.php", "*.cs", "*.rs"]
 
   - id: SEC_002
-    name: "No eval() or exec() on dynamic input"
+    name: "No dynamic code evaluation on untrusted input"
     check: ast_pattern
     pattern: "\\\\b(eval|exec)\\\\s*\\\\("
     severity: hard_block
-    message: "eval()/exec() on untrusted input is a code-injection vector. Use a safe parser or explicit dispatch instead."
+    message: "Dynamic code evaluation on untrusted input is a code-injection vector. Use a safe parser or explicit dispatch instead."
     scope: ["*.py", "*.js", "*.jsx", "*.ts", "*.tsx", "*.go", "*.rb", "*.java", "*.php", "*.cs", "*.rs"]
 
   - id: SEC_003
