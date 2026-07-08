@@ -101,7 +101,7 @@ Core commands
   pcp doctor                   detect/configure CLI tooling for this project
   pcp takeover                 preflight + kickoff + build in one call
 
-Full command list: `pcp --help`.
+Full command list: `pcp --help`. Full feature reference: FEATURES.md.
 
 Companion project
 ------------------
