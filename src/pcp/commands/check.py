@@ -94,21 +94,73 @@ def _run_ast_rule(rule: dict, staged_files: list[str], project_root: Path) -> li
     return violations
 
 
-def run_protected_path_rule(rule: dict, staged_files: list[str]) -> list[str]:
+def _git_show_head(project_root: Path, rel_path: str) -> str | None:
+    import subprocess
+    result = subprocess.run(
+        ["git", "show", f"HEAD:{rel_path}"], cwd=project_root, capture_output=True, text=True,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def _dequote(text: str) -> str:
+    return re.sub(r"""['"\\]""", "", text)
+
+
+def is_syntax_only_yaml_fix(old_text: str | None, new_text: str) -> bool:
+    """True only if new_text is valid YAML AND differs from old_text purely
+    by quote/escape characters -- e.g. wrapping an unquoted bullet containing
+    a stray colon in quotes so it parses. Deterministic, not an agent's own
+    say-so: a real parse-error fix is verifiable by a YAML parser plus a
+    de-quoted character comparison, the same way an ast_pattern rule is
+    verifiable by a regex rather than trusted on request.
+
+    Returns False (never a "safe" fix) for: new_text still doesn't parse,
+    old_text doesn't exist yet (a brand new protected file -- that's real
+    content creation, not a fix), or the de-quoted text differs at all
+    (a real, non-syntax change hiding inside what's claimed to be a
+    formatting fix). Known limitation: doesn't handle a fix that also needed
+    to escape a pre-existing internal quote character -- de-quoting both
+    sides can't distinguish "added a quote" from "added an escaped quote" in
+    that case. Good enough for the reported case (wrapping a colon-containing
+    bullet in quotes); flagged here rather than silently over-trusted."""
+    try:
+        yaml.safe_load(new_text)
+    except yaml.YAMLError:
+        return False
+    if old_text is None:
+        return False
+    return _dequote(old_text) == _dequote(new_text)
+
+
+def run_protected_path_rule(rule: dict, staged_files: list[str], project_root: Path | None = None) -> list[str]:
     """Violations for a check:protected_path ci_rule. Only enforced inside a
     pcp-build agent session (PCP_AGENT_SESSION=1 in the environment, set by
     build.py before spawning the coding agent) — a human's own interactive
-    commit (pcp pm, direct editing) never sets this and is never blocked."""
+    commit (pcp pm, direct editing) never sets this and is never blocked.
+
+    Carve-out, added 2026-07-08 after a real recurrence in ontology-foundry:
+    a protected file that's currently invalid YAML (blocking validate-strategy/
+    architect-review project-wide) and an agent's fix touches ONLY quoting/
+    escaping is allowed through -- verified by is_syntax_only_yaml_fix(),
+    not by trusting the agent's own claim that "it's just a syntax fix"."""
     if os.environ.get("PCP_AGENT_SESSION") != "1":
         return []
     scope = rule.get("scope", [])
     violations = []
     for rel_path in staged_files:
-        if _match_scope(rel_path, scope):
-            violations.append(
-                f"{rel_path}: protected spec file modified by an agent session "
-                "(human-owned, never agent-writable)"
-            )
+        if not _match_scope(rel_path, scope):
+            continue
+        if project_root is not None:
+            new_path = project_root / rel_path
+            if new_path.exists():
+                old_text = _git_show_head(project_root, rel_path)
+                new_text = new_path.read_text(errors="replace")
+                if is_syntax_only_yaml_fix(old_text, new_text):
+                    continue
+        violations.append(
+            f"{rel_path}: protected spec file modified by an agent session "
+            "(human-owned, never agent-writable)"
+        )
     return violations
 
 
@@ -288,7 +340,7 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
     # protected_path rules are diff-scoped, like ast_pattern — only fire inside
     # a pcp-build agent session (see run_protected_path_rule's env-var check).
     for rule in protected_rules:
-        violations = run_protected_path_rule(rule, staged)
+        violations = run_protected_path_rule(rule, staged, project_root)
         if staged_only and baseline_keys:
             violations = [v for v in violations if v not in baseline_keys]
         if not violations:

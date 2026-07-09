@@ -7,6 +7,7 @@ from click.testing import CliRunner
 from pcp.cli import cli
 from pcp.commands.check import (
     _read_bypass_reason, _run_ast_rule, run_file_exists_rule, run_protected_path_rule,
+    is_syntax_only_yaml_fix,
 )
 
 
@@ -120,6 +121,72 @@ def test_protected_path_rule_blocks_inside_agent_session(monkeypatch):
     monkeypatch.setenv("PCP_AGENT_SESSION", "1")
     rule = {"id": "R003", "scope": [".pcp/objective.md", ".pcp/strategy/**"]}
     violations = run_protected_path_rule(rule, [".pcp/objective.md"])
+    assert len(violations) == 1
+    assert "protected spec file" in violations[0]
+
+
+# ── is_syntax_only_yaml_fix — deterministic carve-out for pure parse-error fixes ──
+
+def test_syntax_only_fix_quoting_a_colon_containing_bullet_is_allowed():
+    old = "criteria:\n  - id: A001\n    description: some text: with a colon\n"
+    new = "criteria:\n  - id: A001\n    description: \"some text: with a colon\"\n"
+    assert is_syntax_only_yaml_fix(old, new) is True
+
+
+def test_syntax_only_fix_rejects_new_text_that_still_does_not_parse():
+    old = "criteria:\n  - id: A001\n    description: broken: text\n"
+    new = "criteria:\n  - id: A001\n    description: still: broken\n"
+    assert is_syntax_only_yaml_fix(old, new) is False
+
+
+def test_syntax_only_fix_rejects_actual_content_change():
+    old = "criteria:\n  - id: A001\n    description: \"original text\"\n"
+    new = "criteria:\n  - id: A001\n    description: \"a completely different requirement\"\n"
+    assert is_syntax_only_yaml_fix(old, new) is False
+
+
+def test_syntax_only_fix_rejects_brand_new_file():
+    new = "criteria:\n  - id: A001\n    description: \"new criterion\"\n"
+    assert is_syntax_only_yaml_fix(None, new) is False
+
+
+def test_protected_path_rule_allows_verified_syntax_only_fix(tmp_path, monkeypatch):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
+
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text("criteria:\n  - id: A001\n    description: some text: with a colon\n")
+    subprocess.run(["git", "add", "spec.yaml"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=tmp_path, check=True)
+
+    spec_path.write_text("criteria:\n  - id: A001\n    description: \"some text: with a colon\"\n")
+
+    monkeypatch.setenv("PCP_AGENT_SESSION", "1")
+    rule = {"id": "R003", "scope": ["spec.yaml"]}
+    violations = run_protected_path_rule(rule, ["spec.yaml"], tmp_path)
+    assert violations == []
+
+
+def test_protected_path_rule_still_blocks_real_content_change(tmp_path, monkeypatch):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
+
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text("criteria:\n  - id: A001\n    description: \"original\"\n")
+    subprocess.run(["git", "add", "spec.yaml"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=tmp_path, check=True)
+
+    spec_path.write_text("criteria:\n  - id: A001\n    description: \"a totally different requirement\"\n")
+
+    monkeypatch.setenv("PCP_AGENT_SESSION", "1")
+    rule = {"id": "R003", "scope": ["spec.yaml"]}
+    violations = run_protected_path_rule(rule, ["spec.yaml"], tmp_path)
     assert len(violations) == 1
     assert "protected spec file" in violations[0]
 
