@@ -352,6 +352,22 @@ def _get_working_diff(cwd: Path) -> str:
     return result.stdout[:14000]
 
 
+UI_KEYWORDS = (
+    "render", "renders", "display", "displays", "dashboard", "portal",
+    "screen", "view", "form", "ui", "page", "widget",
+)
+
+
+def _is_ui_facing_criterion(criterion: dict) -> bool:
+    """Cheap, deterministic keyword check (rung 1 — no LLM call needed to
+    decide whether to mention the design system). False negatives just mean
+    a UI criterion doesn't get the design-system hint; false positives just
+    mean a harmless, ignorable pointer gets included for a non-UI criterion.
+    Neither costs anything beyond a few extra prompt tokens."""
+    text = criterion.get("description", "").lower()
+    return any(kw in text for kw in UI_KEYWORDS)
+
+
 def _build_agent_prompt(
     pcp_dir: Path,
     module_name: str,
@@ -389,6 +405,17 @@ def _build_agent_prompt(
         pattern = criterion.get("pattern")
         if pattern:
             prompt_parts.append(f"It must satisfy this pattern: `{pattern}`")
+        prompt_parts.append("")
+
+    if _is_ui_facing_criterion(criterion):
+        prompt_parts.append(
+            "This criterion renders user-facing UI. Read `.pcp/design_system.md` first "
+            "and apply its established tokens/conventions rather than deciding a look "
+            "fresh — if it's still the empty scaffold, this is the first UI screen: "
+            "establish the system now (see the `pcp-ui-design` skill) and write it there "
+            "so later screens stay consistent instead of each looking like a different "
+            "vanilla template."
+        )
         prompt_parts.append("")
 
     prompt_parts += [

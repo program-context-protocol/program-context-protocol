@@ -396,6 +396,36 @@ WARN  = fix before ship
 NOTE  = track, non-blocking
 """
 
+DESIGN_SYSTEM_TEMPLATE = """\
+# Design System
+
+_Empty scaffold. Filled in by the `pcp-ui-design` skill the first time a UI-facing
+acceptance criterion is implemented -- not hand-written up front, since the right
+tokens depend on the product's actual domain, not a generic guess made before any
+real screen exists. See `~/.claude/skills/pcp-ui-design/SKILL.md`._
+
+_Real gap this exists to prevent: each UI-facing criterion built independently by a
+fresh agent session, with no shared design memory, produces a different vanilla-
+default look per screen. Once this file has real content, every later screen reads
+it and reuses the same system instead of deciding fresh._
+
+## Color
+
+(not yet established)
+
+## Type
+
+(not yet established)
+
+## Layout Conventions
+
+(not yet established)
+
+## Component Notes
+
+(grows over time -- a new reusable pattern gets recorded here whenever a screen establishes one)
+"""
+
 PCP_CLAUDE_BLOCK_START = "<!-- PCP:BEGIN — auto-managed by `pcp init`, do not hand-edit this block -->"
 PCP_CLAUDE_BLOCK_END = "<!-- PCP:END -->"
 
@@ -654,6 +684,7 @@ def init(project_path: str, module_name: str | None, force: bool):
         pcp / "SDLC_phase.yaml": SDLC_PHASE_TEMPLATE,
         pcp / "strategy" / "decomposition.md": DECOMPOSITION_TEMPLATE,
         pcp / "architect_persona.md": ARCHITECT_PERSONA_TEMPLATE,
+        pcp / "design_system.md": DESIGN_SYSTEM_TEMPLATE,
         pcp / "kb" / "adr" / "ADR-001-example.md": ADR_EXAMPLE,
         pcp / "kb" / "domain" / "general.md": DOMAIN_KB_TEMPLATE,
         pcp / "policies" / "escalation.rego": POLICY_ESCALATION_TEMPLATE,
