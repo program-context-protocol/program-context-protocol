@@ -68,3 +68,71 @@ def test_validate_file_reports_real_schema_violations(tmp_path):
     errors = validate_file(p, "module_acceptance")
     assert errors
     assert any("check" in e for e in errors)
+
+
+# ── logic_tier / build_vs_buy: version-gated (2.0 requires them, 1.0 doesn't) ──
+
+def test_module_acceptance_v1_does_not_require_logic_tier(tmp_path):
+    import yaml
+
+    p = tmp_path / "acceptance.yaml"
+    p.write_text(yaml.dump({
+        "version": "1.0", "module": "test",
+        "criteria": [{"id": "A001", "description": "d", "check": "manual", "status": "pending"}],
+    }))
+    assert validate_file(p, "module_acceptance") == []
+
+
+def test_module_acceptance_v2_requires_logic_tier_and_build_vs_buy(tmp_path):
+    import yaml
+
+    p = tmp_path / "acceptance.yaml"
+    p.write_text(yaml.dump({
+        "version": "2.0", "module": "test",
+        "criteria": [{"id": "A001", "description": "d", "check": "manual", "status": "pending"}],
+    }))
+    errors = validate_file(p, "module_acceptance")
+    assert errors, "version 2.0 criteria missing logic_tier/build_vs_buy should fail"
+
+
+def test_module_acceptance_v2_passes_with_logic_tier_and_build_vs_buy(tmp_path):
+    import yaml
+
+    p = tmp_path / "acceptance.yaml"
+    p.write_text(yaml.dump({
+        "version": "2.0", "module": "test",
+        "criteria": [{
+            "id": "A001", "description": "d", "check": "manual", "status": "pending",
+            "logic_tier": 1,
+            "build_vs_buy": {"decision": "build_fresh", "rationale": "small enough to write directly"},
+        }],
+    }))
+    assert validate_file(p, "module_acceptance") == []
+
+
+def test_module_spec_v1_does_not_require_build_vs_buy(tmp_path):
+    import yaml
+
+    p = tmp_path / "spec.yaml"
+    p.write_text(yaml.dump({"version": "1.0", "module": "test", "description": "A test module for coverage."}))
+    assert validate_file(p, "module_spec") == []
+
+
+def test_module_spec_v2_requires_build_vs_buy(tmp_path):
+    import yaml
+
+    p = tmp_path / "spec.yaml"
+    p.write_text(yaml.dump({"version": "2.0", "module": "test", "description": "A test module for coverage."}))
+    errors = validate_file(p, "module_spec")
+    assert errors, "version 2.0 module spec missing build_vs_buy should fail"
+
+
+def test_module_spec_v2_passes_with_not_applicable_build_vs_buy(tmp_path):
+    import yaml
+
+    p = tmp_path / "spec.yaml"
+    p.write_text(yaml.dump({
+        "version": "2.0", "module": "test", "description": "A test module for coverage.",
+        "build_vs_buy": {"decision": "not_applicable", "rationale": "pure business-logic module"},
+    }))
+    assert validate_file(p, "module_spec") == []

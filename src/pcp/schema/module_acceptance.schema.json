@@ -36,9 +36,47 @@
           "status": {
             "type": "string",
             "enum": ["pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"]
+          },
+          "logic_tier": {
+            "type": "integer",
+            "enum": [1, 2, 3, 4, 5, 6],
+            "description": "6-rung decision ladder: 1=deterministic, 2=solver, 3=ML, 4=RAG, 5=cached reuse, 6=deep-think LLM. See CLAUDE.md's Logic-Tier Selection philosophy."
+          },
+          "build_vs_buy": {
+            "type": "object",
+            "required": ["decision", "rationale"],
+            "additionalProperties": false,
+            "properties": {
+              "decision": {
+                "type": "string",
+                "enum": ["reuse_whole", "reuse_partial", "reimplement_from_reference", "fork_adapt", "build_fresh"]
+              },
+              "rationale": { "type": "string" },
+              "candidates_considered": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
           }
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "version": { "const": "2.0" } },
+        "required": ["version"]
+      },
+      "then": {
+        "properties": {
+          "criteria": {
+            "items": {
+              "required": ["id", "description", "check", "status", "logic_tier", "build_vs_buy"]
+            }
+          }
+        }
+      }
+    }
+  ]
 }

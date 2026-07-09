@@ -29,6 +29,7 @@ from pcp.commands.provenance import provenance
 from pcp.commands.takeover import takeover
 from pcp.commands.dashboard import dashboard
 from pcp.commands.verify_syntax_fix import verify_syntax_fix
+from pcp.commands.architecture_justification import architecture_justification
 
 
 @click.group()
@@ -68,3 +69,4 @@ cli.add_command(provenance)
 cli.add_command(takeover)
 cli.add_command(dashboard)
 cli.add_command(verify_syntax_fix)
+cli.add_command(architecture_justification)

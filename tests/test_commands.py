@@ -167,10 +167,56 @@ def test_kickoff_coerces_invalid_check_and_status_values(temp_project):
 def test_normalize_acceptance_returns_no_warnings_when_already_valid():
     from pcp.commands.kickoff import _normalize_acceptance
 
-    acc = {"criteria": [{"id": "A001", "check": "manual", "status": "pending"}]}
+    acc = {"criteria": [{
+        "id": "A001", "check": "manual", "status": "pending",
+        "logic_tier": 1,
+        "build_vs_buy": {"decision": "build_fresh", "rationale": "trivial, no dependency warranted"},
+    }]}
     warnings = _normalize_acceptance(acc, "add")
     assert warnings == []
     assert acc["criteria"][0]["check"] == "manual"
+
+
+def test_normalize_acceptance_coerces_missing_logic_tier_and_build_vs_buy():
+    from pcp.commands.kickoff import _normalize_acceptance
+
+    acc = {"criteria": [{"id": "A001", "check": "manual", "status": "pending"}]}
+    warnings = _normalize_acceptance(acc, "add")
+    assert any("logic_tier" in w for w in warnings)
+    assert any("build_vs_buy" in w for w in warnings)
+    assert acc["criteria"][0]["logic_tier"] == 6
+    assert acc["criteria"][0]["build_vs_buy"]["decision"] == "build_fresh"
+
+
+def test_normalize_acceptance_coerces_invalid_build_vs_buy_decision():
+    from pcp.commands.kickoff import _normalize_acceptance
+
+    acc = {"criteria": [{
+        "id": "A001", "check": "manual", "status": "pending", "logic_tier": 3,
+        "build_vs_buy": {"decision": "buy_a_subscription", "rationale": "made up value"},
+    }]}
+    warnings = _normalize_acceptance(acc, "add")
+    assert any("build_vs_buy decision" in w for w in warnings)
+    assert acc["criteria"][0]["build_vs_buy"]["decision"] == "build_fresh"
+
+
+def test_normalize_spec_coerces_missing_module_level_build_vs_buy():
+    from pcp.commands.kickoff import _normalize_spec
+
+    spec = {"module": "auth", "description": "Handles authentication."}
+    warnings = _normalize_spec(spec, "auth")
+    assert warnings
+    assert spec["build_vs_buy"]["decision"] == "build_fresh"
+
+
+def test_normalize_spec_accepts_not_applicable_for_business_logic_module():
+    from pcp.commands.kickoff import _normalize_spec
+
+    spec = {"module": "add", "description": "Adds numbers.",
+            "build_vs_buy": {"decision": "not_applicable", "rationale": "pure business logic"}}
+    warnings = _normalize_spec(spec, "add")
+    assert warnings == []
+    assert spec["build_vs_buy"]["decision"] == "not_applicable"
 
 
 def test_pm_command(temp_project):

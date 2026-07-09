@@ -68,28 +68,41 @@ Output schema:
     {
       "name": "module-name",
       "spec": {
-        "version": "1.0",
+        "version": "2.0",
         "module": "module-name",
         "description": "Short description of what the module does (at least 10 words).",
         "objective_coverage": ["What part of objective.md is covered"],
         "dependencies": [],
-        "constraints": []
+        "constraints": [],
+        "build_vs_buy": {
+          "decision": "not_applicable",
+          "rationale": "Pure business-logic module -- no whole-module tool-adoption choice; see per-criterion build_vs_buy instead.",
+          "candidates_considered": []
+        }
       },
       "acceptance": {
-        "version": "1.0",
+        "version": "2.0",
         "module": "module-name",
         "criteria": [
           {
             "id": "A001",
             "description": "Description of exit criterion",
             "check": "manual",
-            "status": "pending"
+            "status": "pending",
+            "logic_tier": 6,
+            "build_vs_buy": {
+              "decision": "build_fresh",
+              "rationale": "Why this decision, one sentence.",
+              "candidates_considered": []
+            }
           }
         ]
       }
     }
   ],
   "_comment_criteria_enums": "Every criterion's check MUST be exactly one of: ast_pattern, file_exists, test_passes, manual, dom_contains, url_responds, visual. Every criterion's status MUST be exactly one of: pending, complete, deferred, blocked-ci, blocked-secret, blocked-regression. Do not invent other values (e.g. 'automated' or 'done') even if they seem descriptive -- these are the only ones a validator will accept. When generating a strategy from a vision doc (not yet built), every criterion's status should be 'pending' unless the vision explicitly states something is already implemented.",
+  "_comment_logic_tier": "Every criterion MUST declare logic_tier (1-6), the cheapest rung that correctly makes this decision: 1=deterministic (fixed rules/lookup, no judgment), 2=optimization/solver (constraints+objective known, search over solution space -- OR-Tools/CBC), 3=statistical/ML (pattern learned from historical data, not hand-authored), 4=RAG (answer exists in a bounded corpus, needs retrieval+light synthesis), 5=cached reuse (replay a prior near-duplicate answer), 6=deep-think LLM (last resort -- would two competent humans reasonably disagree on the answer?). Default to the cheapest rung that genuinely fits; do not default everything to 6.",
+  "_comment_build_vs_buy": "Every criterion MUST also declare build_vs_buy: {decision, rationale, candidates_considered}. decision is exactly one of: reuse_whole (take an existing package/repo as a dependency), reuse_partial (vendor one file/function/module out of a larger repo), reimplement_from_reference (study a solved approach -- possibly GPL/AGPL, possibly another language -- and write original code implementing the same logic, no code copied), fork_adapt (fork a whole repo, continuously modify), build_fresh (nothing comparable exists). Each infrastructure-shaped module (portal, auth, integrations, orchestration engine) ALSO gets a module-level build_vs_buy in its spec -- pure business-logic modules use 'not_applicable' there since the per-criterion decisions already cover it.",
   "ci_rules": {
     "version": "1.0",
     "rules": [
@@ -114,20 +127,47 @@ def _write_file(path: Path, content: str) -> None:
 
 VALID_CHECKS = {"ast_pattern", "file_exists", "test_passes", "manual", "dom_contains", "url_responds", "visual"}
 VALID_STATUSES = {"pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"}
+VALID_LOGIC_TIERS = {1, 2, 3, 4, 5, 6}
+VALID_BVB_DECISIONS = {"reuse_whole", "reuse_partial", "reimplement_from_reference", "fork_adapt", "build_fresh"}
+VALID_MODULE_BVB_DECISIONS = VALID_BVB_DECISIONS | {"not_applicable"}
 # Best-effort mapping for common LLM-invented values that don't match the
 # closed schema enum but have an obvious intended meaning.
 _STATUS_ALIASES = {"done": "complete", "finished": "complete", "in_progress": "pending", "todo": "pending"}
 _CHECK_ALIASES = {"automated": "manual", "auto": "manual", "unit_test": "test_passes", "integration_test": "test_passes"}
 
 
+def _coerce_build_vs_buy(bvb, module_name: str, criterion_id: str, valid_decisions: set) -> tuple[dict, list[str]]:
+    """Coerces a build_vs_buy block to a schema-valid shape. Missing or
+    malformed input is never silently dropped -- it's replaced with an
+    explicitly-flagged placeholder (build_fresh/not-specified) so a missing
+    deliberation is visibly a coercion, not indistinguishable from a real
+    build_fresh decision someone actually made."""
+    warnings = []
+    if not isinstance(bvb, dict) or "decision" not in bvb or "rationale" not in bvb:
+        warnings.append(f"{module_name}/{criterion_id}: build_vs_buy missing or malformed, coerced to a flagged placeholder")
+        return {
+            "decision": "build_fresh",
+            "rationale": "Not specified by generator -- coerced placeholder, review before treating as a real decision.",
+            "candidates_considered": [],
+        }, warnings
+    decision = bvb.get("decision")
+    if decision not in valid_decisions:
+        warnings.append(f"{module_name}/{criterion_id}: build_vs_buy decision '{decision}' is not valid, coerced to 'build_fresh'")
+        bvb = {**bvb, "decision": "build_fresh"}
+    bvb.setdefault("candidates_considered", [])
+    return bvb, warnings
+
+
 def _normalize_acceptance(acceptance: dict, module_name: str) -> list[str]:
-    """Coerces check/status values outside the schema's closed enum to a
-    safe default in place, returns a list of human-readable warnings for
-    anything it had to coerce. Found necessary 2026-07-08: kickoff's LLM
-    generation invented plausible-but-invalid values ('automated', 'done')
-    for a real, more complex vision doc -- validate_file was imported here
-    but never actually called, so these silently reached disk and only
-    surfaced later, opaquely, whenever `pcp scan` happened to run next."""
+    """Coerces check/status/logic_tier/build_vs_buy values outside the
+    schema's closed enums to a safe default in place, returns a list of
+    human-readable warnings for anything it had to coerce. Found necessary
+    2026-07-08: kickoff's LLM generation invented plausible-but-invalid
+    values ('automated', 'done') for a real, more complex vision doc --
+    validate_file was imported here but never actually called, so these
+    silently reached disk and only surfaced later, opaquely, whenever
+    `pcp scan` happened to run next. logic_tier/build_vs_buy get the same
+    treatment from day one rather than repeating that gap."""
     warnings = []
     for c in acceptance.get("criteria", []):
         check = c.get("check")
@@ -140,6 +180,22 @@ def _normalize_acceptance(acceptance: dict, module_name: str) -> list[str]:
             fixed = _STATUS_ALIASES.get(status, "pending")
             warnings.append(f"{module_name}/{c.get('id', '?')}: status '{status}' is not valid, coerced to '{fixed}'")
             c["status"] = fixed
+        tier = c.get("logic_tier")
+        if tier not in VALID_LOGIC_TIERS:
+            warnings.append(f"{module_name}/{c.get('id', '?')}: logic_tier '{tier}' is not valid, coerced to 6 (deep-think -- safest default when unknown)")
+            c["logic_tier"] = 6
+        bvb, bvb_warnings = _coerce_build_vs_buy(c.get("build_vs_buy"), module_name, c.get("id", "?"), VALID_BVB_DECISIONS)
+        c["build_vs_buy"] = bvb
+        warnings += bvb_warnings
+    return warnings
+
+
+def _normalize_spec(spec: dict, module_name: str) -> list[str]:
+    """Coerces a module spec's module-level build_vs_buy (infrastructure-
+    shaped modules -- portal, auth, integrations, orchestration engine) the
+    same way _normalize_acceptance coerces per-criterion fields."""
+    bvb, warnings = _coerce_build_vs_buy(spec.get("build_vs_buy"), module_name, "(module-level)", VALID_MODULE_BVB_DECISIONS)
+    spec["build_vs_buy"] = bvb
     return warnings
 
 
@@ -196,6 +252,12 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     coercion_warnings = []
     for m in result.get("modules", []):
         mod_dir = pcp_dir / "strategy" / "modules" / m["name"]
+        # Force version 2.0 regardless of what the LLM returned -- a fresh
+        # kickoff must always get logic_tier/build_vs_buy enforcement, not
+        # silently downgrade to the ungated 1.0 shape on a generation slip.
+        m["spec"]["version"] = "2.0"
+        m["acceptance"]["version"] = "2.0"
+        coercion_warnings += _normalize_spec(m["spec"], m["name"])
         coercion_warnings += _normalize_acceptance(m["acceptance"], m["name"])
         _write_file(mod_dir / "spec.yaml", yaml.dump(m["spec"], default_flow_style=False))
         _write_file(mod_dir / "acceptance.yaml", yaml.dump(m["acceptance"], default_flow_style=False))

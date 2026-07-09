@@ -32,6 +32,34 @@
     },
     "deprecated": {
       "type": "boolean"
+    },
+    "build_vs_buy": {
+      "type": "object",
+      "required": ["decision", "rationale"],
+      "additionalProperties": false,
+      "description": "Module-level build-vs-buy for infrastructure-shaped modules (portal, auth, integrations, orchestration engine). 'not_applicable' for pure business-logic modules -- see per-criterion build_vs_buy in acceptance.yaml instead.",
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": ["reuse_whole", "reuse_partial", "reimplement_from_reference", "fork_adapt", "build_fresh", "not_applicable"]
+        },
+        "rationale": { "type": "string" },
+        "candidates_considered": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "version": { "const": "2.0" } },
+        "required": ["version"]
+      },
+      "then": {
+        "required": ["build_vs_buy"]
+      }
+    }
+  ]
 }
