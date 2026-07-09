@@ -258,6 +258,15 @@ controls:
     enforcement: advisory
     description: "A ticket ingested via program-context-protocol-team's webhook is analyzed (root-cause hypothesis + fix options), and every human decision (approve one option / reject) is recorded here, with the LLM's full raw analysis response stored as evidence — same as any other QA judge call. A human always decides; nothing in this control auto-picks an option."
     ssdf_practice: ["PW.4.1", "RV.1.1"]
+
+  - id: CTRL-013
+    name: "Design consistency check"
+    layer: build
+    mechanism: "build.py _run_design_consistency_check()"
+    tool: "n/a — deterministic regex, no external tool"
+    enforcement: advisory
+    description: "PCP Design lifecycle, stage 4 (Verify). For a UI-facing criterion, once .pcp/design_system.md has real established color tokens, flags hardcoded hex color literals in that criterion's target file — a heuristic signal the screen may not be using the project's own design system, not proof either way. Never blocks; a legitimate reason to hardcode a specific value is common (e.g. a brand-mandated exact color)."
+    ssdf_practice: ["PW.7.1"]
 """
 
 SDLC_PHASE_TEMPLATE = """\

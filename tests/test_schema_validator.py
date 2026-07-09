@@ -136,3 +136,54 @@ def test_module_spec_v2_passes_with_not_applicable_build_vs_buy(tmp_path):
         "build_vs_buy": {"decision": "not_applicable", "rationale": "pure business-logic module"},
     }))
     assert validate_file(p, "module_spec") == []
+
+
+# ── design_justification: PCP Design lifecycle, optional (not schema-required — ──
+# ── whether a criterion is UI-facing isn't expressible as a schema condition) ──
+
+def test_module_acceptance_design_justification_is_optional_even_on_v2(tmp_path):
+    import yaml
+
+    p = tmp_path / "acceptance.yaml"
+    p.write_text(yaml.dump({
+        "version": "2.0", "module": "test",
+        "criteria": [{
+            "id": "A001", "description": "d", "check": "manual", "status": "pending",
+            "logic_tier": 1, "build_vs_buy": {"decision": "build_fresh", "rationale": "trivial"},
+        }],
+    }))
+    assert validate_file(p, "module_acceptance") == []
+
+
+def test_module_acceptance_design_justification_validates_when_present(tmp_path):
+    import yaml
+
+    p = tmp_path / "acceptance.yaml"
+    p.write_text(yaml.dump({
+        "version": "2.0", "module": "test",
+        "criteria": [{
+            "id": "A001", "description": "Dashboard renders coverage", "check": "manual", "status": "pending",
+            "logic_tier": 6, "build_vs_buy": {"decision": "build_fresh", "rationale": "one-off screen"},
+            "design_justification": {
+                "checklist_passed": ["both-themes", "grounded-in-subject"],
+                "jtbd_framing": "when a PM worries coverage is slipping, this shows the real number",
+                "deviations_from_system": "",
+            },
+        }],
+    }))
+    assert validate_file(p, "module_acceptance") == []
+
+
+def test_module_acceptance_design_justification_rejects_unknown_fields(tmp_path):
+    import yaml
+
+    p = tmp_path / "acceptance.yaml"
+    p.write_text(yaml.dump({
+        "version": "1.0", "module": "test",
+        "criteria": [{
+            "id": "A001", "description": "d", "check": "manual", "status": "pending",
+            "design_justification": {"bogus_field": "x"},
+        }],
+    }))
+    errors = validate_file(p, "module_acceptance")
+    assert errors

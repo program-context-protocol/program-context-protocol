@@ -30,6 +30,7 @@ from pcp.commands.takeover import takeover
 from pcp.commands.dashboard import dashboard
 from pcp.commands.verify_syntax_fix import verify_syntax_fix
 from pcp.commands.architecture_justification import architecture_justification
+from pcp.commands.design_audit import design_audit
 
 
 @click.group()
@@ -70,3 +71,4 @@ cli.add_command(takeover)
 cli.add_command(dashboard)
 cli.add_command(verify_syntax_fix)
 cli.add_command(architecture_justification)
+cli.add_command(design_audit)

@@ -47,6 +47,7 @@ def build_dashboard_data(pcp_dir: Path) -> dict:
     from pcp.commands.build import compute_waves
     from pcp.commands.provenance import _check_chain_integrity, build_provenance
     from pcp.commands.architecture_justification import build_architecture_justification
+    from pcp.commands.design_audit import build_design_audit
     from pcp import pcp_status as ps
 
     project_root = pcp_dir.parent
@@ -127,6 +128,7 @@ def build_dashboard_data(pcp_dir: Path) -> dict:
         "pending_gaps": ps._extract_pending_gaps(pcp_dir),
         "provenance": build_provenance(pcp_dir),
         "architecture_justification": build_architecture_justification(pcp_dir),
+        "design_audit": build_design_audit(pcp_dir),
     }
 
 
@@ -298,13 +300,15 @@ footer a { color: var(--accent); }
 #tab-overview:checked ~ .tab-bar label[for="tab-overview"],
 #tab-objective:checked ~ .tab-bar label[for="tab-objective"],
 #tab-audit:checked ~ .tab-bar label[for="tab-audit"],
-#tab-arch:checked ~ .tab-bar label[for="tab-arch"] {
+#tab-arch:checked ~ .tab-bar label[for="tab-arch"],
+#tab-design:checked ~ .tab-bar label[for="tab-design"] {
   color: var(--accent); border-bottom-color: var(--accent);
 }
 #tab-overview:checked ~ #panel-overview,
 #tab-objective:checked ~ #panel-objective,
 #tab-audit:checked ~ #panel-audit,
-#tab-arch:checked ~ #panel-arch {
+#tab-arch:checked ~ #panel-arch,
+#tab-design:checked ~ #panel-design {
   display: block;
 }
 
@@ -519,6 +523,54 @@ def _render_architecture_justification_html(aj: dict) -> str:
   </section>"""
 
 
+DESIGN_RUNG_LABEL = {1: "Built, Hidden", 2: "Exposed, Undiscoverable", 3: "Exposed, Discoverable", 4: "Exposed, Enriched"}
+
+
+def _render_design_audit_html(da: dict) -> str:
+    rung_counts = da.get("rung_counts", {})
+    modules = da.get("modules", [])
+
+    rung_rows = "".join(
+        f'<tr><td class="mono">{r}</td><td>{escape(DESIGN_RUNG_LABEL.get(r, "?"))}</td>'
+        f'<td class="mono">{rung_counts.get(r, 0)}</td></tr>'
+        for r in sorted(rung_counts)
+    )
+    rung_table = (
+        f'<table class="pcp-table"><thead><tr><th>Rung</th><th>Label</th><th>Criteria</th></tr></thead>'
+        f'<tbody>{rung_rows}</tbody></table>'
+    )
+
+    if not modules:
+        modules_html = '<p style="color:var(--ink-dim)">No UI-facing criteria found yet.</p>'
+    else:
+        cards = []
+        for m in modules:
+            crit_rows = "".join(
+                f'<tr><td class="mono">{escape(c["id"])}</td><td>{escape(c["description"])}'
+                f'{" ⚠" if c["rung"] == 1 else ""}</td>'
+                f'<td class="mono">{c["rung"]} ({escape(DESIGN_RUNG_LABEL.get(c["rung"], "?"))})</td>'
+                f'<td>{escape(c["jtbd_framing"]) or "—"}</td></tr>'
+                for c in m["criteria"]
+            )
+            cards.append(
+                f'<div class="info-card" style="margin-bottom:0.85rem"><h3>{escape(m["module"])}</h3>'
+                f'<table class="pcp-table"><thead><tr><th>Criterion</th><th>Description</th><th>Rung</th><th>JTBD Framing</th></tr></thead>'
+                f'<tbody>{crit_rows}</tbody></table></div>'
+            )
+        modules_html = "".join(cards)
+
+    return f"""
+  <section>
+    <h2>Feature Exposure Ladder</h2>
+    <div class="info-card">{rung_table}</div>
+    <p style="color:var(--ink-dim); font-size:0.8rem;">Maps to Google HEART's Adoption pillar, computed statically from declared intent, not live usage telemetry.</p>
+  </section>
+  <section>
+    <h2>Per-Module UI Criteria</h2>
+    <div>{modules_html}</div>
+  </section>"""
+
+
 def render_html(data: dict) -> str:
     stats = [
         ("Criteria", f'{data["complete"]}/{data["total"]}'),
@@ -583,6 +635,7 @@ def render_html(data: dict) -> str:
     objective_gaps_html = _render_objective_gaps_html(data)
     audit_trail_html = _render_audit_trail_html(data["provenance"])
     arch_justification_html = _render_architecture_justification_html(data["architecture_justification"])
+    design_audit_html = _render_design_audit_html(data["design_audit"])
 
     return f"""<!doctype html>
 <html lang="en">
@@ -611,12 +664,14 @@ def render_html(data: dict) -> str:
   <input class="tab-input" type="radio" name="pcp-tabs" id="tab-objective">
   <input class="tab-input" type="radio" name="pcp-tabs" id="tab-audit">
   <input class="tab-input" type="radio" name="pcp-tabs" id="tab-arch">
+  <input class="tab-input" type="radio" name="pcp-tabs" id="tab-design">
 
   <nav class="tab-bar">
     <label class="tab-label" for="tab-overview">Overview</label>
     <label class="tab-label" for="tab-objective">Objective &amp; Gaps</label>
     <label class="tab-label" for="tab-audit">Audit Trail</label>
     <label class="tab-label" for="tab-arch">Architecture Justification</label>
+    <label class="tab-label" for="tab-design">Design</label>
   </nav>
 
   <div id="panel-overview" class="tab-panel">
@@ -643,6 +698,7 @@ def render_html(data: dict) -> str:
   <div id="panel-objective" class="tab-panel">{objective_gaps_html}</div>
   <div id="panel-audit" class="tab-panel">{audit_trail_html}</div>
   <div id="panel-arch" class="tab-panel">{arch_justification_html}</div>
+  <div id="panel-design" class="tab-panel">{design_audit_html}</div>
 
   <footer>
     Generated by <code class="mono">pcp dashboard</code>. Static snapshot — re-run to refresh. One file, no server.

@@ -134,8 +134,8 @@ def test_init_generated_controls_yaml_parses_and_has_twelve_controls(tmp_path):
     runner = CliRunner()
     runner.invoke(cli, ["init", "--path", str(tmp_path)])
     data = yaml.safe_load((tmp_path / ".pcp" / "controls.yaml").read_text())
-    assert len(data["controls"]) == 12
-    assert {c["id"] for c in data["controls"]} == {f"CTRL-{i:03d}" for i in range(1, 13)}
+    assert len(data["controls"]) == 13
+    assert {c["id"] for c in data["controls"]} == {f"CTRL-{i:03d}" for i in range(1, 14)}
 
 
 def test_init_skips_existing_files_without_force(tmp_path):

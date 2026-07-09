@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sys
 import subprocess
 import threading
@@ -414,7 +415,12 @@ def _build_agent_prompt(
             "fresh — if it's still the empty scaffold, this is the first UI screen: "
             "establish the system now (see the `pcp-ui-design` skill) and write it there "
             "so later screens stay consistent instead of each looking like a different "
-            "vanilla template."
+            "vanilla template. Before finishing, add a `design_justification` block to "
+            "this criterion in acceptance.yaml: `checklist_passed` (which design-system "
+            "conventions this screen actually followed), `jtbd_framing` (one sentence, "
+            "'when a user is X, this lets them Y' — not a restatement of the description), "
+            "and `deviations_from_system` if this screen needed a new pattern the system "
+            "didn't have yet."
         )
         prompt_parts.append("")
 
@@ -650,6 +656,51 @@ def _run_gate_check(pcp_dir: Path, diff: str, ctx: dict) -> list[str]:
     return issues
 
 
+def _run_design_consistency_check(pcp_dir: Path, project_root: Path, criterion: dict, ctx: dict) -> None:
+    """PCP Design lifecycle, stage 4 (Verify). Advisory only — never returned
+    into block_findings, never blocks a criterion. Only fires for UI-facing
+    criteria once .pcp/design_system.md has real established color tokens
+    (not the empty scaffold): flags hardcoded hex color literals in the
+    criterion's target file as a heuristic signal the screen may not be
+    using the project's own design system. Not proof either way — a
+    legitimate reason to hardcode a specific value (a brand-mandated exact
+    color) is common; this surfaces a signal for human review, same posture
+    as pcp audit's dead-code findings."""
+    if not _is_ui_facing_criterion(criterion):
+        return
+
+    design_system_path = pcp_dir / "design_system.md"
+    if not design_system_path.exists() or "(not yet established)" in design_system_path.read_text():
+        _qa_record(pcp_dir, ctx, "design-consistency", [], control_id="CTRL-013", tool=None)
+        return
+
+    target = criterion.get("target")
+    target_path = project_root / target if target else None
+    if not target_path or not target_path.is_file():
+        _qa_record(pcp_dir, ctx, "design-consistency", [], control_id="CTRL-013", tool=None)
+        return
+
+    content = target_path.read_text(errors="replace")
+    hex_matches = re.findall(r"#[0-9a-fA-F]{3,8}\b", content)
+    findings = []
+    if hex_matches:
+        findings.append(
+            f"{len(hex_matches)} hardcoded hex color literal(s) in {target} while "
+            f".pcp/design_system.md has established color tokens — consider reusing "
+            f"those instead. Examples: {', '.join(hex_matches[:5])}"
+        )
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "design-consistency",
+        "\n".join(findings) if findings else "no hardcoded colors found",
+    )
+    _qa_record(
+        pcp_dir, ctx, "design-consistency", findings, control_id="CTRL-013", tool="regex",
+        evidence_path=evidence_path,
+    )
+    if findings:
+        console.print(f"[yellow]Design consistency (advisory):[/yellow] {findings[0]}")
+
+
 def _record_escalation(pcp_dir: Path, module_name: str, criterion_id: str, block_findings: list[str]) -> None:
     """Route this criterion's final-attempt failure through OPA's escalation
     policy (.pcp/policies/escalation.rego) -- advisory only, doesn't change
@@ -831,6 +882,7 @@ def _build_one_criterion(
         violations_l1 = _run_layer1_check(pcp_dir, project_root, changed_files, ctx)
         violations_arch = _run_architect_review(pcp_dir, diff, changed_files, ctx)
         violations_gate = _run_gate_check(pcp_dir, diff, ctx)
+        _run_design_consistency_check(pcp_dir, project_root, c, ctx)
 
         block_findings = (
             violations_tests + violations_lint + violations_sast

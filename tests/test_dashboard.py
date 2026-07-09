@@ -295,3 +295,26 @@ def test_architecture_justification_tab_shows_dash_for_v1_modules_without_tier_d
     html = render_html(build_dashboard_data(pcp_dir))
     assert "None (?)" not in html
     assert ">—<" in html or "—" in html
+
+
+# ── Design tab: Feature Exposure Ladder ──
+
+def test_render_html_has_design_tab(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    html = render_html(build_dashboard_data(pcp_dir))
+    assert 'id="tab-design"' in html
+    assert ">Design<" in html
+    assert 'id="panel-design"' in html
+
+
+def test_design_tab_shows_feature_exposure_ladder_for_ui_criterion(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    mod_dir = pcp_dir / "strategy" / "modules" / "admin"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "acceptance.yaml").write_text(yaml.dump({"module": "admin", "criteria": [
+        {"id": "A001", "description": "Admin dashboard renders per-app state", "check": "manual", "status": "pending"},
+    ]}))
+    html = render_html(build_dashboard_data(pcp_dir))
+    assert "Feature Exposure Ladder" in html
+    assert "Built, Hidden" in html
+    assert "HEART" in html
