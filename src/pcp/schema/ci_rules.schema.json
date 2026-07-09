@@ -27,6 +27,7 @@
           "target": { "type": "string" },
           "description": { "type": "string" },
           "message": { "type": "string" },
+          "require_present": { "type": "boolean" },
           "severity": {
             "type": "string",
             "enum": ["hard_block", "advisory"]
@@ -51,6 +52,16 @@
           },
           {
             "if": { "properties": { "check": { "const": "protected_path" } } },
+            "then": { "required": ["scope"] }
+          },
+          {
+            "if": {
+              "properties": {
+                "check": { "const": "ast_pattern" },
+                "require_present": { "const": true }
+              },
+              "required": ["require_present"]
+            },
             "then": { "required": ["scope"] }
           }
         ]

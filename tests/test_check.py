@@ -6,8 +6,8 @@ from click.testing import CliRunner
 
 from pcp.cli import cli
 from pcp.commands.check import (
-    _read_bypass_reason, _run_ast_rule, run_file_exists_rule, run_protected_path_rule,
-    is_syntax_only_yaml_fix,
+    _read_bypass_reason, _run_ast_rule, _run_ast_required_rule, run_file_exists_rule,
+    run_protected_path_rule, is_syntax_only_yaml_fix,
 )
 
 
@@ -83,6 +83,67 @@ def test_ast_rule_skips_missing_files(tmp_path):
     rule = {"id": "SEC_001", "pattern": r"x", "scope": []}
     violations = _run_ast_rule(rule, ["does_not_exist.py"], tmp_path)
     assert violations == []
+
+
+# ── ast_pattern with require_present: true — inverted, block-if-missing ──
+
+def test_ast_required_rule_passes_when_pattern_present(tmp_path):
+    (tmp_path / "agent.py").write_text("def send():\n    policy.strip(payload)\n")
+    rule = {"id": "POLICY_001", "pattern": r"policy\.strip\(", "scope": ["agent.py"], "require_present": True}
+    assert _run_ast_required_rule(rule, tmp_path) == []
+
+
+def test_ast_required_rule_blocks_when_pattern_missing(tmp_path):
+    (tmp_path / "agent.py").write_text("def send():\n    transmit(payload)\n")
+    rule = {"id": "POLICY_001", "pattern": r"policy\.strip\(", "scope": ["agent.py"], "require_present": True}
+    violations = _run_ast_required_rule(rule, tmp_path)
+    assert len(violations) == 1
+    assert "not found" in violations[0]
+
+
+def test_ast_required_rule_blocks_when_scope_matches_no_files(tmp_path):
+    rule = {"id": "POLICY_001", "pattern": r"policy\.strip\(", "scope": ["nonexistent.py"], "require_present": True}
+    violations = _run_ast_required_rule(rule, tmp_path)
+    assert len(violations) == 1
+    assert "matched no files" in violations[0]
+
+
+def test_ast_required_rule_requires_scope(tmp_path):
+    rule = {"id": "POLICY_001", "pattern": r"x", "require_present": True}
+    violations = _run_ast_required_rule(rule, tmp_path)
+    assert len(violations) == 1
+    assert "no scope" in violations[0]
+
+
+def test_ast_required_rule_satisfied_by_any_file_in_scope(tmp_path):
+    """Aggregate semantics: pattern must appear somewhere across scope, not in
+    every scoped file individually."""
+    (tmp_path / "a.py").write_text("no match here\n")
+    (tmp_path / "b.py").write_text("policy.strip(x)\n")
+    rule = {"id": "POLICY_001", "pattern": r"policy\.strip\(", "scope": ["*.py"], "require_present": True}
+    assert _run_ast_required_rule(rule, tmp_path) == []
+
+
+def test_ci_rules_schema_requires_scope_when_require_present_true():
+    from pcp.schema.validator import validate_file
+
+    p_bad = None
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p_bad = Path(d) / "ci_rules.yaml"
+        p_bad.write_text(yaml.dump({"version": "1.0", "rules": [
+            {"id": "POLICY_001", "name": "n", "check": "ast_pattern", "pattern": "x",
+             "severity": "hard_block", "require_present": True},
+        ]}))
+        errors = validate_file(p_bad, "ci_rules")
+        assert errors, "require_present: true with no scope should fail schema validation"
+
+        p_good = Path(d) / "ci_rules_ok.yaml"
+        p_good.write_text(yaml.dump({"version": "1.0", "rules": [
+            {"id": "POLICY_001", "name": "n", "check": "ast_pattern", "pattern": "x",
+             "severity": "hard_block", "require_present": True, "scope": ["agent.py"]},
+        ]}))
+        assert validate_file(p_good, "ci_rules") == []
 
 
 # ── file_exists rule, including {module} placeholder resolution ──
@@ -352,6 +413,37 @@ def test_check_cli_opa_approves_real_bypass_reason(tmp_path):
     ])
     assert result.exit_code == 0
     assert (pcp_dir / "bypass_log.yaml").exists()
+
+
+def test_check_cli_blocks_on_missing_required_pattern(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "POLICY_001", "name": "strip before send", "check": "ast_pattern",
+         "pattern": r"policy\.strip\(", "severity": "hard_block", "scope": ["agent.py"],
+         "require_present": True},
+    ])
+    (tmp_path / "agent.py").write_text("def send():\n    transmit(payload)\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["check", "--path", str(tmp_path), "--files", "agent.py"])
+    assert result.exit_code == 1
+    assert "POLICY_001" in result.output
+
+
+def test_check_cli_passes_when_required_pattern_present(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "POLICY_001", "name": "strip before send", "check": "ast_pattern",
+         "pattern": r"policy\.strip\(", "severity": "hard_block", "scope": ["agent.py"],
+         "require_present": True},
+    ])
+    (tmp_path / "agent.py").write_text("def send():\n    policy.strip(payload)\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["check", "--path", str(tmp_path), "--files", "agent.py"])
+    assert result.exit_code == 0
 
 
 def test_check_cli_bypass_permissive_without_opa_policy(tmp_path):

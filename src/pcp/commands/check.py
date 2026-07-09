@@ -94,6 +94,38 @@ def _run_ast_rule(rule: dict, staged_files: list[str], project_root: Path) -> li
     return violations
 
 
+def _run_ast_required_rule(rule: dict, project_root: Path) -> list[str]:
+    """Violations for a check:ast_pattern rule with require_present: true --
+    inverted from ast_pattern's default 'block if pattern found anywhere in a
+    changed file' semantics. This is 'block if pattern is found NOWHERE in
+    scope' instead -- e.g. 'agent.py must call policy.strip() somewhere', not
+    'agent.py must never contain X'. Project-wide like file_exists, not
+    diff-scoped like the default ast_pattern rules: this represents a standing
+    invariant on the file's current content, checked every time, not only
+    when that file happens to be part of the current commit."""
+    pattern = re.compile(rule["pattern"], re.MULTILINE)
+    scope = rule.get("scope", [])
+    if not scope:
+        return [f"[{rule['id']}] require_present rule has no scope — cannot check"]
+
+    matched_any_file = False
+    for pat in scope:
+        for full_path in project_root.glob(pat):
+            if not full_path.is_file():
+                continue
+            matched_any_file = True
+            try:
+                content = full_path.read_text(errors="replace")
+            except OSError:
+                continue
+            if pattern.search(content):
+                return []  # found somewhere in scope -- satisfied
+
+    if not matched_any_file:
+        return [f"scope {scope} matched no files — required pattern /{rule['pattern']}/ cannot be verified"]
+    return [f"required pattern /{rule['pattern']}/ not found in any file matching {scope}"]
+
+
 def _git_show_head(project_root: Path, rel_path: str) -> str | None:
     import subprocess
     result = subprocess.run(
@@ -236,12 +268,13 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
         sys.exit(1)
 
     data = load_yaml(ci_rules_path)
-    rules = [r for r in data.get("rules", []) if r.get("check") == "ast_pattern"]
+    rules = [r for r in data.get("rules", []) if r.get("check") == "ast_pattern" and not r.get("require_present")]
+    required_rules = [r for r in data.get("rules", []) if r.get("check") == "ast_pattern" and r.get("require_present")]
     file_rules = [r for r in data.get("rules", []) if r.get("check") == "file_exists"]
     protected_rules = [r for r in data.get("rules", []) if r.get("check") == "protected_path"]
     module_names = get_module_names(pcp_dir)
 
-    if not rules and not file_rules and not protected_rules:
+    if not rules and not required_rules and not file_rules and not protected_rules:
         console.print("[dim]No ast_pattern, file_exists, or protected_path rules in ci_rules.yaml.[/dim]")
         sys.exit(0)
 
@@ -259,7 +292,7 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
             console.print("[dim]Give a specific, verifiable reason — not \"reason\"/\"todo\"/\"test\"/\"fixme\".[/dim]")
             sys.exit(1)
 
-        rule_ids = [r["id"] for r in rules + file_rules + protected_rules]
+        rule_ids = [r["id"] for r in rules + required_rules + file_rules + protected_rules]
         _log_bypass(pcp_dir, bypass_reason, rule_ids)
         from pcp import telemetry
         telemetry.record(
@@ -295,6 +328,10 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
             violations = run_file_exists_rule(rule, project_root, module_names)
             for v in violations:
                 all_violations.append({"rule_id": rule["id"], "file": v.split(":")[0], "detail": v})
+        for rule in required_rules:
+            violations = _run_ast_required_rule(rule, project_root)
+            for v in violations:
+                all_violations.append({"rule_id": rule["id"], "file": None, "detail": v})
 
         from datetime import datetime, timezone
         baseline_path = pcp_dir / "baseline_violations.yaml"
@@ -318,7 +355,7 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
             for v in bd.get("violations", []):
                 baseline_keys.add(v.get("detail", ""))
 
-    if not staged and not file_rules:
+    if not staged and not file_rules and not required_rules:
         sys.exit(0)
 
     hard_violations = []
@@ -355,6 +392,20 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
     # file_exists rules are structural (project-wide), not diff-scoped — always evaluated.
     for rule in file_rules:
         violations = run_file_exists_rule(rule, project_root, module_names)
+        if staged_only and baseline_keys:
+            violations = [v for v in violations if v not in baseline_keys]
+        if not violations:
+            continue
+        severity = rule.get("severity", "advisory")
+        entry = {"rule": rule, "violations": violations}
+        if severity == "hard_block":
+            hard_violations.append(entry)
+        else:
+            advisory_violations.append(entry)
+
+    # require_present ast_pattern rules are structural (project-wide), like file_exists.
+    for rule in required_rules:
+        violations = _run_ast_required_rule(rule, project_root)
         if staged_only and baseline_keys:
             violations = [v for v in violations if v not in baseline_keys]
         if not violations:
