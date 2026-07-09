@@ -47,6 +47,23 @@ def test_ast_pattern_not_found_anywhere_stays_pending(tmp_path):
     assert ok is False
 
 
+def test_ast_pattern_target_pointing_at_a_directory_does_not_crash(tmp_path):
+    """Real bug, found 2026-07-08 dogfooding against ontology-foundry: a
+    criterion's target field pointed at a real directory, not a file.
+    path.exists() is True for a directory too, so the old code tried to
+    read_text() it and crashed the whole `pcp scan` run with an unhandled
+    IsADirectoryError. Should fall through to the repo-wide fallback search
+    instead, same as any other "not found at declared path" case."""
+    _reset_caches()
+    (tmp_path / "extractors").mkdir()
+    (tmp_path / "other.py").write_text("def unrelated(): pass\n")
+
+    ok, detail = _check_ast_pattern("extractors", r"def unrelated", tmp_path)
+
+    assert ok is True  # found via the repo-wide fallback, not a crash
+    assert "other.py" in detail
+
+
 def test_file_exists_at_declared_path(tmp_path):
     _reset_caches()
     (tmp_path / "module.py").touch()

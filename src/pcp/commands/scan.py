@@ -59,7 +59,14 @@ def _check_file_exists(target: str, project_root: Path) -> tuple[bool, str]:
 
 def _check_ast_pattern(target: str, pattern: str, project_root: Path) -> tuple[bool, str]:
     path = project_root / target
-    if path.exists():
+    # Real bug, found 2026-07-08: path.exists() is True for a directory too,
+    # and directories don't have text content -- _read_cached(path).read_text()
+    # raised an unhandled IsADirectoryError that crashed the whole `pcp scan`
+    # run outright, whenever any acceptance criterion's ast_pattern target
+    # happened to be a directory rather than a file. is_file() correctly
+    # falls through to the same repo-wide fallback search used for a target
+    # that's simply missing.
+    if path.is_file():
         if re.search(pattern, _read_cached(path), re.MULTILINE):
             return True, f"pattern found in {target}"
 
