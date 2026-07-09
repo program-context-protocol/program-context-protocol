@@ -326,6 +326,67 @@ def test_pm_command(temp_project):
         assert acc["criteria"][1]["id"] == "A002"
         assert acc["criteria"][1]["status"] == "pending"
 
+        # pm must force version 2.0 on both files -- never leave/revert a
+        # module to the ungated 1.0 shape -- and coerce logic_tier/
+        # build_vs_buy for both the pre-existing and the newly-added criterion
+        # since the mock LLM response above didn't supply either.
+        spec = yaml.safe_load((mod_dir / "spec.yaml").read_text())
+        assert spec["version"] == "2.0"
+        assert acc["version"] == "2.0"
+        assert acc["criteria"][0]["logic_tier"] == 6
+        assert acc["criteria"][1]["build_vs_buy"]["decision"] == "build_fresh"
+        assert "didn't match the schema, coerced" in result.output
+
+
+def test_pm_preserves_existing_module_level_build_vs_buy_on_modify(temp_project):
+    """A real prior module-level build_vs_buy decision (e.g. from kickoff)
+    must not be silently discarded just because this pm call's LLM response
+    omitted it."""
+    pcp_dir = temp_project / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Objective\nAuth service.")
+    (pcp_dir / "strategy").mkdir()
+    (pcp_dir / "strategy" / "decomposition.md").write_text("# Decomp")
+
+    mod_dir = pcp_dir / "strategy" / "modules" / "auth"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "spec.yaml").write_text(yaml.dump({
+        "version": "2.0", "module": "auth", "description": "Handles authentication.",
+        "objective_coverage": ["Auth"], "dependencies": [], "constraints": [],
+        "build_vs_buy": {"decision": "reuse_whole", "rationale": "Auth0 fits cleanly", "candidates_considered": ["Auth0", "Clerk"]},
+    }))
+    (mod_dir / "acceptance.yaml").write_text(yaml.dump({
+        "version": "2.0", "module": "auth", "criteria": [],
+    }))
+
+    mock_pm_response = {
+        "module_action": "modify",
+        "module_name": "auth",
+        "explanation": "Add password reset flow.",
+        "spec_changes": {
+            "version": "2.0", "module": "auth", "description": "Handles authentication and password reset.",
+            "objective_coverage": ["Auth"], "dependencies": [], "constraints": [],
+            # deliberately omits build_vs_buy -- simulates an LLM response that dropped it
+        },
+        "acceptance_changes": {
+            "version": "2.0", "module": "auth", "criteria": [
+                {"id": "A001", "description": "Password reset works.", "check": "manual", "status": "pending",
+                 "logic_tier": 1, "build_vs_buy": {"decision": "build_fresh", "rationale": "trivial flow"}},
+            ],
+        },
+    }
+
+    with patch("pcp.llm.client.call_json") as mock_call_json, \
+            patch("pcp.commands.scan.scan"):
+        mock_call_json.return_value = mock_pm_response
+        runner = CliRunner()
+        result = runner.invoke(cli, ["pm", "Add password reset", "--path", str(temp_project)], input="y\n")
+
+    assert result.exit_code == 0
+    spec = yaml.safe_load((mod_dir / "spec.yaml").read_text())
+    assert spec["build_vs_buy"]["decision"] == "reuse_whole"
+    assert spec["build_vs_buy"]["rationale"] == "Auth0 fits cleanly"
+
 
 def test_build_command(temp_project):
     pcp_dir = temp_project / ".pcp"

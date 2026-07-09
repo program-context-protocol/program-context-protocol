@@ -11,6 +11,7 @@ from rich.console import Console
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir, get_modules_dir
 from pcp.llm import client as llm
 from pcp.pcp_status import write_pcp_md
+from pcp.commands.kickoff import _normalize_acceptance, _normalize_spec
 
 console = Console()
 
@@ -39,26 +40,39 @@ Output schema:
   "module_name": "module-name",
   "explanation": "A plain-English summary of what will be built and why, detailing how this intent satisfies the request.",
   "spec_changes": {
-    "version": "1.0",
+    "version": "2.0",
     "module": "module-name",
     "description": "Description of the module including the new features (minimum 10 words).",
     "objective_coverage": ["Explain how this module covers objective.md objectives"],
     "dependencies": ["dependency-module-name"],
-    "constraints": ["List of constraints"]
+    "constraints": [],
+    "build_vs_buy": {
+      "decision": "not_applicable",
+      "rationale": "Pure business-logic module -- no whole-module tool-adoption choice; see per-criterion build_vs_buy instead.",
+      "candidates_considered": []
+    }
   },
   "acceptance_changes": {
-    "version": "1.0",
+    "version": "2.0",
     "module": "module-name",
     "criteria": [
       {
         "id": "A002",
         "description": "Clear description of the new exit criterion",
         "check": "manual | ast_pattern | test_passes | file_exists",
-        "status": "pending"
+        "status": "pending",
+        "logic_tier": 6,
+        "build_vs_buy": {
+          "decision": "build_fresh",
+          "rationale": "Why this decision, one sentence.",
+          "candidates_considered": []
+        }
       }
     ]
   }
 }
+
+Every NEW criterion MUST declare logic_tier (1-6, the cheapest rung that correctly makes this decision: 1=deterministic, 2=optimization/solver, 3=statistical/ML, 4=RAG, 5=cached reuse, 6=deep-think LLM -- default to the cheapest rung that genuinely fits, do not default everything to 6) and build_vs_buy: {decision, rationale, candidates_considered} where decision is exactly one of: reuse_whole, reuse_partial (vendor one file/function, not the whole repo), reimplement_from_reference (study a solved approach and write original code, no code copied), fork_adapt, build_fresh. If this feature touches an infrastructure-shaped module (portal, auth, integrations, orchestration engine), spec_changes ALSO needs a real module-level build_vs_buy decision instead of 'not_applicable'.
 """
 
 
@@ -158,8 +172,26 @@ def pm(intent: str, project_path: str | None):
     spec_path = mod_dir / "spec.yaml"
     acc_path = mod_dir / "acceptance.yaml"
 
-    # Save spec.yaml
-    spec_path.write_text(yaml.dump(result["spec_changes"], default_flow_style=False))
+    # Force version 2.0 regardless of what the LLM returned -- same reasoning
+    # as kickoff.py: a spec pm touches must always get logic_tier/build_vs_buy
+    # enforcement, never silently stay on (or revert to) the ungated 1.0 shape.
+    spec_changes = result["spec_changes"]
+    spec_changes["version"] = "2.0"
+
+    # On modify, a real prior module-level build_vs_buy decision must not be
+    # silently discarded just because this pm call's response omitted it --
+    # only coerce to a flagged placeholder if one never existed.
+    existing_spec = {}
+    if spec_path.exists():
+        try:
+            existing_spec = yaml.safe_load(spec_path.read_text()) or {}
+        except Exception:
+            pass
+    if "build_vs_buy" not in spec_changes and existing_spec.get("build_vs_buy"):
+        spec_changes["build_vs_buy"] = existing_spec["build_vs_buy"]
+
+    coercion_warnings = _normalize_spec(spec_changes, mod_name)
+    spec_path.write_text(yaml.dump(spec_changes, default_flow_style=False))
 
     # Save/Merge acceptance.yaml
     existing_criteria = []
@@ -178,14 +210,22 @@ def pm(intent: str, project_path: str | None):
         criteria_map[new_c["id"]] = new_c
 
     merged_acceptance = {
-        "version": "1.0",
+        "version": "2.0",
         "module": mod_name,
         "criteria": sorted(list(criteria_map.values()), key=lambda x: x["id"])
     }
+    # Coerces the WHOLE merged list, not just the new criteria -- retroactively
+    # upgrades any pre-existing criterion (e.g. from an old 1.0-era module)
+    # that's missing logic_tier/build_vs_buy the first time pm touches it.
+    coercion_warnings += _normalize_acceptance(merged_acceptance, mod_name)
 
     acc_path.write_text(yaml.dump(merged_acceptance, default_flow_style=False))
 
     console.print(f"[green]✓[/green] Module '{mod_name}' spec and acceptance criteria updated.")
+    if coercion_warnings:
+        console.print(f"[yellow]⚠  {len(coercion_warnings)} field(s) didn't match the schema, coerced to a safe default:[/yellow]")
+        for w in coercion_warnings:
+            console.print(f"   {w}")
 
     # Refresh current state & pcp.md snapshot
     from pcp.commands.scan import scan
