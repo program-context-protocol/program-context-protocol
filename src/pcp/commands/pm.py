@@ -1,5 +1,6 @@
 """pcp pm — translate natural language intent to spec modifications."""
 
+import os
 import sys
 import json
 from pathlib import Path
@@ -12,6 +13,15 @@ from pcp.llm import client as llm
 from pcp.pcp_status import write_pcp_md
 
 console = Console()
+
+def _max_context_chars() -> int:
+    """Reject-loud, not truncate-silent -- same posture as kickoff.py's
+    vision-doc guard. Bounds _load_project_context's assembled prompt (every
+    existing module's full spec.yaml + acceptance.yaml, pasted verbatim,
+    unbounded before this). A function, not a module-level constant, so
+    PCP_PM_MAX_CONTEXT_CHARS is read live at call time rather than frozen at
+    import time."""
+    return int(os.environ.get("PCP_PM_MAX_CONTEXT_CHARS", "60000"))
 
 SYSTEM_PROMPT = """\
 You are an expert product manager.
@@ -94,6 +104,20 @@ def pm(intent: str, project_path: str | None):
 
     context_str = _load_project_context(pcp_dir)
     user_prompt = f"## Intent\n{intent}\n\n{context_str}"
+
+    max_context_chars = _max_context_chars()
+    if len(user_prompt) > max_context_chars:
+        console.print(
+            f"[red]Error:[/red] assembled project context is {len(user_prompt):,} chars, "
+            f"over the {max_context_chars:,}-char pm limit."
+        )
+        console.print(
+            "[dim]This project's specs have grown too large to paste in full on every `pcp pm` call. "
+            "Not truncated automatically -- a silent cut could drop an unrelated module's constraints "
+            "the new intent actually depends on. Consider splitting into smaller modules, or raise "
+            "PCP_PM_MAX_CONTEXT_CHARS if you've confirmed the full context is genuinely needed.[/dim]"
+        )
+        sys.exit(2)
 
     console.print("[dim]Analyzing intent against project context...[/dim]")
 

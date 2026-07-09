@@ -1,5 +1,6 @@
 """pcp kickoff — vision → strategy generation via LLM."""
 
+import os
 import sys
 import json
 from pathlib import Path
@@ -125,6 +126,16 @@ def _write_file(path: Path, content: str) -> None:
     path.write_text(content)
 
 
+def _max_vision_chars() -> int:
+    """Reject-loud, not truncate-silent: unlike capture.py's transcript cap
+    (where "most recent" is a sane proxy for "most relevant"), a vision doc
+    has no such structure -- a blind truncation could quietly drop the
+    important part and generate a wrong strategy with no visible sign why.
+    A function, not a module-level constant, so PCP_KICKOFF_MAX_VISION_CHARS
+    is read live at call time rather than frozen at import time."""
+    return int(os.environ.get("PCP_KICKOFF_MAX_VISION_CHARS", "40000"))
+
+
 VALID_CHECKS = {"ast_pattern", "file_exists", "test_passes", "manual", "dom_contains", "url_responds", "visual"}
 VALID_STATUSES = {"pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"}
 VALID_LOGIC_TIERS = {1, 2, 3, 4, 5, 6}
@@ -219,6 +230,20 @@ def kickoff(vision_file: str, project_path: str, force: bool):
         vision_content = vision_path.read_text()
     except Exception as e:
         console.print(f"[red]Error reading vision file:[/red] {e}")
+        sys.exit(2)
+
+    max_vision_chars = _max_vision_chars()
+    if len(vision_content) > max_vision_chars:
+        console.print(
+            f"[red]Error:[/red] {vision_file} is {len(vision_content):,} chars, "
+            f"over the {max_vision_chars:,}-char kickoff limit."
+        )
+        console.print(
+            "[dim]Split it into a shorter vision doc, or scope this kickoff to one phase at a time — "
+            "not truncated automatically, since a vision doc has no 'most recent = most relevant' "
+            "structure the way a session transcript does, so a silent cut could quietly drop the "
+            "important part and generate a wrong strategy with no visible sign why.[/dim]"
+        )
         sys.exit(2)
 
     console.print("[dim]Analyzing vision and generating Strategy decomposition...[/dim]")

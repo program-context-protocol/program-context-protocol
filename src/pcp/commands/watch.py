@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import click
@@ -42,6 +43,19 @@ def _max_consecutive_auto_fix_attempts() -> int:
     and just report — a human needs to look. Override with
     PCP_WATCH_MAX_CONSECUTIVE_FIXES."""
     return int(os.environ.get("PCP_WATCH_MAX_CONSECUTIVE_FIXES", "3"))
+
+
+def _watch_agent_max_budget_usd() -> str:
+    """Per-attempt dollar cap passed to `claude -p --max-budget-usd` for
+    watch's auto-fix agent -- same mechanism build.py already uses for its
+    own coding-agent subprocess, applied here since this is the same shape of
+    call and had no cap at all until now. Doesn't add a new retry pathway:
+    an attempt that hits this cap without finishing is indistinguishable
+    from any other incomplete attempt, and already falls under the existing
+    PCP_WATCH_MAX_CONSECUTIVE_FIXES ceiling below -- it just bounds the cost
+    of each individual attempt within that ceiling instead of leaving it open.
+    Override with PCP_WATCH_AGENT_MAX_BUDGET_USD."""
+    return os.environ.get("PCP_WATCH_AGENT_MAX_BUDGET_USD", "5")
 
 
 def get_latest_ci_run(project_root: Path) -> dict | None:
@@ -96,17 +110,34 @@ def notify(message: str) -> None:
     console.print(f"[dim]Notify: {message}[/dim]")
 
 
-def attempt_auto_fix(pcp_dir: Path, failure_context: str) -> bool:
-    """Spawn a one-off claude -p session instructed to diagnose+fix+commit+push.
-    Returns True if the agent ran without a process-level error — not a guarantee
-    the fix worked, the next poll cycle re-checks CI for that."""
+def attempt_auto_fix(pcp_dir: Path, failure_context: str, session_id: str, is_first_attempt: bool) -> bool:
+    """Spawn a claude -p session instructed to diagnose+fix+commit+push.
+
+    session_id ties consecutive auto-fix attempts within the same failure
+    streak together: is_first_attempt=True opens a fresh session with
+    --session-id, subsequent consecutive attempts --resume it instead of
+    cold-restarting -- the same fix build.py already applies to its own
+    per-criterion retries (a cold restart re-explores the whole repo and
+    re-pastes context for every attempt). The caller resets to a new
+    session_id once CI succeeds, so a genuinely new failure never resumes
+    stale context from an unrelated one.
+
+    Returns True if the agent ran without a process-level error — not a
+    guarantee the fix worked, the next poll cycle re-checks CI for that."""
     prompt = (
         "A CI run failed on this repository. Diagnose the failure from the log below, "
         "fix the underlying issue, commit, and push to the current branch. "
         "Follow this project's CLAUDE.md and ci_rules.yaml.\n\n"
         f"## CI Failure Log\n```\n{failure_context}\n```\n"
     )
-    cmd = [_claude_bin(), "-p", "--permission-mode", "acceptEdits", "--output-format", "json"]
+    session_flag = ["--session-id", session_id] if is_first_attempt else ["--resume", session_id]
+    cmd = [
+        _claude_bin(), "-p",
+        "--permission-mode", "acceptEdits",
+        "--output-format", "json",
+        "--max-budget-usd", _watch_agent_max_budget_usd(),
+        *session_flag,
+    ]
     build_model = os.environ.get("PCP_BUILD_MODEL")
     if build_model:
         cmd += ["--model", build_model]
@@ -148,6 +179,7 @@ def watch(project_path: str | None, interval: int, once: bool, max_iterations: i
     iteration = 0
     consecutive_fix_attempts = 0
     auto_fix_disabled = False
+    fix_session_id = None
 
     while True:
         iteration += 1
@@ -163,7 +195,10 @@ def watch(project_path: str | None, interval: int, once: bool, max_iterations: i
                 else:
                     logs = get_failed_logs(project_root, run["databaseId"])
                     console.print("[dim]Attempting auto-fix...[/dim]")
-                    fixed = attempt_auto_fix(pcp_dir, logs)
+                    is_first_attempt = fix_session_id is None
+                    if is_first_attempt:
+                        fix_session_id = str(uuid.uuid4())
+                    fixed = attempt_auto_fix(pcp_dir, logs, fix_session_id, is_first_attempt)
                     consecutive_fix_attempts += 1
                     if fixed:
                         notify(f"pcp watch: auto-fix attempted for failed CI run {run.get('url')} — pushed, awaiting next CI result.")
@@ -179,6 +214,7 @@ def watch(project_path: str | None, interval: int, once: bool, max_iterations: i
                 console.print(f"[green]CI run succeeded:[/green] {run.get('name')}")
                 consecutive_fix_attempts = 0
                 auto_fix_disabled = False
+                fix_session_id = None
 
         if health_url:
             healthy = check_deploy_health(health_url)

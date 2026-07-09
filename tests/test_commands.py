@@ -115,6 +115,31 @@ def test_kickoff_success(temp_project):
         assert sdlc["phases"][0]["exit_criteria"][0]["status"] == "complete"
 
 
+def test_kickoff_rejects_oversized_vision_doc(temp_project, monkeypatch):
+    monkeypatch.setenv("PCP_KICKOFF_MAX_VISION_CHARS", "100")
+    vision_file = temp_project / "vision.md"
+    vision_file.write_text("x" * 200)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["kickoff", str(vision_file), "--path", str(temp_project)])
+
+    assert result.exit_code == 2
+    assert "over the 100-char kickoff limit" in result.output
+
+
+def test_pm_rejects_oversized_project_context(temp_project, monkeypatch):
+    monkeypatch.setenv("PCP_PM_MAX_CONTEXT_CHARS", "100")
+    pcp_dir = temp_project / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("x" * 200)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["pm", "some intent", "--path", str(temp_project)])
+
+    assert result.exit_code == 2
+    assert "over the 100-char pm limit" in result.output
+
+
 def test_kickoff_coerces_invalid_check_and_status_values(temp_project):
     """Real bug found dogfooding kickoff against a real, complex vision doc:
     the LLM invented plausible-but-invalid enum values ('automated', 'done')
