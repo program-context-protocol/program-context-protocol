@@ -16,11 +16,29 @@ def test_init_scaffolds_expected_files(tmp_path):
         "controls.yaml", "SDLC_phase.yaml", "strategy/decomposition.md",
         "architect_persona.md", "kb/adr/ADR-001-example.md", "kb/domain/general.md",
         "policies/escalation.rego", "policies/bypass_approval.rego", "policies/coupling_threshold.rego",
+        "RECOMMENDED_PERMISSIONS.md",
     ]:
         assert (pcp / rel).exists(), f"missing {rel}"
 
     assert (tmp_path / "CLAUDE.md").exists()
     assert (tmp_path / ".gitattributes").exists()
+
+
+def test_init_permission_recommendations_advisory_not_applied(tmp_path):
+    """Confirms init surfaces the recommendation up front (day-one visibility,
+    not discovered after friction) without ever touching .claude/settings.json
+    itself -- that edit stays permanently off-limits for the agent to make."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["init", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "RECOMMENDED_PERMISSIONS.md" in result.output
+    assert "advisory" in result.output
+
+    content = (tmp_path / ".pcp" / "RECOMMENDED_PERMISSIONS.md").read_text()
+    assert "Edit(/.pcp/**)" in content
+    assert "acceptEdits" in content
+    assert "git branch -D" in content
+    assert not (tmp_path / ".claude").exists()
 
 
 def test_init_installs_commit_msg_hook_in_a_git_repo(tmp_path):

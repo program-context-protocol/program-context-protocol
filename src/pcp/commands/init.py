@@ -567,6 +567,73 @@ def _write(path: Path, content: str, force: bool) -> bool:
     return True
 
 
+RECOMMENDED_PERMISSIONS_TEMPLATE = """\
+# Recommended Claude Code Permissions for PCP
+
+Found the hard way, once: an agent correcting a spec/target-path drift issue in
+`.pcp/` one file at a time (via the Edit tool) is exactly the kind of routine,
+low-risk PCP maintenance that still triggers a permission prompt on every
+single file under Claude Code's default settings. Pre-approving it narrows the
+friction to just this one path, not a blanket edit allowance.
+
+**This is advisory, not applied automatically** -- PCP does not (and will not)
+edit `.claude/settings.json` itself. Review the snippet below and merge it
+into your own `.claude/settings.json` or `.claude/settings.local.json` if you
+want it.
+
+## Recommended: allow edits under `.pcp/`
+
+```json
+{
+  "permissions": {
+    "allow": ["Edit(/.pcp/**)"]
+  }
+}
+```
+
+Narrower alternative, if you'd rather scope it to just spec/acceptance files
+instead of all of `.pcp/`:
+
+```json
+{
+  "permissions": {
+    "allow": ["Edit(/.pcp/strategy/modules/**/spec.yaml)", "Edit(/.pcp/strategy/modules/**/acceptance.yaml)"]
+  }
+}
+```
+
+## Optional: `acceptEdits` permission mode
+
+For a session dedicated to PCP spec maintenance specifically (not general
+coding), consider switching that session to `acceptEdits` mode instead of
+adding the rule above project-wide. Session-scoped, reverts when the session
+ends -- a good fit if this kind of correction is occasional rather than
+routine for your workflow.
+
+## If you use a `git branch -D` deny rule
+
+PCP's own worktree/branch-reset code (`pcp build`'s parallel module builds,
+and any PCP-provided demo/setup scripts) uses the non-destructive
+`git checkout -B <branch> <start-point>` form, never `git branch -D` --
+a standing deny rule on `-D` will not conflict with anything PCP itself does.
+"""
+
+
+def _write_permission_recommendations(root: Path, force: bool) -> Path | None:
+    """Advisory only -- writes a recommendation file, never touches
+    .claude/settings.json itself (that edit is permanently off-limits for an
+    agent to make on a human's behalf, confirmed the hard way: Claude Code's
+    own permission layer hard-blocks an agent wiring anything into its own
+    settings.json, even a narrow, clearly-scoped addition). Surfacing this at
+    `pcp init` time means a new PCP user sees it on day one, instead of
+    discovering it painfully after hitting the exact friction it describes --
+    which is how this file's own content was originally found."""
+    path = root / ".pcp" / "RECOMMENDED_PERMISSIONS.md"
+    if _write(path, RECOMMENDED_PERMISSIONS_TEMPLATE, force):
+        return path
+    return None
+
+
 @click.command()
 @click.option("--path", "project_path", type=click.Path(), default=".",
               help="Project root (default: current directory).")
@@ -645,7 +712,17 @@ def init(project_path: str, module_name: str | None, force: bool):
     else:
         console.print(f"  [dim]hook not installed[/dim]  ({hook_msg})")
 
+    perms_path = _write_permission_recommendations(root, force)
+    if perms_path:
+        console.print(f"  [green]written[/green]  {perms_path.relative_to(root)}  (advisory -- not applied automatically)")
+
     console.print(f"\n[bold]PCP initialised at {pcp}[/bold]")
+    if perms_path:
+        console.print(
+            f"[dim]Recommended Claude Code permission rules written to {perms_path.relative_to(root)} -- "
+            "review and merge into your own .claude/settings.json if you want fewer per-edit prompts "
+            "when PCP corrects spec/target-path drift.[/dim]"
+        )
     console.print("\nNext steps:")
     console.print("  1. Edit [cyan].pcp/objective.md[/cyan] — describe WHY this program exists")
     console.print("  2. Edit [cyan].pcp/strategy/decomposition.md[/cyan] — break objective into modules")
