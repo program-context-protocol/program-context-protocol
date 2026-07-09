@@ -202,3 +202,96 @@ def test_no_wave_gates_section_when_none_recorded(tmp_path):
     pcp_dir = _init_pcp(tmp_path)
     html = render_html(build_dashboard_data(pcp_dir))
     assert "Wave Gates" not in html
+
+
+# ── Unified tabs: Overview / Objective & Gaps / Audit Trail / Architecture Justification ──
+
+def test_dashboard_data_includes_objective_provenance_and_architecture_justification(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    (pcp_dir / "objective.md").write_text("# Program Objective\n\nWhy this exists: real business reason.")
+    data = build_dashboard_data(pcp_dir)
+    assert "real business reason" in data["objective_text"]
+    assert data["pending_gaps"] == []
+    assert "controls" in data["provenance"]
+    assert "modules" in data["architecture_justification"]
+
+
+def test_render_html_has_all_four_tabs(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    html = render_html(build_dashboard_data(pcp_dir))
+    for tab_id, label in [
+        ("tab-overview", "Overview"), ("tab-objective", "Objective &amp; Gaps"),
+        ("tab-audit", "Audit Trail"), ("tab-arch", "Architecture Justification"),
+    ]:
+        assert f'id="{tab_id}"' in html
+        assert label in html
+    assert 'id="tab-overview" checked' in html, "Overview must be the default active tab"
+
+
+def test_objective_tab_shows_real_objective_text_and_escapes_content(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    (pcp_dir / "objective.md").write_text("## Why\n\n<script>evil</script> real reason here.")
+    html = render_html(build_dashboard_data(pcp_dir))
+    assert "real reason here" in html
+    assert "<script>evil</script>" not in html
+    assert "&lt;script&gt;evil&lt;/script&gt;" in html
+
+
+def test_objective_tab_shows_pending_gaps_from_current_state(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    (pcp_dir / "current_state.md").write_text("- [ ] MOD/A001: something not done yet\n- [x] MOD/A002: done\n")
+    html = render_html(build_dashboard_data(pcp_dir))
+    assert "MOD/A001: something not done yet" in html
+
+
+def test_audit_trail_tab_shows_ssdf_crosswalk(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    (pcp_dir / "controls.yaml").write_text(yaml.dump({"controls": [
+        {"id": "CTRL-001", "name": "Test Suite", "ssdf_practice": ["PW.7"]},
+    ]}))
+    html = render_html(build_dashboard_data(pcp_dir))
+    assert "SSDF Crosswalk" in html
+    assert "CTRL-001" in html
+    assert "Test Suite" in html
+    assert "GAP" in html  # never invoked, no telemetry recorded
+
+
+def test_audit_trail_tab_shows_bypass_ledger(tmp_path):
+    from pcp.commands import check as check_mod
+
+    pcp_dir = _init_pcp(tmp_path)
+    check_mod._log_bypass(pcp_dir, "known false positive, verified safe", ["SEC_001"])
+    html = render_html(build_dashboard_data(pcp_dir))
+    assert "Bypass Ledger" in html
+    assert "known false positive, verified safe" in html
+
+
+def test_architecture_justification_tab_shows_tier_distribution_and_module_decisions(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)
+    mod_dir = pcp_dir / "strategy" / "modules" / "auth"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "spec.yaml").write_text(yaml.dump({
+        "module": "auth", "description": "d",
+        "build_vs_buy": {"decision": "reuse_whole", "rationale": "Auth0 fits cleanly"},
+    }))
+    (mod_dir / "acceptance.yaml").write_text(yaml.dump({"module": "auth", "criteria": [
+        {"id": "A001", "description": "Password check", "check": "manual", "status": "pending",
+         "logic_tier": 1, "build_vs_buy": {"decision": "build_fresh", "rationale": "trivial"}},
+    ]}))
+    html = render_html(build_dashboard_data(pcp_dir))
+    assert "Logic-Tier Distribution" in html
+    assert "Deterministic" in html
+    assert "auth" in html.lower()
+    assert "reuse_whole" in html
+    assert "Auth0 fits cleanly" in html
+    assert "build_fresh" in html
+
+
+def test_architecture_justification_tab_shows_dash_for_v1_modules_without_tier_data(tmp_path):
+    """A module still on the old (ungated) schema has no logic_tier/build_vs_buy
+    -- must render as an honest dash, not a raw 'None'."""
+    pcp_dir = _init_pcp(tmp_path)
+    _write_module(pcp_dir, "legacy", [], [("A001", "old criterion", "pending")])
+    html = render_html(build_dashboard_data(pcp_dir))
+    assert "None (?)" not in html
+    assert ">—<" in html or "—" in html

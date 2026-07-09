@@ -45,7 +45,8 @@ def build_dashboard_data(pcp_dir: Path) -> dict:
     the reads `pcp_status.py`'s own helpers already do."""
     from pcp.commands.scan import _scan_module, _load_prior_manual_status
     from pcp.commands.build import compute_waves
-    from pcp.commands.provenance import _check_chain_integrity
+    from pcp.commands.provenance import _check_chain_integrity, build_provenance
+    from pcp.commands.architecture_justification import build_architecture_justification
     from pcp import pcp_status as ps
 
     project_root = pcp_dir.parent
@@ -122,6 +123,10 @@ def build_dashboard_data(pcp_dir: Path) -> dict:
         "decision_log_summary": ps._extract_decision_log_summary(pcp_dir),
         "chain_integrity": _check_chain_integrity(pcp_dir),
         "wave_gates": wave_gates,
+        "objective_text": ps.extract_objective_text(pcp_dir),
+        "pending_gaps": ps._extract_pending_gaps(pcp_dir),
+        "provenance": build_provenance(pcp_dir),
+        "architecture_justification": build_architecture_justification(pcp_dir),
     }
 
 
@@ -279,6 +284,39 @@ a.qa-chip:hover { text-decoration: underline; }
 
 footer { color: var(--ink-dim); font-size: 0.78rem; border-top: 1px solid var(--border); padding-top: 1rem; margin-top: 2.5rem; }
 footer a { color: var(--accent); }
+
+/* Tabs -- pure CSS (radio + sibling selectors), no JS, same offline/no-framework
+   commitment as the rest of this file. */
+.tab-input { position: absolute; opacity: 0; pointer-events: none; }
+.tab-bar { display: flex; gap: 0.35rem; border-bottom: 1px solid var(--border); margin-bottom: 1.75rem; flex-wrap: wrap; }
+.tab-label {
+  cursor: pointer; padding: 0.55rem 1rem; font-size: 0.85rem; font-weight: 600; color: var(--ink-dim);
+  border-bottom: 2px solid transparent; margin-bottom: -1px; user-select: none;
+}
+.tab-label:hover { color: var(--ink); }
+.tab-panel { display: none; }
+#tab-overview:checked ~ .tab-bar label[for="tab-overview"],
+#tab-objective:checked ~ .tab-bar label[for="tab-objective"],
+#tab-audit:checked ~ .tab-bar label[for="tab-audit"],
+#tab-arch:checked ~ .tab-bar label[for="tab-arch"] {
+  color: var(--accent); border-bottom-color: var(--accent);
+}
+#tab-overview:checked ~ #panel-overview,
+#tab-objective:checked ~ #panel-objective,
+#tab-audit:checked ~ #panel-audit,
+#tab-arch:checked ~ #panel-arch {
+  display: block;
+}
+
+.pcp-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.pcp-table th, .pcp-table td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); }
+.pcp-table th { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-dim); font-weight: 600; }
+.pcp-table td.mono { font-family: var(--mono); }
+.gap-list { list-style: none; margin: 0; padding: 0; }
+.gap-list li { padding: 0.4rem 0; border-bottom: 1px dashed var(--border); font-size: 0.85rem; }
+.gap-list li:last-child { border-bottom: none; }
+.prose { font-size: 0.9rem; line-height: 1.6; white-space: pre-wrap; }
+.flag-warn { color: var(--progress); font-weight: 700; }
 """
 
 
@@ -348,6 +386,139 @@ def _module_card_html(m: dict) -> str:
     </details>"""
 
 
+def _render_objective_gaps_html(data: dict) -> str:
+    obj = data.get("objective_text") or "_No objective.md found. Run `pcp init`._"
+    gaps = data.get("pending_gaps") or []
+    gaps_html = (
+        "".join(f"<li>{escape(g)}</li>" for g in gaps)
+        if gaps else '<li style="color:var(--ink-dim)">All acceptance criteria met.</li>'
+    )
+    return f"""
+  <section>
+    <h2>Objective</h2>
+    <div class="info-card"><div class="prose">{escape(obj)}</div></div>
+  </section>
+  <section>
+    <h2>Pending Gaps</h2>
+    <ul class="gap-list">{gaps_html}</ul>
+  </section>"""
+
+
+def _render_audit_trail_html(prov: dict) -> str:
+    controls = prov.get("controls", {})
+    per_control = prov.get("per_control", {})
+    standing_gaps = set(prov.get("standing_gap_cids", []))
+    never_exercised = set(prov.get("never_exercised_cids", []))
+    bypasses = prov.get("bypasses", [])
+
+    rows = []
+    for cid, c in sorted(controls.items()):
+        totals = per_control.get(cid, {})
+        if cid == "CTRL-010":
+            status = f"{len(bypasses)} bypass(es) logged" if bypasses else "0 bypasses"
+        elif cid in never_exercised:
+            status = '<span class="flag-warn">GAP — never invoked</span>'
+        elif cid in standing_gaps:
+            status = '<span class="flag-warn">GAP — tool never detected</span>'
+        else:
+            status = f"{totals.get('pass', 0)}/{totals.get('total', 0)} pass"
+        practices = ", ".join(c.get("ssdf_practice", []))
+        rows.append(
+            f'<tr><td class="mono">{escape(cid)}</td><td>{escape(c.get("name",""))}</td>'
+            f'<td>{escape(practices)}</td><td>{status}</td></tr>'
+        )
+    table_html = (
+        f'<table class="pcp-table"><thead><tr><th>Control</th><th>Name</th>'
+        f'<th>SSDF Practice</th><th>Status</th></tr></thead><tbody>{"".join(rows)}</tbody></table>'
+        if rows else '<p style="color:var(--ink-dim)">No controls.yaml found.</p>'
+    )
+
+    bypass_html = ""
+    if bypasses:
+        items = "".join(
+            f'<li>{escape(b.get("timestamp",""))} — {escape(b.get("reason",""))} '
+            f'<span style="color:var(--ink-dim)">(rules: {", ".join(b.get("rules_bypassed", []))})</span></li>'
+            for b in bypasses[-10:]
+        )
+        bypass_html = f'<section><h2>Bypass Ledger</h2><ul class="gap-list">{items}</ul></section>'
+
+    return f"""
+  <section>
+    <h2>SSDF Crosswalk</h2>
+    <div class="info-card">{table_html}</div>
+  </section>
+  {bypass_html}"""
+
+
+TIER_LABEL_SHORT = {1: "Deterministic", 2: "Solver", 3: "ML", 4: "RAG", 5: "Cache", 6: "Deep-think"}
+
+
+def _render_architecture_justification_html(aj: dict) -> str:
+    tier_counts = aj.get("tier_counts", {})
+    flagged = aj.get("flagged_count", 0)
+    modules = aj.get("modules", [])
+
+    tier_rows = "".join(
+        f'<tr><td class="mono">{t}</td><td>{escape(TIER_LABEL_SHORT.get(t, "?"))}</td>'
+        f'<td class="mono">{tier_counts.get(t, 0)}</td></tr>'
+        for t in sorted(tier_counts)
+    )
+    tier_table = (
+        f'<table class="pcp-table"><thead><tr><th>Tier</th><th>Label</th><th>Criteria</th></tr></thead>'
+        f'<tbody>{tier_rows}</tbody></table>'
+    )
+
+    flag_note = (
+        f'<p class="flag-warn">{flagged} decision(s) are coerced placeholders — not a real deliberation, review before trusting.</p>'
+        if flagged else ""
+    )
+
+    if not modules:
+        modules_html = '<p style="color:var(--ink-dim)">No modules found, or none use the v2.0 logic_tier/build_vs_buy schema yet.</p>'
+    else:
+        cards = []
+        for m in modules:
+            mbvb = m.get("module_build_vs_buy")
+            mbvb_html = (
+                f'<div style="margin-bottom:0.6rem"><strong>Module-level build-vs-buy:</strong> '
+                f'<span class="mono">{escape(mbvb.get("decision",""))}</span> — {escape(mbvb.get("rationale",""))}</div>'
+                if mbvb else ""
+            )
+            def _tier_cell(c):
+                tier = c.get("logic_tier")
+                if tier is None:
+                    return "—"
+                flag = " ⚠" if c["flagged"] else ""
+                return f'{tier} ({escape(TIER_LABEL_SHORT.get(tier, "?"))}){flag}'
+
+            crit_rows = "".join(
+                f'<tr><td class="mono">{escape(c["id"])}</td><td>{escape(c["description"])}</td>'
+                f'<td class="mono">{_tier_cell(c)}</td>'
+                f'<td class="mono">{escape((c["build_vs_buy"] or {}).get("decision") or "—")}</td></tr>'
+                for c in m["criteria"]
+            )
+            crit_table = (
+                f'<table class="pcp-table"><thead><tr><th>Criterion</th><th>Description</th>'
+                f'<th>Tier</th><th>Build-vs-Buy</th></tr></thead><tbody>{crit_rows}</tbody></table>'
+                if m["criteria"] else ""
+            )
+            cards.append(
+                f'<div class="info-card" style="margin-bottom:0.85rem"><h3>{escape(m["module"])}</h3>{mbvb_html}{crit_table}</div>'
+            )
+        modules_html = "".join(cards)
+
+    return f"""
+  <section>
+    <h2>Logic-Tier Distribution</h2>
+    <div class="info-card">{tier_table}</div>
+    {flag_note}
+  </section>
+  <section>
+    <h2>Per-Module Decisions</h2>
+    <div>{modules_html}</div>
+  </section>"""
+
+
 def render_html(data: dict) -> str:
     stats = [
         ("Criteria", f'{data["complete"]}/{data["total"]}'),
@@ -409,6 +580,10 @@ def render_html(data: dict) -> str:
         )
         bypass_html = f'<div class="info-card"><h3>Recent Bypasses</h3><ul class="mono" style="margin:0;padding-left:1.1rem;font-size:0.8rem">{items}</ul></div>'
 
+    objective_gaps_html = _render_objective_gaps_html(data)
+    audit_trail_html = _render_audit_trail_html(data["provenance"])
+    arch_justification_html = _render_architecture_justification_html(data["architecture_justification"])
+
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -432,29 +607,45 @@ def render_html(data: dict) -> str:
 
   <div class="stat-strip">{stat_cards}</div>
 
-  <section>
-    <h2>Milestones</h2>
-    <div class="milestones">{milestones_html}</div>
-  </section>
+  <input class="tab-input" type="radio" name="pcp-tabs" id="tab-overview" checked>
+  <input class="tab-input" type="radio" name="pcp-tabs" id="tab-objective">
+  <input class="tab-input" type="radio" name="pcp-tabs" id="tab-audit">
+  <input class="tab-input" type="radio" name="pcp-tabs" id="tab-arch">
 
-  <section>
-    <h2>Module Status</h2>
-    {waves_html}
-  </section>
+  <nav class="tab-bar">
+    <label class="tab-label" for="tab-overview">Overview</label>
+    <label class="tab-label" for="tab-objective">Objective &amp; Gaps</label>
+    <label class="tab-label" for="tab-audit">Audit Trail</label>
+    <label class="tab-label" for="tab-arch">Architecture Justification</label>
+  </nav>
 
-  <section>
-    <h2>Evidence Integrity</h2>
-    <div class="info-card">{"".join(ci_lines)}</div>
-  </section>
+  <div id="panel-overview" class="tab-panel">
+    <section>
+      <h2>Milestones</h2>
+      <div class="milestones">{milestones_html}</div>
+    </section>
 
-  {wave_gates_section}
+    <section>
+      <h2>Module Status</h2>
+      {waves_html}
+    </section>
 
-  {"<section><h2>Activity</h2><div class='info-grid'>" + info_cards_html + bypass_html + "</div></section>" if (info_cards or bypass_html) else ""}
+    <section>
+      <h2>Evidence Integrity</h2>
+      <div class="info-card">{"".join(ci_lines)}</div>
+    </section>
+
+    {wave_gates_section}
+
+    {"<section><h2>Activity</h2><div class='info-grid'>" + info_cards_html + bypass_html + "</div></section>" if (info_cards or bypass_html) else ""}
+  </div>
+
+  <div id="panel-objective" class="tab-panel">{objective_gaps_html}</div>
+  <div id="panel-audit" class="tab-panel">{audit_trail_html}</div>
+  <div id="panel-arch" class="tab-panel">{arch_justification_html}</div>
 
   <footer>
-    Generated by <code class="mono">pcp dashboard</code>. Static snapshot — re-run to refresh.
-    See <code class="mono">pcp.md</code>, <code class="mono">.pcp/provenance.md</code>,
-    <code class="mono">.pcp/brd.md</code> for deeper drill-down.
+    Generated by <code class="mono">pcp dashboard</code>. Static snapshot — re-run to refresh. One file, no server.
   </footer>
 </div>
 </body>
