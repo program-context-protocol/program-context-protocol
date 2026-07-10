@@ -36,6 +36,7 @@ Autonomous software factory. PM describes what to build. PCP builds it.
 /pcp accept-adr <id>              # accept a DRAFT ADR written autonomously
 /pcp override-adr <id> "<decision>"  # override PCP's autonomous architecture decision
 /pcp review <module>              # architect-review on module spec
+/pcp review <type>                # architecture | logic | design | security | qa — see REVIEW ROUTER below
 /pcp diff                         # target vs current gap
 ```
 
@@ -51,6 +52,84 @@ Autonomous software factory. PM describes what to build. PCP builds it.
 | "pcp validate-strategy failed" | "the build plan doesn't fully cover what you described — adjusting" |
 
 **Unattended operation:** PCP runs fully autonomously while you are away. Escalations go to Slack — not to a blocking prompt. `/pcp watch` monitors CI and Railway for failures and auto-fixes them. When you return, run `/pcp` to see what was built, what is deferred, and what needs your input. Build never stops for input that can be deferred.
+
+---
+
+## REVIEW ROUTER — the PM should never need to remember a command name
+
+Real gap found dogfooding: PCP has grown ~29 CLI commands across the whole lifecycle
+(architecture, logic-tier decisions, design/UI, security, QA, deploy). A PM asking to
+"review the UI strategy" or "check the security posture" shouldn't need to know the
+exact command (`design-audit`, `architecture-justification`, `check`...) exists, let
+alone spell it correctly. This section is PCP's own lookup table — read it, don't guess
+a command name, and don't tell the PM the technical name unless they ask (same
+Language Rule as above applies here too).
+
+### Intent → command lookup
+
+| PM says something like... | Run this |
+|---|---|
+| "review the architecture" / "does this still make sense structurally" / "check coupling" | `pcp architect-review` (advisory, per-diff), `pcp validate-strategy` (coverage_score + coupling_score, Pass 2), `pcp validate-module <name>` (Pass 1) |
+| "review the logic" / "are we using the right tool for this" / "check build-vs-buy" / "did we reinvent something that already exists" | `pcp architecture-justification` — rolls up every criterion's `logic_tier` (the 6-rung deterministic→deep-think ladder) and `build_vs_buy` decision |
+| "review the design" / "review the UI" / "is this discoverable" / "does this look consistent across screens" | `pcp design-audit` (Feature Exposure Ladder — how discoverable each UI-facing criterion actually is) — for the design-thinking pass on one specific screen, use the `pcp-ui-design` skill (`~/.claude/skills/pcp-ui-design/SKILL.md`), not this rollup |
+| "review security" / "any secrets" / "check for vulnerabilities" | `pcp check` (Layer 1 — deterministic, hard block: hardcoded secrets, eval/exec, disabled TLS, string-built SQL, plus any project-specific `hard_block` rules in `ci_rules.yaml`) |
+| "check before merging" / "PR review" / "does this align with what we asked for" | `pcp gate` (Layer 2 — LLM alignment score, advisory, never hard-blocks) |
+| "are we ready to deploy" / "check the deploy gate" | `pcp deploy-check` (Layer 3 — SDLC phase exit criteria, hard block) |
+| "review QA" / "how's the build going" / "any flaky retries" / "what's this costing" | `pcp telemetry` (per-module retries, QA error rate, cost, languages), `pcp provenance` (full audit-evidence document — SSDF crosswalk, bypass ledger, chain integrity) |
+| "any dead code" / "bloat check" | `pcp audit` (advisory, never blocks) |
+| "what's the overall status" / "show me everything" | `pcp dashboard` — single HTML, 5 tabs (Overview / Objective & Gaps / Audit Trail / Architecture Justification / Design), already visualizes most of the rows above. Open this first before running things piecemeal. |
+| "what's blocked or bypassed" | `pcp report` (bypass history, coverage score, gate outcomes) |
+| "give me a plain-English status" | `pcp status --pm` |
+
+### Full command reference, by lifecycle stage (all current as of this skill's own version — re-check `pcp --help` if something here feels stale)
+
+**Setup / onboarding**
+- `pcp init` — scaffold `.pcp/`
+- `pcp kickoff <vision.md>` — generate specs from a vision doc
+- `pcp import "<description>"` — brownfield onboarding (graphify clusters → draft specs)
+- `pcp takeover` — end-to-end: preflight + kickoff + build everything pending
+- `pcp doctor` — check/configure environment tool integrations
+- `pcp install-hook` / `pcp install-skill` — one-time wiring
+
+**Strategy / architecture**
+- `pcp validate-strategy` — coverage_score + coupling_score (Pass 2: modules vs objective)
+- `pcp validate-module <name>` — module vs objective/decomposition (Pass 1)
+- `pcp architect-review` — architecture principle review against persona + KB (advisory)
+- `pcp architecture-justification [--json]` — `logic_tier`/`build_vs_buy` rollup
+
+**Design** (see CLAUDE.md's "PCP Design as a Hard Constraint" for the full 5-stage lifecycle this fits into)
+- `pcp design-audit [--json]` — Feature Exposure Ladder rollup
+- skill `pcp-ui-design` — design-thinking pass on one UI-facing criterion, establishes/reuses `.pcp/design_system.md`
+
+**Build**
+- `pcp build [--module <name> | --all]` — autonomous coding loops per pending criterion
+- `pcp pm "<intent>"` — translate natural-language feature intent to spec/acceptance changes
+
+**Gates — the 3-tier system**
+- `pcp check` — Layer 1, pre-commit, deterministic, hard block, no LLM
+- `pcp gate` — Layer 2, PR, LLM alignment score, advisory
+- `pcp deploy-check` — Layer 3, deploy, SDLC phase-exit criteria, hard block
+
+**QA / audit / evidence**
+- `pcp telemetry` — build-efficiency rollup (retries, QA error rate, cost, languages)
+- `pcp provenance [--json]` — audit-evidence document (SSDF crosswalk, bypass ledger, chain integrity)
+- `pcp audit` — dead-code/bloat scan, advisory, never blocks
+- `pcp report` — bypass history, coverage score, gate outcomes
+- `pcp capture [--transcript-file <path>]` — classify a session transcript into BRD/decision-log drift
+
+**Status / drift**
+- `pcp scan [--coverage]` — regenerate `.pcp/current_state.md`
+- `pcp diff` — target vs current state gap
+- `pcp status [--pm] [--rescan] [--print]` — `pcp.md` snapshot, or a plain-English PM report
+- `pcp dashboard` — unified 5-tab HTML view (see above)
+- `pcp context` — dump `.pcp/` context for LLM consumption at session start
+
+**Deploy / ops**
+- `pcp deploy [--yes] [--rollout N]` — checklist → Layer 3 gate → approval → trigger → smoke test → auto-rollback
+- `pcp watch [--once] [--interval N]` — continuous CI/deploy monitoring, auto-fix on failure
+
+**Narrow / utility**
+- `pcp verify-syntax-fix <file>` — deterministic SAFE/UNSAFE verdict for a protected-path syntax-only edit (used by the `verify-syntax-fix` PreToolUse hook, not typically invoked directly by a PM)
 
 ---
 
