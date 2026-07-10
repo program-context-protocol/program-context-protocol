@@ -1,6 +1,7 @@
 """pcp kickoff — vision → strategy generation via LLM."""
 
 import os
+import re
 import sys
 import json
 from pathlib import Path
@@ -146,6 +147,25 @@ VALID_MODULE_BVB_DECISIONS = VALID_BVB_DECISIONS | {"not_applicable"}
 _STATUS_ALIASES = {"done": "complete", "finished": "complete", "in_progress": "pending", "todo": "pending"}
 _CHECK_ALIASES = {"automated": "manual", "auto": "manual", "unit_test": "test_passes", "integration_test": "test_passes"}
 
+# ci_rules.yaml's own check/severity enums are DIFFERENT from module_acceptance's
+# above -- found 2026-07-09, same class of bug as the acceptance.yaml one this
+# file already fixed on 2026-07-08, just never applied to ci_rules.yaml: kickoff
+# wrote result["ci_rules"] straight to disk with zero validation, so an
+# LLM-invented check type ('file_pair_diff', 'grep') or severity ('warn' instead
+# of 'advisory') silently reached disk and hard-blocked every future commit via
+# pcp check's schema validation -- confirmed live in a real kicked-off project
+# (agentberg), not hypothetical.
+VALID_CI_CHECKS = {"ast_pattern", "file_exists", "llm_semantic", "protected_path"}
+VALID_CI_SEVERITIES = {"hard_block", "advisory"}
+_CI_SEVERITY_ALIASES = {"warn": "advisory", "warning": "advisory", "block": "hard_block", "error": "hard_block", "critical": "hard_block"}
+# grep-as-string-search is exactly what ast_pattern already is -- a clean,
+# safe re-mapping since these rules already carry a real `pattern` field.
+# Anything else (e.g. 'file_pair_diff' -- a cross-file consistency check with
+# no deterministic equivalent in this schema) falls back to llm_semantic:
+# advisory, not silently dropped, and genuinely the closest honest fit.
+_CI_CHECK_ALIASES = {"grep": "ast_pattern", "regex": "ast_pattern"}
+_CI_ID_PATTERN = re.compile(r"^[A-Z]+_?[0-9]+$")
+
 
 def _coerce_build_vs_buy(bvb, module_name: str, criterion_id: str, valid_decisions: set) -> tuple[dict, list[str]]:
     """Coerces a build_vs_buy block to a schema-valid shape. Missing or
@@ -210,6 +230,69 @@ def _normalize_spec(spec: dict, module_name: str) -> list[str]:
     return warnings
 
 
+def _normalize_ci_rules(ci_rules: dict) -> list[str]:
+    """Coerces ci_rules.yaml's check/severity/id values outside the schema's
+    closed enums to a safe default in place, same posture as
+    _normalize_acceptance: a placeholder-mismatch gets fixed and flagged, not
+    silently written to disk to hard-block every future commit via pcp
+    check's schema validation the first time someone tries to ship."""
+    warnings = []
+    seen_ids: set[str] = set()
+    for i, r in enumerate(ci_rules.get("rules", [])):
+        rid_display = r.get("id", f"rule#{i}")
+
+        check = r.get("check")
+        if check not in VALID_CI_CHECKS:
+            fixed = _CI_CHECK_ALIASES.get(check)
+            if fixed is None:
+                fixed = "llm_semantic"
+            warnings.append(f"ci_rules/{rid_display}: check '{check}' is not valid, coerced to '{fixed}'")
+            r["check"] = fixed
+
+        # Whichever check type it ends up as, make sure the field that type
+        # actually requires exists -- coercing the type alone without this
+        # would just trade one schema error for another.
+        if r["check"] == "llm_semantic" and not r.get("description"):
+            # Prefer `pattern` over `name`: when a check type gets coerced
+            # away from ast_pattern/grep/file_pair_diff, `pattern` often
+            # held free-text semantic explanation (not a real regex) --
+            # that's more useful as `description` than the terse rule name.
+            r["description"] = r.get("pattern") or r.get("name") or "no description provided"
+        elif r["check"] == "ast_pattern" and not r.get("pattern"):
+            # Can't safely claim ast_pattern with no pattern to match -- fall
+            # back to the one type that only needs a description.
+            r["check"] = "llm_semantic"
+            r.setdefault("description", r.get("name") or "no description provided")
+            warnings.append(f"ci_rules/{rid_display}: ast_pattern with no pattern field, coerced to llm_semantic instead")
+        elif r["check"] == "file_exists" and not r.get("target"):
+            r["check"] = "llm_semantic"
+            r.setdefault("description", r.get("name") or "no description provided")
+            warnings.append(f"ci_rules/{rid_display}: file_exists with no target field, coerced to llm_semantic instead")
+        elif r["check"] == "protected_path" and not r.get("scope"):
+            r["check"] = "llm_semantic"
+            r.setdefault("description", r.get("name") or "no description provided")
+            warnings.append(f"ci_rules/{rid_display}: protected_path with no scope field, coerced to llm_semantic instead")
+
+        severity = r.get("severity")
+        if severity not in VALID_CI_SEVERITIES:
+            fixed = _CI_SEVERITY_ALIASES.get(severity, "advisory")
+            warnings.append(f"ci_rules/{rid_display}: severity '{severity}' is not valid, coerced to '{fixed}'")
+            r["severity"] = fixed
+
+        rid = r.get("id", "")
+        if not rid or not _CI_ID_PATTERN.match(rid) or rid in seen_ids:
+            fixed_id = f"GEN_{i + 1:03d}"
+            warnings.append(f"ci_rules: id '{rid or '(missing)'}' is not valid or duplicate, coerced to '{fixed_id}'")
+            r["id"] = fixed_id
+            rid = fixed_id
+        seen_ids.add(rid)
+
+        if not r.get("name"):
+            r["name"] = rid_display
+
+    return warnings
+
+
 @click.command()
 @click.argument("vision_file", type=click.Path(exists=True))
 @click.option("--path", "project_path", type=click.Path(), default=".",
@@ -266,6 +349,12 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     sdlc_yaml = yaml.dump(result["sdlc_phase"], default_flow_style=False)
     _write_file(pcp_dir / "SDLC_phase.yaml", sdlc_yaml)
 
+    # Force the one valid literal version regardless of what the LLM returned
+    # -- there's no v1/v2 duality for ci_rules.yaml the way there is for
+    # module specs, so this is zero-ambiguity, same defensive posture as
+    # forcing "2.0" on acceptance.yaml/spec.yaml below.
+    result["ci_rules"]["version"] = "1.0"
+    coercion_warnings = _normalize_ci_rules(result["ci_rules"])
     ci_yaml = yaml.dump(result["ci_rules"], default_flow_style=False)
     _write_file(pcp_dir / "ci_rules.yaml", ci_yaml)
 
@@ -274,7 +363,6 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     _write_file(pcp_dir / "kb" / "domain" / "general.md", DOMAIN_KB_TEMPLATE)
 
     # Write module specs and acceptance criteria
-    coercion_warnings = []
     for m in result.get("modules", []):
         mod_dir = pcp_dir / "strategy" / "modules" / m["name"]
         # Force version 2.0 regardless of what the LLM returned -- a fresh
@@ -296,7 +384,16 @@ def kickoff(vision_file: str, project_path: str, force: bool):
 
     # Schema-validate what actually landed on disk -- advisory, matches
     # scan.py's own posture (warn, don't block), but at least surfaces any
-    # remaining issue right here instead of only on the next `pcp scan`.
+    # remaining issue right here instead of only the first time someone
+    # tries to commit and pcp check's Layer 1 schema validation hard-blocks
+    # on it -- confirmed live in a real kicked-off project (agentberg) before
+    # this check existed.
+    ci_rules_errors = validate_file(pcp_dir / "ci_rules.yaml", "ci_rules")
+    if ci_rules_errors:
+        console.print("[yellow]⚠  ci_rules.yaml still has schema issues after coercion:[/yellow]")
+        for e in ci_rules_errors:
+            console.print(f"   {e}")
+
     for m in result.get("modules", []):
         mod_dir = pcp_dir / "strategy" / "modules" / m["name"]
         errors = validate_file(mod_dir / "acceptance.yaml", "module_acceptance")

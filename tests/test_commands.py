@@ -1,5 +1,7 @@
+import re
 import sys
 import json
+import tempfile
 import yaml
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -242,6 +244,98 @@ def test_normalize_spec_accepts_not_applicable_for_business_logic_module():
     warnings = _normalize_spec(spec, "add")
     assert warnings == []
     assert spec["build_vs_buy"]["decision"] == "not_applicable"
+
+
+# ── _normalize_ci_rules: real bug found live in a kicked-off project (agentberg) ──
+# ── -- kickoff wrote result["ci_rules"] with zero validation, unlike acceptance.yaml ──
+
+def test_normalize_ci_rules_returns_no_warnings_when_already_valid():
+    from pcp.commands.kickoff import _normalize_ci_rules
+
+    ci_rules = {"version": "1.0", "rules": [
+        {"id": "R001", "name": "No secrets", "check": "ast_pattern", "pattern": "x", "severity": "hard_block"},
+    ]}
+    assert _normalize_ci_rules(ci_rules) == []
+
+
+def test_normalize_ci_rules_coerces_grep_alias_to_ast_pattern():
+    from pcp.commands.kickoff import _normalize_ci_rules
+
+    ci_rules = {"version": "1.0", "rules": [
+        {"id": "R001", "name": "n", "check": "grep", "pattern": "x", "severity": "hard_block"},
+    ]}
+    warnings = _normalize_ci_rules(ci_rules)
+    assert any("check 'grep'" in w for w in warnings)
+    assert ci_rules["rules"][0]["check"] == "ast_pattern"
+
+
+def test_normalize_ci_rules_coerces_unmappable_check_to_llm_semantic():
+    from pcp.commands.kickoff import _normalize_ci_rules
+
+    ci_rules = {"version": "1.0", "rules": [
+        {"id": "R002", "name": "Version lockstep", "check": "file_pair_diff",
+         "pattern": "pyproject.toml version must match kit_manifest.json", "severity": "hard_block"},
+    ]}
+    warnings = _normalize_ci_rules(ci_rules)
+    assert any("file_pair_diff" in w for w in warnings)
+    assert ci_rules["rules"][0]["check"] == "llm_semantic"
+    assert ci_rules["rules"][0]["description"]  # must have something llm_semantic requires
+
+
+def test_normalize_ci_rules_coerces_warn_severity_to_advisory():
+    from pcp.commands.kickoff import _normalize_ci_rules
+
+    ci_rules = {"version": "1.0", "rules": [
+        {"id": "R003", "name": "n", "check": "ast_pattern", "pattern": "x", "severity": "warn"},
+    ]}
+    warnings = _normalize_ci_rules(ci_rules)
+    assert any("severity 'warn'" in w for w in warnings)
+    assert ci_rules["rules"][0]["severity"] == "advisory"
+
+
+def test_normalize_ci_rules_coerces_invalid_and_duplicate_ids():
+    from pcp.commands.kickoff import _normalize_ci_rules
+
+    ci_rules = {"version": "1.0", "rules": [
+        {"id": "not-valid", "name": "a", "check": "ast_pattern", "pattern": "x", "severity": "hard_block"},
+        {"id": "not-valid", "name": "b", "check": "ast_pattern", "pattern": "y", "severity": "hard_block"},
+    ]}
+    warnings = _normalize_ci_rules(ci_rules)
+    assert len(warnings) >= 2  # both the invalid pattern and the duplicate get fixed
+    ids = [r["id"] for r in ci_rules["rules"]]
+    assert len(set(ids)) == 2  # no longer duplicates
+    for rid in ids:
+        assert re.match(r"^[A-Z]+_?[0-9]+$", rid)
+
+
+def test_normalize_ci_rules_matches_real_agentberg_bug_exactly():
+    """Real, confirmed-live data shape (agentberg's actual generated
+    ci_rules.yaml) -- not a synthetic example."""
+    from pcp.commands.kickoff import _normalize_ci_rules
+    from pcp.schema.validator import validate_file
+    import yaml as _yaml
+
+    ci_rules = {
+        "version": "1.0",
+        "rules": [
+            {"check": "ast_pattern", "id": "R001", "name": "No hardcoded secrets",
+             "pattern": "(password|secret|api_key)\\s*=\\s*['\"][^'\"]{8,}['\"]", "severity": "hard_block"},
+            {"check": "file_pair_diff", "id": "R002", "name": "Kit version and manifest lockstep",
+             "pattern": "pyproject.toml version bump requires matching kit_manifest.json version entry",
+             "severity": "hard_block"},
+            {"check": "ast_pattern", "id": "R003", "name": "No sync analytics in hot path",
+             "pattern": "analytics\\.(capture|log)\\(", "severity": "warn"},
+            {"check": "grep", "id": "R006", "name": "No test refs in public docs",
+             "pattern": "tests/test_api\\.py", "severity": "warn"},
+        ],
+    }
+    warnings = _normalize_ci_rules(ci_rules)
+    assert warnings  # real coercions happened
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "ci_rules.yaml"
+        p.write_text(_yaml.dump(ci_rules))
+        assert validate_file(p, "ci_rules") == []
 
 
 def test_pm_command(temp_project):
