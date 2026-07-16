@@ -29,6 +29,11 @@
           },
           "target": { "type": "string" },
           "pattern": { "type": "string" },
+          "depends_on": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Other criterion ids in this module this one requires to be built first. Presence of this key on ANY criterion in the module is the opt-in signal for criterion-level parallel builds (see build.py's _criteria_parallel_enabled) -- without it, criteria in a module stay strictly sequential, the pre-existing default. An empty list still counts as opt-in (deliberately declared as independent)."
+          },
           "test": { "type": "string" },
           "url": { "type": "string" },
           "selector": { "type": "string" },

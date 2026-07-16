@@ -164,6 +164,49 @@ def _compute_waves(modules_to_build: list[dict]) -> dict[str, int]:
 compute_waves = _compute_waves
 
 
+# ── Criterion-level parallel waves within a single module ──────────────────
+# Opt-in only. Grok Build's subagent model parallelizes at task granularity
+# (not just top-level unit), worktree-isolated per task — reference-pattern
+# borrowed 2026-07-16 rather than assuming criteria are safe to parallelize
+# by default. Without any criterion in a module declaring `depends_on`, this
+# is never consulted and the module's criteria build exactly as before:
+# strictly sequential, each on the prior commit, in declared list order.
+
+def _criteria_parallel_enabled(mod: dict) -> bool:
+    """A module opts in by having ANY criterion declare `depends_on` (even
+    an empty list — presence, not content, is the signal, same convention
+    as design_justification/build_vs_buy elsewhere in this schema: a
+    deliberately-declared field, not an inferred one)."""
+    return any(c.get("depends_on") is not None for c in mod["pending_criteria"])
+
+
+def _compute_criterion_waves(mod: dict) -> dict[str, int]:
+    """{criterion_id: wave_number} via topological sort on each pending
+    criterion's `depends_on` field, mirroring _compute_waves()'s module-level
+    logic one level down. A dependency on a criterion outside this run's
+    pending set (already complete, or not yet declared) is treated as
+    already satisfied — same "external dep = satisfied" rule as modules."""
+    pending = {c["id"]: c for c in mod["pending_criteria"]}
+    wave_of: dict[str, int] = {}
+
+    def compute(cid: str, seen: frozenset) -> int:
+        if cid in wave_of:
+            return wave_of[cid]
+        if cid in seen:
+            return 0  # circular dependency — don't loop forever, treat as wave 0
+        c = pending.get(cid)
+        if not c:
+            return 0
+        deps = [d for d in (c.get("depends_on") or []) if d in pending and d != cid]
+        wave = 0 if not deps else 1 + max(compute(d, seen | {cid}) for d in deps)
+        wave_of[cid] = wave
+        return wave
+
+    for c in mod["pending_criteria"]:
+        compute(c["id"], frozenset())
+    return wave_of
+
+
 # ── Worktree isolation for parallel module builds ──────────────────────────
 # Each module being built concurrently gets its own git worktree + branch, same
 # pattern as the /pcp skill's Branch Isolation Protocol. Only the coding
@@ -901,35 +944,126 @@ def _build_one_criterion(
     return success, block_findings
 
 
+def _mark_criterion_complete(mod: dict, criterion_id: str) -> None:
+    """No cross-module contention (each module only ever touches its own
+    acceptance.yaml), but still guarded for consistency — and, under
+    criterion-level parallelism, this same file IS written by concurrent
+    threads for different criteria in the same module, so the guard is load-
+    bearing there, not just defensive."""
+    with _STATE_LOCK:
+        acc_data = load_yaml(mod["acc_path"])
+        for crit in acc_data.get("criteria", []):
+            if crit["id"] == criterion_id:
+                crit["status"] = "complete"
+        mod["acc_path"].write_text(yaml.dump(acc_data, default_flow_style=False))
+
+
 def _build_module_worker(
     pcp_dir: Path, mod: dict, project_root: Path,
     build_model: str | None, budget: "_BuildBudget",
 ) -> dict:
-    """Runs all of one module's pending criteria sequentially inside
-    `project_root` (its own worktree when building in parallel). Stops at
-    the first criterion that fails all 3 attempts. Never raises for a
+    """Runs all of one module's pending criteria inside `project_root` (its
+    own worktree when building in parallel across modules). Stops at the
+    first criterion (or criterion-wave) that fails. Never raises for a
     build/gate failure — only BudgetExceeded propagates, since that's a
-    whole-run circuit breaker, not a per-module outcome."""
+    whole-run circuit breaker, not a per-module outcome.
+
+    Sequential by default (`_criteria_parallel_enabled` is False for any
+    module where no criterion declares `depends_on`) — the pre-existing,
+    unchanged code path. Opt-in criterion-level parallel waves are a
+    separate branch below, not a rewrite of the default one."""
     console.print(f"\n[bold]Building Module:[/bold] [cyan]'{mod['name']}'[/cyan] ({len(mod['pending_criteria'])} pending criteria)")
 
-    for c in mod["pending_criteria"]:
-        console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
-        success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, budget)
+    if not _criteria_parallel_enabled(mod):
+        for c in mod["pending_criteria"]:
+            console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
+            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, budget)
 
-        if success:
-            console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
-            # No cross-module contention (each module only ever touches its
-            # own acceptance.yaml), but still guarded for consistency.
-            with _STATE_LOCK:
-                acc_data = load_yaml(mod["acc_path"])
-                for crit in acc_data.get("criteria", []):
-                    if crit["id"] == c["id"]:
-                        crit["status"] = "complete"
-                mod["acc_path"].write_text(yaml.dump(acc_data, default_flow_style=False))
-        else:
-            console.print(f"[red]✗ Failed to build Criterion [{c['id']}] after 3 attempts.[/red]")
-            _record_escalation(pcp_dir, mod["name"], c["id"], block_findings)
-            return {"module": mod["name"], "success": False, "failed_criterion": c["id"], "block_findings": block_findings}
+            if success:
+                console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
+                _mark_criterion_complete(mod, c["id"])
+            else:
+                console.print(f"[red]✗ Failed to build Criterion [{c['id']}] after 3 attempts.[/red]")
+                _record_escalation(pcp_dir, mod["name"], c["id"], block_findings)
+                return {"module": mod["name"], "success": False, "failed_criterion": c["id"], "block_findings": block_findings}
+
+        console.print(f"\n[green]✓ Module '{mod['name']}' built successfully![/green]")
+        return {"module": mod["name"], "success": True}
+
+    # Opt-in path: criteria grouped into dependency waves, independent
+    # criteria within a wave built concurrently, each in its own git
+    # worktree nested off `project_root` (same _setup_worktree/_merge_
+    # module_branch/_cleanup_worktree helpers as module-level parallelism,
+    # just given a criterion-scoped unit name instead of a module name).
+    wave_of = _compute_criterion_waves(mod)
+    num_waves = max(wave_of.values(), default=0) + 1
+    for wave_number in range(num_waves):
+        wave_criteria = [c for c in mod["pending_criteria"] if wave_of.get(c["id"], 0) == wave_number]
+        if not wave_criteria:
+            continue
+
+        if len(wave_criteria) == 1:
+            c = wave_criteria[0]
+            console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
+            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, budget)
+            if success:
+                console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
+                _mark_criterion_complete(mod, c["id"])
+            else:
+                console.print(f"[red]✗ Failed to build Criterion [{c['id']}] after 3 attempts.[/red]")
+                _record_escalation(pcp_dir, mod["name"], c["id"], block_findings)
+                return {"module": mod["name"], "success": False, "failed_criterion": c["id"], "block_findings": block_findings}
+            continue
+
+        console.print(
+            f"\n[bold]Criterion wave {wave_number}:[/bold] {len(wave_criteria)} independent "
+            f"criteria in '{mod['name']}' building in parallel (each in its own worktree)..."
+        )
+        units = {c["id"]: f"{mod['name']}-{c['id']}" for c in wave_criteria}
+        worktrees = {c["id"]: _setup_worktree(project_root, units[c["id"]]) for c in wave_criteria}
+        results: dict[str, tuple[bool, list[str]]] = {}
+        with ThreadPoolExecutor(max_workers=len(wave_criteria)) as executor:
+            futures = {
+                executor.submit(
+                    _build_one_criterion, pcp_dir, worktrees[c["id"]], mod, c, build_model, budget,
+                ): c["id"]
+                for c in wave_criteria
+            }
+            for future in as_completed(futures):
+                cid = futures[future]
+                try:
+                    results[cid] = future.result()
+                except BudgetExceeded:
+                    # Mirrors the module-level parallel path's handling
+                    # (build()'s own ThreadPoolExecutor loop below): convert
+                    # to a graceful failure result rather than letting the
+                    # run-level circuit breaker crash out with a raw
+                    # traceback mid-wave.
+                    results[cid] = (False, [f"budget circuit breaker: exceeded {budget.max_sessions} agent sessions this run"])
+
+        any_failed = False
+        failed_id = None
+        failed_findings: list[str] = []
+        for c in wave_criteria:
+            cid = c["id"]
+            success, block_findings = results.get(cid, (False, ["no result — worker crashed"]))
+            if success:
+                ok, merge_output = _merge_module_branch(project_root, units[cid])
+                if ok:
+                    _cleanup_worktree(project_root, units[cid], worktrees[cid])
+                    console.print(f"[green]✓ Criterion [{cid}] passed all gates successfully![/green]")
+                    _mark_criterion_complete(mod, cid)
+                else:
+                    any_failed, failed_id = True, cid
+                    console.print(f"[red]✗ Merge conflict bringing criterion '{cid}' back into '{mod['name']}':[/red]\n{merge_output}")
+                    console.print(f"[dim]Worktree left at {worktrees[cid]} for manual resolution.[/dim]")
+            else:
+                any_failed, failed_id, failed_findings = True, cid, block_findings
+                console.print(f"[red]✗ Failed to build Criterion [{cid}] after 3 attempts.[/red]")
+                _record_escalation(pcp_dir, mod["name"], cid, block_findings)
+
+        if any_failed:
+            return {"module": mod["name"], "success": False, "failed_criterion": failed_id, "block_findings": failed_findings}
 
     console.print(f"\n[green]✓ Module '{mod['name']}' built successfully![/green]")
     return {"module": mod["name"], "success": True}
