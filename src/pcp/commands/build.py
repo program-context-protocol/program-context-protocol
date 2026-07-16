@@ -632,8 +632,83 @@ def _run_sast_check(pcp_dir: Path, project_root: Path, changed_files: list[str],
     return violations
 
 
+VERIFY_SYSTEM_PROMPT = (
+    "You are an adversarial verifier for AI-generated code-review findings. "
+    "You are given a diff and a numbered list of findings another reviewer flagged as "
+    "blocking issues. For each finding, decide whether it is actually grounded in the "
+    "diff shown -- concrete, specific, and checkable against the code present, not vague "
+    "or referring to code/behavior that isn't actually there. Do not look for NEW issues "
+    "of your own -- only judge whether each GIVEN finding holds up. Default to "
+    "refuted=true whenever you cannot confirm a finding directly against the diff shown."
+)
+
+
+def _verify_block_findings(
+    pcp_dir: Path, diff: str, findings: list[str], ctx: dict, check: str, control_id: str,
+) -> tuple[list[str], list[str]]:
+    """Adversarial second pass over a gate/architect-review call's own BLOCK
+    findings before they're trusted enough to fail a criterion -- reference-
+    pattern borrowed from CodeRabbit's judge-model verification layer
+    (scores each finding against gathered context, drops what it can't
+    ground, before it ever reaches a human). Batched as ONE extra call per
+    check, not one per finding, to stay inside Token Discipline.
+
+    Fails OPEN on any verifier error (timeout, bad JSON, call failure):
+    keeps every original finding unchanged rather than risk silently
+    swallowing a real block because the verifier itself broke. The
+    asymmetry is deliberate -- a hallucinated BLOCK that slips through
+    costs one wasted retry attempt; a real BLOCK silently dropped ships an
+    actual defect, a strictly worse outcome.
+
+    Returns (kept, dropped_with_reason).
+    """
+    if not findings:
+        return [], []
+    numbered = "\n".join(f"[{i}] {f}" for i, f in enumerate(findings))
+    prompt = (
+        f"## Diff\n{diff[:14000]}\n\n"
+        f"## Findings to verify\n{numbered}\n\n"
+        '## Respond with JSON only\n'
+        '{"verdicts": [{"index": 0, "refuted": false, "reason": "..."}, ...]} '
+        "-- exactly one entry per finding above, in order."
+    )
+    try:
+        res, meta = llm.call_json(
+            VERIFY_SYSTEM_PROMPT, prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir,
+            command=f"build-{check}-verify", return_meta=True,
+        )
+    except Exception as e:
+        console.print(f"[yellow]Warning: {check} verification call failed, keeping all findings unverified: {e}[/yellow]")
+        _qa_record(pcp_dir, ctx, f"{check}-verify", [f"call failed: {e}"], control_id=control_id, result="error")
+        return findings, []
+
+    verdicts = {v.get("index"): v for v in res.get("verdicts", []) if isinstance(v, dict)}
+    kept: list[str] = []
+    dropped: list[str] = []
+    for i, f in enumerate(findings):
+        v = verdicts.get(i)
+        if v and v.get("refuted"):
+            dropped.append(f"{f}  [dropped by verifier: {v.get('reason', '(no reason given)')}]")
+        else:
+            kept.append(f)
+
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], f"{check}-verify",
+        json.dumps(res, indent=2),
+    )
+    _qa_record(
+        pcp_dir, ctx, f"{check}-verify", [], meta, control_id=control_id,
+        evidence_path=evidence_path, result="pass",
+    )
+    if dropped:
+        console.print(f"[dim]{check} verifier dropped {len(dropped)} ungrounded finding(s) before they could block:[/dim]")
+        for d in dropped:
+            console.print(f"  [dim]· {d}[/dim]")
+    return kept, dropped
+
+
 def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ctx: dict) -> list[str]:
-    """Run architect review and return BLOCK findings."""
+    """Run architect review and return BLOCK findings that survive adversarial verification."""
     from pcp.commands.architect_review import SYSTEM_PROMPT, _build_prompt, _load_persona, _load_kb
     persona = _load_persona(pcp_dir)
     architecture = (pcp_dir / "architecture.md").read_text() if (pcp_dir / "architecture.md").exists() else ""
@@ -660,12 +735,13 @@ def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ct
     evidence_path = evidence.store(
         pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "architect-review", json.dumps(res, indent=2),
     )
-    _qa_record(pcp_dir, ctx, "architect-review", blocks, meta, control_id="CTRL-005", files=changed_files, evidence_path=evidence_path)
-    return blocks
+    kept, _dropped = _verify_block_findings(pcp_dir, diff, blocks, ctx, "architect-review", "CTRL-005")
+    _qa_record(pcp_dir, ctx, "architect-review", kept, meta, control_id="CTRL-005", files=changed_files, evidence_path=evidence_path)
+    return kept
 
 
 def _run_gate_check(pcp_dir: Path, diff: str, ctx: dict) -> list[str]:
-    """Run gate review and return block issues."""
+    """Run gate review and return block issues that survive adversarial verification."""
     from pcp.commands.gate import SYSTEM_PROMPT, _build_prompt, _load_llm_rules
     objective = (pcp_dir / "objective.md").read_text() if (pcp_dir / "objective.md").exists() else ""
     target_state = (pcp_dir / "target_state.md").read_text() if (pcp_dir / "target_state.md").exists() else ""
@@ -695,8 +771,9 @@ def _run_gate_check(pcp_dir: Path, diff: str, ctx: dict) -> list[str]:
     evidence_path = evidence.store(
         pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "gate", json.dumps(res, indent=2),
     )
-    _qa_record(pcp_dir, ctx, "gate", issues, meta, control_id="CTRL-006", evidence_path=evidence_path)
-    return issues
+    kept, _dropped = _verify_block_findings(pcp_dir, diff, issues, ctx, "gate", "CTRL-006")
+    _qa_record(pcp_dir, ctx, "gate", kept, meta, control_id="CTRL-006", evidence_path=evidence_path)
+    return kept
 
 
 def _run_design_consistency_check(pcp_dir: Path, project_root: Path, criterion: dict, ctx: dict) -> None:
