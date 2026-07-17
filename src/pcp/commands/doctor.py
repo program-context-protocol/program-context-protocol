@@ -7,6 +7,7 @@ non-interactive report-only mode — never blocks on missing optional tooling,
 only on git/claude (required for the lifecycle to function at all).
 """
 
+import json
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,15 @@ DEPLOY_HINT_FILES = {
     "Procfile": "git push origin main",
     "Dockerfile": None,
 }
+
+# Context7 (upstash/context7) injects live, version-specific library docs
+# into a coding agent's context instead of relying on stale training data --
+# a real mitigation for hallucinated/deprecated API usage, verified real via
+# WebSearch 2026-07-17 (github.com/upstash/context7, official, free). Wired
+# via the project's own .mcp.json, not a PCP-specific mechanism -- any
+# `claude -p` session run with this project as cwd (including pcp build's
+# coding-agent subprocess) picks it up automatically once configured.
+CONTEXT7_MCP_ENTRY = {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]}
 
 
 def _which(name: str) -> str | None:
@@ -67,6 +77,51 @@ def _guess_deploy_command(project_root: Path) -> str | None:
         if (project_root / fname).exists() and cmd:
             return cmd
     return None
+
+
+def _mcp_config_path(project_root: Path) -> Path:
+    return project_root / ".mcp.json"
+
+
+def detect_context7(project_root: Path) -> dict:
+    """Pure detection -- npx availability (needed to run the MCP server) and
+    whether .mcp.json already declares it. Project-scoped (needs project_root
+    for .mcp.json), so kept separate from detect_tools()'s pure PATH-lookup shape."""
+    config_path = _mcp_config_path(project_root)
+    configured = False
+    if config_path.exists():
+        try:
+            data = json.loads(config_path.read_text())
+            configured = "context7" in (data.get("mcpServers") or {})
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {
+        "npx_available": _which("npx") is not None,
+        "configured": configured,
+        "config_path": str(config_path),
+    }
+
+
+def configure_context7(project_root: Path) -> bool:
+    """Adds a context7 entry to .mcp.json, creating the file if absent and
+    preserving any other MCP servers already declared there. Returns False
+    (and touches nothing) if the file exists but isn't valid JSON -- never
+    silently clobber a config a human hand-wrote."""
+    config_path = _mcp_config_path(project_root)
+    data = {}
+    if config_path.exists():
+        try:
+            data = json.loads(config_path.read_text())
+        except json.JSONDecodeError:
+            console.print(
+                f"[yellow]⚠  {config_path.name} exists but isn't valid JSON -- "
+                "skipping Context7 setup, add it manually.[/yellow]"
+            )
+            return False
+    data.setdefault("mcpServers", {})
+    data["mcpServers"]["context7"] = dict(CONTEXT7_MCP_ENTRY)
+    config_path.write_text(json.dumps(data, indent=2) + "\n")
+    return True
 
 
 def load_integrations(pcp_dir: Path) -> dict:
@@ -141,6 +196,13 @@ def doctor(project_path: str | None, check_only: bool):
     console.print(table)
     console.print("[dim]Browser automation (for `pcp uat`): assumed available via this environment's MCP tools — not directly verified.[/dim]")
 
+    context7 = detect_context7(project_root)
+    c7_status = "[green]configured[/green]" if context7["configured"] else (
+        "[yellow]npx available, not configured[/yellow]" if context7["npx_available"]
+        else "[dim]npx not found[/dim]"
+    )
+    console.print(f"Context7 (live library docs for `pcp build`'s coding agent): {c7_status}")
+
     existing = load_integrations(pcp_dir)
     deploy = existing.get("deploy", {})
 
@@ -160,6 +222,16 @@ def doctor(project_path: str | None, check_only: bool):
         "Rollback command (blank to skip)", default=deploy.get("rollback_command", ""), show_default=False,
     )
 
+    if context7["npx_available"] and not context7["configured"]:
+        if click.confirm(
+            "\nEnable Context7 (live library docs injected into pcp build's coding-agent "
+            "context, reduces hallucinated/outdated API usage)? Adds an entry to .mcp.json.",
+            default=True,
+        ):
+            if configure_context7(project_root):
+                console.print(f"[green]✓[/green] Context7 configured in {_mcp_config_path(project_root).relative_to(project_root)}")
+                context7 = detect_context7(project_root)
+
     data = {
         "version": "1.0",
         "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -170,6 +242,7 @@ def doctor(project_path: str | None, check_only: bool):
             "rollback_command": rollback_command or None,
         },
         "browser_automation": {"assumed_available": True},
+        "context7": context7,
     }
     out = pcp_dir / "integrations.yaml"
     out.write_text(yaml.dump(data, default_flow_style=False))

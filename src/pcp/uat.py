@@ -15,6 +15,21 @@ untested here would ship an unverifiable claim. Same honest-disclosure
 posture as `dom_contains`'s own limitation, not overclaiming AI coverage
 this doesn't have.
 
+Reconnaissance-then-action pattern (wait for `networkidle` before reading
+DOM state) is a reference-pattern borrowed from Anthropic's own
+`webapp-testing` skill (anthropics/skills) after a real prior-art miss
+found post-hoc: `check_visual` shipped without checking for it first,
+initially screenshotting right after `goto()` with no settle-wait — on a
+slow-loading SPA that can capture a blank/loading state and still report
+"rendered successfully," exactly the failure mode this check exists to
+catch. `webapp-testing` itself is a full agentic skill (server lifecycle,
+selector discovery, browser console logs) meant for an interactive Claude
+session — not adopted wholesale, since `check_visual` runs inside `pcp
+scan`'s deterministic, zero-LLM evaluation loop and turning that into an
+agent invocation per UI criterion would break Token Discipline. Only the
+underlying technique was reused; `pcp build`'s coding agent is pointed at
+the real skill separately for its own in-build UI verification.
+
 Same tool-wrapping shape as qa.py: never raises, degrades to a clear
 failure detail instead.
 """
@@ -89,9 +104,18 @@ def check_visual(url: str, screenshot_path: Path | None = None) -> tuple[bool | 
             browser = p.chromium.launch()
             page = browser.new_page()
             page.goto(url, timeout=TIMEOUT_SEC * 1000)
+            # Reconnaissance-then-action pattern (reference: anthropics/skills'
+            # webapp-testing) -- goto() alone returns once the initial HTML
+            # response lands, before a typical SPA's JS has actually rendered
+            # content. Without this wait, a screenshot on a slow-loading SPA
+            # can capture a blank/loading state and still report "rendered
+            # successfully" -- exactly the failure mode this check exists to
+            # catch (dom_contains's own JS-rendering gap). networkidle waits
+            # for in-flight requests to settle before the check reads DOM state.
+            page.wait_for_load_state("networkidle", timeout=TIMEOUT_SEC * 1000)
             if screenshot_path:
                 screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-                page.screenshot(path=str(screenshot_path))
+                page.screenshot(path=str(screenshot_path), full_page=True)
             browser.close()
     except Exception as e:
         return False, f"{url} failed to render in a headless browser: {e}"

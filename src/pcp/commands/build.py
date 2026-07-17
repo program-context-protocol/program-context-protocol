@@ -655,7 +655,9 @@ def _build_agent_prompt(
             "conventions this screen actually followed), `jtbd_framing` (one sentence, "
             "'when a user is X, this lets them Y' — not a restatement of the description), "
             "and `deviations_from_system` if this screen needed a new pattern the system "
-            "didn't have yet."
+            "didn't have yet. If a `webapp-testing` skill is available, use it to actually "
+            "load the running page and verify it renders/behaves as intended before "
+            "finishing — don't just trust that the code compiles."
         )
         prompt_parts.append("")
 

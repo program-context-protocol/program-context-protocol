@@ -1,10 +1,14 @@
+import json
 from unittest.mock import patch
 
 import yaml
 from click.testing import CliRunner
 
 from pcp.cli import cli
-from pcp.commands.doctor import detect_tools, check_environment, _detect_one, _guess_deploy_command
+from pcp.commands.doctor import (
+    detect_tools, check_environment, _detect_one, _guess_deploy_command,
+    detect_context7, configure_context7,
+)
 
 
 def _fake_which(available: set):
@@ -101,3 +105,83 @@ def test_doctor_cli_interactive_writes_integrations(tmp_path):
     assert data["deploy"]["command"] == "railway up"
     assert data["deploy"]["health_check_url"] == "https://example.com/health"
     assert data["deploy"]["rollback_command"] is None
+
+
+# ── Context7 detection/configuration ──
+
+def test_detect_context7_no_npx_no_config(tmp_path):
+    with patch("shutil.which", side_effect=_fake_which(set())):
+        result = detect_context7(tmp_path)
+    assert result["npx_available"] is False
+    assert result["configured"] is False
+
+
+def test_detect_context7_configured_when_mcp_json_has_it(tmp_path):
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"context7": {"command": "npx"}}}))
+    with patch("shutil.which", side_effect=_fake_which({"npx"})):
+        result = detect_context7(tmp_path)
+    assert result["npx_available"] is True
+    assert result["configured"] is True
+
+
+def test_detect_context7_not_configured_when_mcp_json_lacks_it(tmp_path):
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"other-server": {}}}))
+    with patch("shutil.which", side_effect=_fake_which({"npx"})):
+        result = detect_context7(tmp_path)
+    assert result["configured"] is False
+
+
+def test_detect_context7_invalid_json_treated_as_not_configured(tmp_path):
+    (tmp_path / ".mcp.json").write_text("not valid json{{{")
+    result = detect_context7(tmp_path)
+    assert result["configured"] is False
+
+
+def test_configure_context7_creates_mcp_json(tmp_path):
+    ok = configure_context7(tmp_path)
+    assert ok is True
+    data = json.loads((tmp_path / ".mcp.json").read_text())
+    assert data["mcpServers"]["context7"] == {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]}
+
+
+def test_configure_context7_preserves_existing_servers(tmp_path):
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"other-server": {"command": "foo"}}}))
+    configure_context7(tmp_path)
+    data = json.loads((tmp_path / ".mcp.json").read_text())
+    assert "other-server" in data["mcpServers"]
+    assert "context7" in data["mcpServers"]
+
+
+def test_configure_context7_refuses_to_clobber_invalid_json(tmp_path):
+    (tmp_path / ".mcp.json").write_text("not valid json{{{")
+    ok = configure_context7(tmp_path)
+    assert ok is False
+    assert (tmp_path / ".mcp.json").read_text() == "not valid json{{{"
+
+
+def test_doctor_cli_offers_context7_when_npx_available(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("shutil.which", side_effect=_fake_which({"git", "claude", "npx"})):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["doctor", "--path", str(tmp_path)],
+            input="\n\n\ny\n",  # deploy cmd, health url, rollback cmd (all blank), context7 confirm=yes
+        )
+    assert result.exit_code == 0, result.output
+    assert "Context7" in result.output
+    mcp_config = json.loads((tmp_path / ".mcp.json").read_text())
+    assert "context7" in mcp_config["mcpServers"]
+    integrations = yaml.safe_load((pcp_dir / "integrations.yaml").read_text())
+    assert integrations["context7"]["configured"] is True
+
+
+def test_doctor_cli_check_only_reports_context7_without_writing(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("shutil.which", side_effect=_fake_which({"git", "claude", "npx"})):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["doctor", "--path", str(tmp_path), "--check"])
+    assert result.exit_code == 0
+    assert "Context7" in result.output
+    assert not (tmp_path / ".mcp.json").exists()
