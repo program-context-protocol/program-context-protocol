@@ -389,6 +389,18 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
             arch_evidence_path = evidence.store(
                 pcp_dir, "_wave", f"wave_{wave_number}", wave_number, "architect-review", json.dumps(res, indent=2),
             )
+            # Same adversarial re-verification per-criterion architect-review/gate
+            # checks already get (_verify_block_findings) -- wave-level BLOCK
+            # findings previously went straight from one Haiku call into a
+            # blocked wave-merge with no second opinion, unlike their
+            # per-criterion counterparts. wave_ctx mirrors the per-criterion
+            # ctx shape (_qa_record/evidence.store both key off module/
+            # criterion_id/attempt) with module="_wave" so verify-check
+            # telemetry is distinguishable from real per-criterion records.
+            wave_ctx = {"module": "_wave", "criterion_id": f"wave_{wave_number}", "attempt": wave_number, "files": changed}
+            arch_findings, _dropped = _verify_block_findings(
+                pcp_dir, wave_diff, arch_findings, wave_ctx, "wave-architect-review", "CTRL-005",
+            )
             _wave_record(pcp_dir, wave_number, "architect-review", "CTRL-005", arch_findings, files=changed,
                          evidence_path=arch_evidence_path)
         findings += arch_findings
