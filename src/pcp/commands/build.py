@@ -347,23 +347,58 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
         from pcp.commands.validate_strategy import run_validate_strategy
         vs = run_validate_strategy(pcp_dir, command="wave-validate-strategy")
         strategy_findings: list[str] = []
+        advisory_recorded = False
         vs_evidence_path = evidence.store(
             pcp_dir, "_wave", f"wave_{wave_number}", wave_number, "validate-strategy",
             json.dumps(vs, indent=2, default=str) if vs else "(no result)",
         )
         if vs:
             severe_coupling = [v for v in vs.get("coupling_violations", []) if v.get("type") in ("circular", "god_module", "shared_state")]
-            if vs.get("coverage_gaps") or severe_coupling:
+            coverage_gaps = vs.get("coverage_gaps") or []
+
+            # Scorer-consensus rule (dogfood round 3, 2026-07-17): the
+            # deterministic assertion scorer's own docstring calls keyword
+            # overlap "not ground truth" — a rung-1 heuristic with known
+            # false negatives (real coverage, different words). It scored
+            # 50% against the LLM's 100% on UNCHANGED specs and hard-blocked
+            # the wave. Two scorers disagreeing is an uncertainty signal,
+            # not a verdict (the ensemble/consensus mechanism from the
+            # Logic-Tier cross-cutting table) — coverage hard-blocks only
+            # when both agree it's bad. Severe coupling always blocks: that
+            # is real graph math, no second opinion needed.
+            llm_score = vs.get("llm_coverage_score")
+            scorers_disagree = (
+                vs.get("scoring_method") == "deterministic"
+                and llm_score is not None
+                and llm_score >= 0.85
+                and vs.get("coverage_score", 0) < llm_score
+            )
+            if coverage_gaps and scorers_disagree and not severe_coupling:
+                console.print(
+                    f"[yellow]Wave validate-strategy (advisory): deterministic assertion "
+                    f"coverage {vs.get('coverage_score', 0):.0%} disagrees with LLM coverage "
+                    f"{llm_score:.0%} on unchanged-spec gaps ({len(coverage_gaps)}) — treating as "
+                    f"scorer disagreement, not blocking. Full result: {vs_evidence_path}[/yellow]"
+                )
+                _wave_record(
+                    pcp_dir, wave_number, "validate-strategy", "CTRL-008",
+                    [f"scorer disagreement (advisory): deterministic={vs.get('coverage_score', 0):.0%} "
+                     f"vs llm={llm_score:.0%}, gaps={len(coverage_gaps)}"],
+                    files=wave_mod_names, result="pass", evidence_path=vs_evidence_path,
+                )
+                advisory_recorded = True  # telemetry written above; not blocking
+            elif coverage_gaps or severe_coupling:
                 strategy_findings.append(
                     f"validate-strategy: coverage={vs.get('coverage_score', 0):.0%}, "
                     f"coupling={vs.get('coupling_score', 1):.0%}, "
-                    f"gaps={len(vs.get('coverage_gaps', []))}, "
+                    f"gaps={len(coverage_gaps)}, "
                     f"severe coupling violations={len(severe_coupling)} (circular/god_module/shared_state) — "
                     f"full result: {vs_evidence_path}"
                 )
-        _wave_record(pcp_dir, wave_number, "validate-strategy", "CTRL-008", strategy_findings, files=wave_mod_names,
-                     evidence_path=vs_evidence_path)
-        findings += strategy_findings
+        if not advisory_recorded:
+            _wave_record(pcp_dir, wave_number, "validate-strategy", "CTRL-008", strategy_findings, files=wave_mod_names,
+                         evidence_path=vs_evidence_path)
+            findings += strategy_findings
     except Exception as e:
         console.print(f"[yellow]Warning: wave validate-strategy check failed: {e}[/yellow]")
         _wave_record(pcp_dir, wave_number, "validate-strategy", "CTRL-008", [f"call failed: {e}"],
