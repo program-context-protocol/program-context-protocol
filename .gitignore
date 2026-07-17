@@ -52,3 +52,4 @@ graphify-out/
 .pcp/ontology_state.yaml
 .pcp/traceability_map.yaml
 .pcp/traceability_review_log.jsonl
+docs/market-research-2026-07-modules.md
