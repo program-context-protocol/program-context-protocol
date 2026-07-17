@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Several tests build throwaway git repos and commit in them.
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@localhost"
+          git config --global user.name "CI"
+
+      - name: Install package
+        run: pip install -e . pytest pytest-mock
+
+      - name: Run test suite
+        run: python -m pytest tests/ -q
+
+      - name: Build wheel
+        run: |
+          pip install build
+          python -m build --wheel
