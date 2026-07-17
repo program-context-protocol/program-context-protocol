@@ -129,13 +129,13 @@ def test_init_generated_ci_rules_do_not_self_match_their_own_file(tmp_path):
         assert violations == [], f"{rule['id']} self-matches its own ci_rules.yaml definition"
 
 
-def test_init_generated_controls_yaml_parses_and_has_twelve_controls(tmp_path):
+def test_init_generated_controls_yaml_parses_and_has_fourteen_controls(tmp_path):
     import yaml
     runner = CliRunner()
     runner.invoke(cli, ["init", "--path", str(tmp_path)])
     data = yaml.safe_load((tmp_path / ".pcp" / "controls.yaml").read_text())
-    assert len(data["controls"]) == 13
-    assert {c["id"] for c in data["controls"]} == {f"CTRL-{i:03d}" for i in range(1, 14)}
+    assert len(data["controls"]) == 14
+    assert {c["id"] for c in data["controls"]} == {f"CTRL-{i:03d}" for i in range(1, 15)}
 
 
 def test_init_skips_existing_files_without_force(tmp_path):

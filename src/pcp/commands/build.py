@@ -409,6 +409,66 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
         _wave_record(pcp_dir, wave_number, "architect-review", "CTRL-005", [f"call failed: {e}"],
                      files=wave_mod_names, result="error")
 
+    # 5. logic_tier/build_vs_buy drift -- does what actually got built still
+    #    match the tier a criterion declared at spec time? Advisory/informational
+    #    like the other sub-checks above, findings still block the next wave.
+    tier_findings = _run_wave_tier_drift_check(pcp_dir, wave_modules, wave_number)
+    findings += tier_findings
+
+    return findings
+
+
+LLM_SDK_IMPORT_PATTERN = re.compile(
+    r"^\s*(?:import|from)\s+(anthropic|openai|google\.generativeai|google\.genai|mistralai|cohere|ollama)\b",
+    re.MULTILINE,
+)
+
+
+def _run_wave_tier_drift_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
+    """5th wave-merge sub-check, CTRL-014. Per CLAUDE.md's Logic-Tier
+    Selection section: "Layer 1 gets a deterministic tier-honesty sub-check
+    where possible (e.g. a criterion declaring logic_tier <= 5 whose target
+    file imports an LLM SDK)" -- not built until now. Deterministic, no LLM
+    call: a completed criterion declaring logic_tier 1-5 (deterministic
+    through cached-reuse -- no runtime LLM call expected by definition) whose
+    own target file demonstrably imports an LLM SDK is a real signal the
+    declared decision no longer matches what was actually built. Only rung 6
+    (deep-think LLM) is expected to import one. Does NOT re-examine
+    build_vs_buy -- no comparably cheap deterministic signal exists for that
+    field yet, left for a future pass rather than guessed at."""
+    project_root = pcp_dir.parent
+    findings: list[str] = []
+    checked_files: list[str] = []
+
+    for mod in wave_modules:
+        acc_path = pcp_dir / "strategy" / "modules" / mod["name"] / "acceptance.yaml"
+        if not acc_path.exists():
+            continue
+        acc = load_yaml(acc_path)
+        for c in acc.get("criteria", []):
+            if c.get("status") != "complete":
+                continue
+            tier = c.get("logic_tier")
+            target = c.get("target")
+            if tier is None or tier > 5 or not target:
+                continue
+            full_path = project_root / target
+            if not full_path.exists() or not full_path.is_file():
+                continue
+            checked_files.append(target)
+            try:
+                content = full_path.read_text(errors="replace")
+            except OSError:
+                continue
+            m = LLM_SDK_IMPORT_PATTERN.search(content)
+            if m:
+                findings.append(
+                    f"Tier drift: '{mod['name']}/{c['id']}' declares logic_tier={tier} "
+                    f"(rung <=5, no runtime LLM call expected) but {target} imports "
+                    f"{m.group(1)} -- the declared decision no longer matches what was built."
+                )
+
+    _wave_record(pcp_dir, wave_number, "tier-drift", "CTRL-014", findings, files=checked_files)
     return findings
 
 

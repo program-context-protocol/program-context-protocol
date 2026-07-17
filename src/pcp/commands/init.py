@@ -267,6 +267,15 @@ controls:
     enforcement: advisory
     description: "PCP Design lifecycle, stage 4 (Verify). For a UI-facing criterion, once .pcp/design_system.md has real established color tokens, flags hardcoded hex color literals in that criterion's target file — a heuristic signal the screen may not be using the project's own design system, not proof either way. Never blocks; a legitimate reason to hardcode a specific value is common (e.g. a brand-mandated exact color)."
     ssdf_practice: ["PW.7.1"]
+
+  - id: CTRL-014
+    name: "logic_tier drift at wave-merge"
+    layer: wave-merge
+    mechanism: "build.py:_run_wave_tier_drift_check(), 5th wave-merge sub-check"
+    tool: "n/a — deterministic regex, no external tool"
+    enforcement: hard_block
+    description: "A completed criterion declaring logic_tier 1-5 (deterministic through cached-reuse — no runtime LLM call expected by definition) whose own target file demonstrably imports an LLM SDK is a real signal the declared decision no longer matches what was actually built. Only rung 6 (deep-think LLM) is expected to import one. Does not re-examine build_vs_buy — no comparably cheap deterministic signal exists for that field yet."
+    ssdf_practice: ["PW.1.1"]
 """
 
 SDLC_PHASE_TEMPLATE = """\
