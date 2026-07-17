@@ -18,6 +18,7 @@ from pcp.schema.validator import validate_file, load_yaml
 from pcp.llm import client as llm
 from pcp.llm.client import _claude_bin, _log_usage
 from pcp.pcp_status import write_pcp_md
+from pcp import decision_log
 from pcp import telemetry
 from pcp import qa
 from pcp import evidence
@@ -641,6 +642,21 @@ def _build_agent_prompt(
         pattern = criterion.get("pattern")
         if pattern:
             prompt_parts.append(f"It must satisfy this pattern: `{pattern}`")
+        prompt_parts.append("")
+
+    # Learned-decision injection (ECC "instincts" reference-pattern, 2026-07-17):
+    # decision_log.jsonl was captured but never fed back — every criterion
+    # agent re-discovered root causes / library picks / workarounds earlier
+    # sessions already distilled. Deterministic selection, bounded count+chars,
+    # zero LLM cost (see decision_log.select_relevant).
+    decision_lines = decision_log.format_for_prompt(pcp_dir, module_name)
+    if decision_lines:
+        prompt_parts.append(
+            "## Prior technical decisions in this project (distilled from earlier "
+            "sessions — treat as established context, don't re-derive or contradict "
+            "them without saying why):"
+        )
+        prompt_parts += decision_lines
         prompt_parts.append("")
 
     if _is_ui_facing_criterion(criterion):

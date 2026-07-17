@@ -203,6 +203,21 @@ def doctor(project_path: str | None, check_only: bool):
     )
     console.print(f"Context7 (live library docs for `pcp build`'s coding agent): {c7_status}")
 
+    # Agent-config surface audit (ECC AgentShield reference-pattern, scoped to
+    # a deterministic scan): the config an agent executes FROM — settings
+    # hooks, .mcp.json servers, instruction files — was the one surface no
+    # PCP gate ever looked at, even though pcp doctor itself scaffolds
+    # .mcp.json entries. Advisory, never blocks.
+    from pcp.config_audit import audit_agent_config
+    config_findings = audit_agent_config(project_root)
+    if config_findings:
+        console.print(f"\n[yellow bold]Agent-config audit: {len(config_findings)} finding(s)[/yellow bold]")
+        for f in config_findings:
+            console.print(f"  [yellow]⚠[/yellow] {f['file']} [{f['category']}] — {f['detail']}")
+    else:
+        console.print("[dim]Agent-config audit: no secrets or suspicious commands in "
+                      ".claude/settings*.json, .mcp.json, CLAUDE.md/AGENTS.md/GEMINI.md.[/dim]")
+
     existing = load_integrations(pcp_dir)
     deploy = existing.get("deploy", {})
 
@@ -243,6 +258,7 @@ def doctor(project_path: str | None, check_only: bool):
         },
         "browser_automation": {"assumed_available": True},
         "context7": context7,
+        "agent_config_audit": {"findings": len(config_findings)},
     }
     out = pcp_dir / "integrations.yaml"
     out.write_text(yaml.dump(data, default_flow_style=False))
