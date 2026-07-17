@@ -142,6 +142,21 @@ def test_init_generated_controls_yaml_parses_and_has_eighteen_controls(tmp_path)
     assert {c["layer"] for c in data["controls"]} <= valid_layers
 
 
+def test_init_scaffolds_gitignore_when_absent(tmp_path):
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "--path", str(tmp_path)])
+    gi = tmp_path / ".gitignore"
+    assert gi.exists()
+    assert "__pycache__/" in gi.read_text()
+
+
+def test_init_never_touches_existing_gitignore(tmp_path):
+    (tmp_path / ".gitignore").write_text("# mine\ncustom/\n")
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "--path", str(tmp_path)])
+    assert (tmp_path / ".gitignore").read_text() == "# mine\ncustom/\n"
+
+
 def test_init_skips_existing_files_without_force(tmp_path):
     runner = CliRunner()
     runner.invoke(cli, ["init", "--path", str(tmp_path)])

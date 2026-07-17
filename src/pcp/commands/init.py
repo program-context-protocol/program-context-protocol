@@ -314,6 +314,25 @@ controls:
     ssdf_practice: ["PS.1.1", "PW.7.1"]
 """
 
+GITIGNORE_TEMPLATE = """\
+# Build artifacts — committing these breaks PCP's parallel-module worktree
+# merges (and pollutes diffs the gates judge). Scaffolded by `pcp init` only
+# when the project had no .gitignore at all; edit freely, it's yours now.
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+node_modules/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+.DS_Store
+"""
+
 SDLC_PHASE_TEMPLATE = """\
 version: "1.0"
 current_phase: alpha
@@ -804,6 +823,17 @@ def init(project_path: str, module_name: str | None, force: bool):
     perms_path = _write_permission_recommendations(root, force)
     if perms_path:
         console.print(f"  [green]written[/green]  {perms_path.relative_to(root)}  (advisory -- not applied automatically)")
+
+    # Build-artifact .gitignore, only when the project has none at all.
+    # Found dogfooding 2026-07-17 (round 4): a kickoff-scaffolded project with
+    # no .gitignore let build agents commit __pycache__/*.pyc alongside their
+    # work, and the parallel-module worktree merge then aborted on "local
+    # changes would be overwritten" — by bytecode files. Never appends to or
+    # modifies an existing .gitignore (that's the human's file).
+    gitignore_path = root / ".gitignore"
+    if not gitignore_path.exists():
+        gitignore_path.write_text(GITIGNORE_TEMPLATE)
+        console.print("  [green]written[/green]  .gitignore  (build-artifact patterns)")
 
     console.print(f"\n[bold]PCP initialised at {pcp}[/bold]")
     if perms_path:

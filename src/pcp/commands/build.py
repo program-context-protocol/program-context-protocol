@@ -786,7 +786,9 @@ def _build_agent_prompt(
         "Use editing tools to modify files and run tests to verify your implementation.",
         "Git rules: stay on the current branch — never create or switch branches. "
         "You may commit your work or leave it uncommitted; the build loop measures "
-        "everything you changed since this criterion started either way.",
+        "everything you changed since this criterion started either way. Never "
+        "`git add` build artifacts (__pycache__, *.pyc, node_modules, dist, coverage "
+        "files) — committed artifacts break the module merge step.",
     ]
     return "\n".join(prompt_parts)
 
