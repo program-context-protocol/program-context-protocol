@@ -192,6 +192,22 @@ def _render_markdown(project_root: Path, data: dict, timestamp: str) -> str:
         lines.append("_No bypasses._")
     lines.append("")
 
+    # Escalation responsiveness — proves the escalation ledger is watched,
+    # not just written (PagerDuty Escalation Policy Insights pattern).
+    from pcp import escalations as _esc
+    _esc_dir = project_root / ".pcp"
+    mtta = _esc.mtta_hours(_esc_dir)
+    esc_entries = _esc.load(_esc_dir)
+    lines += ["## Escalation Responsiveness", ""]
+    if esc_entries:
+        acked = sum(1 for e in esc_entries if e.get("acknowledged_at"))
+        lines.append(f"- Escalations recorded: {len(esc_entries)}; acknowledged: {acked}")
+        lines.append(f"- MTTA (median time-to-acknowledge): {mtta}h" if mtta is not None
+                     else "- MTTA: no escalation has ever been acknowledged — ledger may be unwatched")
+    else:
+        lines.append("_No escalations recorded._")
+    lines.append("")
+
     lines += ["## Chain Integrity", "", "Each evidence log is hash-chained — an entry's hash covers its own "
               "content plus the previous entry's hash, so an edit/reorder/deletion after the fact is "
               "detectable even though the files themselves are plain, editable JSON/YAML.", ""]

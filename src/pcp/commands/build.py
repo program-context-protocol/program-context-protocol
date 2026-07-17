@@ -22,6 +22,7 @@ from pcp import decision_log
 from pcp import telemetry
 from pcp import qa
 from pcp import evidence
+from pcp import spend
 from pcp.capture import find_transcript_for_session, run_capture
 
 console = Console()
@@ -601,7 +602,7 @@ _PCP_OPERATIONAL_PATHS = (
     ".pcp/token_ledger.yaml", ".pcp/telemetry.jsonl", ".pcp/decision_log.jsonl",
     ".pcp/brd.md", ".pcp/brd_items.yaml", ".pcp/coverage_audit.jsonl",
     ".pcp/escalations.yaml", ".pcp/prune_log.yaml", ".pcp/current_state.md",
-    ".pcp/diff.md",
+    ".pcp/diff.md", ".pcp/notify_heartbeat.yaml",
 )
 _PCP_OPERATIONAL_DIRS = (".pcp/evidence/", ".pcp/transcripts/")
 
@@ -793,6 +794,29 @@ def _build_agent_prompt(
     return "\n".join(prompt_parts)
 
 
+def _build_escalation_prompt(pcp_dir: Path, module_name: str, criterion: dict, spec: dict,
+                             attempt_history: list[str]) -> str:
+    """Final-attempt (escalated-model) prompt: a FRESH session — never a
+    --resume of the failed attempts. Contaminated retry context raises error
+    rates ~7x (CCRM, arXiv:2605.08563); the escalated model gets a structured
+    summary of the prior failures instead of their raw trajectory
+    (summarize-don't-replay, arXiv:2604.16529). Costs a fresh repo
+    exploration — deliberately: on the final attempt before human escalation,
+    a clean read of the problem is worth more than the cached context."""
+    base = _build_agent_prompt(pcp_dir, module_name, criterion, spec)
+    history = "\n".join(f"- {h}" for h in attempt_history) or "- (no structured history captured)"
+    return base + "\n".join([
+        "",
+        "## Prior attempts on this criterion FAILED — summary (you are a fresh session; "
+        "do not repeat these approaches without addressing why they failed):",
+        history,
+        "",
+        "Diagnose from the current state of the working tree (their partial work may still "
+        "be present) and take a genuinely different approach where the summary suggests the "
+        "previous one was structurally wrong.",
+    ])
+
+
 def _build_retry_prompt(constraint_feedback: str) -> str:
     """Follow-up prompt for a --resume'd session. No re-pasted context — the agent
     already has it from the same session's earlier turn."""
@@ -977,6 +1001,32 @@ def _verify_block_findings(
     """
     if not findings:
         return [], []
+
+    # Deterministic pre-check (CodeRabbit pattern, validated by the grounded-
+    # code-review production system arXiv:2510.10290): a finding that cites a
+    # file path appearing nowhere in the diff is dropped at zero LLM cost
+    # before the verifier call. Only fires on findings that DO cite a path —
+    # conceptual findings with no file reference pass straight through to the
+    # LLM verifier, which judges substance.
+    # A file counts as "in scope" if its basename appears in the diff text OR
+    # in the criterion's changed-files list — the diff is capped at 14k chars,
+    # so text absence alone is not proof of fabrication.
+    known_basenames = {Path(p).name for p in (ctx.get("files") or [])}
+    pre_kept, pre_dropped = [], []
+    for f in findings:
+        cited = re.findall(r"[\w./-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|php|c|cpp|h|html|css|yaml|yml|json|toml|md)\b", f)
+        # Paths PCP itself wrote into the finding text (evidence pointers) don't count as citations.
+        cited = [p for p in cited if not p.replace("\\", "/").lstrip("./").startswith((".pcp/", "evidence/"))]
+        if cited and not any(p.split("/")[-1] in diff or p.split("/")[-1] in known_basenames for p in cited):
+            pre_dropped.append(f"{f}  [dropped by deterministic pre-check: cites {cited[0]} which appears nowhere in the diff or changed files]")
+        else:
+            pre_kept.append(f)
+    findings = pre_kept
+    if not findings:
+        if pre_dropped:
+            console.print(f"[dim]{check} pre-check dropped {len(pre_dropped)} finding(s) citing files absent from the diff.[/dim]")
+        return [], pre_dropped
+
     numbered = "\n".join(f"[{i}] {f}" for i, f in enumerate(findings))
     prompt = (
         f"## Diff\n{diff[:14000]}\n\n"
@@ -985,19 +1035,31 @@ def _verify_block_findings(
         '{"verdicts": [{"index": 0, "refuted": false, "reason": "..."}, ...]} '
         "-- exactly one entry per finding above, in order."
     )
+    # Judge decorrelation (2026-07-17, from the academic sweep): the original
+    # finding comes from JUDGE_MODEL (Haiku); a same-model verifier adds
+    # almost no independent signal (correlated-judges result, arXiv:2605.29800
+    # "nine judges ≈ two effective votes"; same-family preference leakage,
+    # arXiv:2502.01534). Default verifier is therefore a DIFFERENT model
+    # (BUILD_MODEL/Sonnet — acceptable cost since this only runs on BLOCK
+    # findings, which are rare). PCP_VERIFIER_MODEL overrides for teams that
+    # can route cross-vendor — honestly noted: Sonnet-verifying-Haiku is
+    # cross-model but still same-vendor, weaker decorrelation than the
+    # literature's ideal; the deterministic pre-check above is the fully
+    # decorrelated layer.
+    verifier_model = os.environ.get("PCP_VERIFIER_MODEL") or llm.BUILD_MODEL
     try:
         res, meta = llm.call_json(
-            VERIFY_SYSTEM_PROMPT, prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir,
+            VERIFY_SYSTEM_PROMPT, prompt, model=verifier_model, pcp_dir=pcp_dir,
             command=f"build-{check}-verify", return_meta=True,
         )
     except Exception as e:
         console.print(f"[yellow]Warning: {check} verification call failed, keeping all findings unverified: {e}[/yellow]")
         _qa_record(pcp_dir, ctx, f"{check}-verify", [f"call failed: {e}"], control_id=control_id, result="error")
-        return findings, []
+        return findings, pre_dropped
 
     verdicts = {v.get("index"): v for v in res.get("verdicts", []) if isinstance(v, dict)}
     kept: list[str] = []
-    dropped: list[str] = []
+    dropped: list[str] = list(pre_dropped)
     for i, f in enumerate(findings):
         v = verdicts.get(i)
         if v and v.get("refuted"):
@@ -1069,7 +1131,7 @@ def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ct
     evidence_path = evidence.store(
         pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "architect-review", json.dumps(res, indent=2),
     )
-    kept, _dropped = _verify_block_findings(pcp_dir, diff, blocks, ctx, "architect-review", "CTRL-005")
+    kept, _dropped = _verify_block_findings(pcp_dir, diff, blocks, {**ctx, "files": changed_files}, "architect-review", "CTRL-005")
     _qa_record(pcp_dir, ctx, "architect-review", kept, meta, control_id="CTRL-005", files=changed_files, evidence_path=evidence_path)
     return kept
 
@@ -1445,6 +1507,7 @@ def _build_one_criterion(
     feedback = None
     success = False
     block_findings: list[str] = []
+    attempt_history: list[str] = []
     agent_session_id = str(uuid.uuid4())
     # Everything the agent does this criterion — committed or not — is
     # measured against this ref, so committing can't hide work from gates.
@@ -1452,6 +1515,12 @@ def _build_one_criterion(
 
     for attempt in range(1, 4):
         console.print(f"\n[dim]Attempt {attempt}/3 — {mod['name']}/{c['id']}...[/dim]")
+
+        allowed, spend_reason = spend.check_ceiling(pcp_dir)
+        if not allowed:
+            console.print(f"[red bold]Project spend ceiling reached:[/red bold] {spend_reason}")
+            console.print("[dim]No further agent sessions will be spawned this run.[/dim]")
+            raise BudgetExceeded(spend_reason)
 
         try:
             budget.take_session()
@@ -1463,14 +1532,24 @@ def _build_one_criterion(
             console.print("[dim]Override with PCP_MAX_BUILD_SESSIONS=<n> if this build genuinely needs more.[/dim]")
             raise
 
-        # First attempt opens a fresh session; retries --resume it instead of
-        # cold-restarting (which re-explores the whole repo and re-pastes context).
+        # Attempt 1 opens a fresh session; attempt 2 --resumes it (avoids
+        # re-exploring the repo — Token Discipline). Attempt 3 (escalation)
+        # deliberately does NOT resume: failed-attempt context contaminates
+        # retries (CCRM, arXiv:2605.08563 — contaminated-context error rate
+        # 7.1x baseline, "clean-restart dominance") — the escalated model gets
+        # a FRESH session plus a structured summary of what failed, not the
+        # raw failure trajectory (summarize-don't-replay, arXiv:2604.16529).
         if attempt == 1:
             agent_prompt = _build_agent_prompt(pcp_dir, mod["name"], c, mod["spec"])
             session_flag = ["--session-id", agent_session_id]
-        else:
+        elif attempt == 2:
             agent_prompt = _build_retry_prompt(feedback)
             session_flag = ["--resume", agent_session_id]
+        else:
+            escalation_session_id = str(uuid.uuid4())
+            agent_prompt = _build_escalation_prompt(pcp_dir, mod["name"], c, mod["spec"], attempt_history)
+            session_flag = ["--session-id", escalation_session_id]
+            agent_session_id = escalation_session_id
 
         # Escalate to Opus on the final attempt -- two Sonnet attempts already
         # failed, a real complexity signal worth paying up for before handing
@@ -1503,11 +1582,13 @@ def _build_one_criterion(
             timeout_sec = _build_agent_timeout_sec()
             console.print(f"[red]Claude agent timed out after {timeout_sec}s.[/red]")
             feedback = f"Previous attempt exceeded the {timeout_sec}s per-attempt timeout and was killed."
+            attempt_history.append(f"Attempt {attempt}: {feedback}")
             continue
 
         if result.returncode != 0:
             console.print("[red]Claude agent exited with error.[/red]")
             feedback = "Claude CLI agent run failed or exited with non-zero code."
+            attempt_history.append(f"Attempt {attempt}: {feedback}")
             continue
 
         agent_usage = {}
@@ -1516,6 +1597,7 @@ def _build_one_criterion(
             if envelope.get("is_error"):
                 console.print(f"[red]Claude agent reported an error:[/red] {envelope.get('result', '')}")
                 feedback = f"Previous attempt errored: {envelope.get('result', '')}"
+                attempt_history.append(f"Attempt {attempt}: {feedback[:500]}")
                 continue
             with _STATE_LOCK:
                 _log_usage(
@@ -1607,6 +1689,9 @@ def _build_one_criterion(
             for v in block_findings:
                 console.print(f"  ✗ {v}")
             feedback = "\n".join(block_findings)
+            attempt_history.append(
+                f"Attempt {attempt}: blocked by gates — " + "; ".join(v[:200] for v in block_findings[:5])
+            )
         else:
             success = True
             break

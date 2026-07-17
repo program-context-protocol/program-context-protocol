@@ -33,6 +33,7 @@ from pcp.commands.architecture_justification import architecture_justification
 from pcp.commands.design_audit import design_audit
 from pcp.commands.docs import docs
 from pcp.commands.prune import prune
+from pcp.commands.escalations_cmd import escalations_cmd
 
 
 @click.group()
@@ -76,3 +77,4 @@ cli.add_command(architecture_justification)
 cli.add_command(design_audit)
 cli.add_command(docs)
 cli.add_command(prune)
+cli.add_command(escalations_cmd)

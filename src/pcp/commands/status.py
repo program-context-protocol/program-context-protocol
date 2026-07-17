@@ -167,6 +167,14 @@ def status(project_path: str | None, rescan: bool, print_only: bool, pm_mode: bo
     from pcp import escalations
     for e in escalations.find_stale(pcp_dir):
         console.print(
-            f"[red bold]STALE ESCALATION:[/red bold] {e.get('module')}/{e.get('criterion_id')} "
-            f"escalated {e.get('age_hours')}h ago, criterion still pending — needs a human."
+            f"[red bold]STALE ESCALATION [{e.get('state', 'unacked')}]:[/red bold] "
+            f"{e.get('module')}/{e.get('criterion_id')} ({e.get('category', 'uncategorized')}) "
+            f"waiting {e.get('age_hours')}h — ack: pcp escalations --ack {e.get('module')}/{e.get('criterion_id')}"
         )
+
+    # Notification dead-man's-switch — attempts without successes means the
+    # pipeline is broken and nobody is being reached.
+    from pcp.commands.watch import check_notify_heartbeat
+    hb = check_notify_heartbeat(pcp_dir)
+    if hb:
+        console.print(f"[red bold]{hb}[/red bold]")

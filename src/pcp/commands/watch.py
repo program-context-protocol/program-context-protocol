@@ -102,6 +102,62 @@ def check_deploy_health(health_url: str | None) -> bool | None:
         return False
 
 
+# Heartbeat file for the dead-man's-switch below. Set by watch() at startup;
+# notify() records every attempt + every success so a checker can detect
+# "attempts happening, successes not" — the failure class an in-process
+# try/except structurally cannot catch about itself (lived incident: SSL cert
+# error silently fell back to log-only for 8 days).
+_HEARTBEAT_DIR: Path | None = None
+
+
+def set_heartbeat_dir(pcp_dir: Path) -> None:
+    global _HEARTBEAT_DIR
+    _HEARTBEAT_DIR = pcp_dir
+
+
+def _heartbeat_record(field: str) -> None:
+    if _HEARTBEAT_DIR is None:
+        return
+    try:
+        import yaml
+        path = _HEARTBEAT_DIR / "notify_heartbeat.yaml"
+        data = {}
+        if path.exists():
+            data = yaml.safe_load(path.read_text()) or {}
+        data[field] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        path.write_text(yaml.dump(data))
+    except Exception:
+        pass
+
+
+def check_notify_heartbeat(pcp_dir: Path, lag_hours: float = 1.0) -> str | None:
+    """Dead-man's-switch: if notification attempts keep happening but the last
+    SUCCESS lags the last attempt by more than lag_hours, the pipeline is
+    failing persistently — return a warning string (caller screams on console;
+    notifying about a broken notifier is structurally pointless)."""
+    try:
+        import yaml
+        path = pcp_dir / "notify_heartbeat.yaml"
+        if not path.exists():
+            return None
+        data = yaml.safe_load(path.read_text()) or {}
+        attempt, success = data.get("last_attempt"), data.get("last_success")
+        if not attempt:
+            return None
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        attempt_ts = time.mktime(time.strptime(attempt, fmt))
+        success_ts = time.mktime(time.strptime(success, fmt)) if success else 0
+        if attempt_ts - success_ts > lag_hours * 3600:
+            return (
+                f"Notification pipeline appears BROKEN: last successful delivery "
+                f"{'never' if not success else success}, but attempts continue (last {attempt}). "
+                "Humans are NOT being reached — check slack-notify."
+            )
+    except Exception:
+        return None
+    return None
+
+
 def notify(message: str) -> None:
     """Send via slack-notify if available; NEVER fail silently. A delivery
     failure downgrading to console-only without saying so is a lived incident
@@ -110,9 +166,12 @@ def notify(message: str) -> None:
     so the console record itself shows the human was probably NOT reached."""
     delivered = False
     if shutil.which("slack-notify"):
+        _heartbeat_record("last_attempt")
         try:
             result = subprocess.run(["slack-notify", message], capture_output=True, text=True, timeout=15)
             delivered = result.returncode == 0
+            if delivered:
+                _heartbeat_record("last_success")
             if not delivered:
                 console.print(
                     f"[red bold]Notification delivery FAILED[/red bold] "
@@ -140,10 +199,15 @@ def check_stale_escalations(pcp_dir: Path, already_reported: set) -> None:
         if key in already_reported:
             continue
         already_reported.add(key)
+        state = e.get("state", "unacked")
+        detail = (
+            "no human has acknowledged it" if state == "unacked"
+            else "acknowledged but still unresolved (seen is not fixed)"
+        )
         msg = (
-            f"pcp watch: STALE ESCALATION — {e.get('module')}/{e.get('criterion_id')} "
-            f"escalated {e.get('age_hours')}h ago and its criterion is still pending. "
-            "No human appears to have acted on it."
+            f"pcp watch: STALE ESCALATION [{state}] — {e.get('module')}/{e.get('criterion_id')} "
+            f"({e.get('category', 'uncategorized')}) waiting {e.get('age_hours')}h; {detail}. "
+            f"Ack with: pcp escalations --ack {e.get('module')}/{e.get('criterion_id')}"
         )
         console.print(f"[red bold]{msg}[/red bold]")
         notify(msg)
@@ -229,6 +293,11 @@ def watch(project_path: str | None, interval: int, once: bool, max_iterations: i
         console.print("[dim]Run `pcp doctor` to configure a deploy health-check URL.[/dim]")
         sys.exit(0)
 
+    set_heartbeat_dir(pcp_dir)
+    hb_warning = check_notify_heartbeat(pcp_dir)
+    if hb_warning:
+        console.print(f"[red bold]{hb_warning}[/red bold]")
+
     report_only = report_only or os.environ.get("PCP_WATCH_REPORT_ONLY", "") in ("1", "true", "yes")
     if report_only:
         console.print("[cyan]Report-only mode: failures will be reported/notified, no fix agent will be spawned.[/cyan]")
@@ -256,23 +325,29 @@ def watch(project_path: str | None, interval: int, once: bool, max_iterations: i
                 elif auto_fix_disabled:
                     notify(f"pcp watch: CI still failing after {max_consecutive_fixes} auto-fix attempts — auto-fix paused, needs human attention. {run.get('url')}")
                 else:
-                    logs = get_failed_logs(project_root, run["databaseId"])
-                    console.print("[dim]Attempting auto-fix...[/dim]")
-                    is_first_attempt = fix_session_id is None
-                    if is_first_attempt:
-                        fix_session_id = str(uuid.uuid4())
-                    fixed = attempt_auto_fix(pcp_dir, logs, fix_session_id, is_first_attempt)
-                    consecutive_fix_attempts += 1
-                    if fixed:
-                        notify(f"pcp watch: auto-fix attempted for failed CI run {run.get('url')} — pushed, awaiting next CI result.")
+                    from pcp import spend
+                    allowed, spend_reason = spend.check_ceiling(pcp_dir)
+                    if not allowed:
+                        console.print(f"[red bold]Project spend ceiling reached:[/red bold] {spend_reason}")
+                        notify(f"pcp watch: CI failed but auto-fix skipped — {spend_reason}. {run.get('url')}")
                     else:
-                        notify(f"pcp watch: CI run failed and auto-fix attempt errored — needs human attention. {run.get('url')}")
-                    if consecutive_fix_attempts >= max_consecutive_fixes:
-                        auto_fix_disabled = True
-                        notify(
-                            f"pcp watch: {consecutive_fix_attempts} consecutive auto-fix attempts without a CI success — "
-                            "pausing auto-fix (possible regression loop). Still watching and reporting status."
-                        )
+                        logs = get_failed_logs(project_root, run["databaseId"])
+                        console.print("[dim]Attempting auto-fix...[/dim]")
+                        is_first_attempt = fix_session_id is None
+                        if is_first_attempt:
+                            fix_session_id = str(uuid.uuid4())
+                        fixed = attempt_auto_fix(pcp_dir, logs, fix_session_id, is_first_attempt)
+                        consecutive_fix_attempts += 1
+                        if fixed:
+                            notify(f"pcp watch: auto-fix attempted for failed CI run {run.get('url')} — pushed, awaiting next CI result.")
+                        else:
+                            notify(f"pcp watch: CI run failed and auto-fix attempt errored — needs human attention. {run.get('url')}")
+                        if consecutive_fix_attempts >= max_consecutive_fixes:
+                            auto_fix_disabled = True
+                            notify(
+                                f"pcp watch: {consecutive_fix_attempts} consecutive auto-fix attempts without a CI success — "
+                                "pausing auto-fix (possible regression loop). Still watching and reporting status."
+                            )
             elif run.get("status") == "completed" and run.get("conclusion") == "success":
                 console.print(f"[green]CI run succeeded:[/green] {run.get('name')}")
                 consecutive_fix_attempts = 0
