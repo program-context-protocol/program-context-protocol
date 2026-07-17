@@ -17,6 +17,22 @@ from typing import Any
 import yaml
 
 JUDGE_MODEL = "haiku"
+# Model-selection strategy (reviewed and approved 2026-07-17) -- same
+# cheapest-tool-that-correctly-does-the-job philosophy as the Logic-Tier
+# Selection ladder (CLAUDE.md), applied to PCP's own LLM call sites instead
+# of to the projects PCP builds:
+#   Haiku    -- bounded, structured judge calls (JUDGE_MODEL, unchanged)
+#   Sonnet   -- pcp build's coding agent + kickoff/pm generation (BUILD_MODEL)
+#   Opus     -- escalation only: 3rd/final build-criterion attempt, and
+#               wave-level architect-review (ESCALATION_MODEL) -- both have
+#               a materially higher blast radius than a per-criterion Haiku
+#               check, worth paying up for
+#   Fable 5  -- never a default anywhere in this file; PCP_BUILD_MODEL is
+#               the only path to it, a PM's explicit, deliberate override.
+#               Its always-on-thinking/minutes-long-turn profile conflicts
+#               with Token Discipline as a default for anything here.
+BUILD_MODEL = "sonnet"
+ESCALATION_MODEL = "opus"
 
 
 def _claude_bin() -> str:

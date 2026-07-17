@@ -136,7 +136,10 @@ def pm(intent: str, project_path: str | None):
     console.print("[dim]Analyzing intent against project context...[/dim]")
 
     try:
-        result = llm.call_json(SYSTEM_PROMPT, user_prompt, pcp_dir=pcp_dir, command="pm")
+        # Sonnet is the reviewed default for generation calls (see
+        # llm/client.py's model-selection strategy) -- replaces the prior
+        # ambiguous "inherited/default". PCP_MODEL still overrides.
+        result = llm.call_json(SYSTEM_PROMPT, user_prompt, model=llm.BUILD_MODEL, pcp_dir=pcp_dir, command="pm")
     except RuntimeError as e:
         console.print(f"[red]Error calling LLM:[/red] {e}")
         sys.exit(2)

@@ -382,7 +382,10 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
             architecture = (pcp_dir / "architecture.md").read_text() if (pcp_dir / "architecture.md").exists() else ""
             kb = _load_kb(pcp_dir, changed)
             prompt = _arch_build_prompt(persona, architecture, kb, wave_diff, "diff")
-            res = llm.call_json(ARCH_SYSTEM_PROMPT, prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command="wave-architect-review")
+            # Opus, not Haiku -- a wave-level BLOCK finding stops the entire
+            # next wave, a materially higher blast radius than a per-
+            # criterion check (see llm/client.py's model-selection strategy).
+            res = llm.call_json(ARCH_SYSTEM_PROMPT, prompt, model=llm.ESCALATION_MODEL, pcp_dir=pcp_dir, command="wave-architect-review")
             for f in res.get("findings", []):
                 if f.get("severity") == "BLOCK":
                     arch_findings.append(f"Wave architect-review: {f.get('location', 'general')}: {f.get('finding', '')} → Fix: {f.get('fix', '')}")
@@ -1184,7 +1187,7 @@ def _record_escalation(pcp_dir: Path, module_name: str, criterion_id: str, block
 
 def _build_one_criterion(
     pcp_dir: Path, project_root: Path, mod: dict, c: dict,
-    build_model: str | None, budget: "_BuildBudget",
+    build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
 ) -> tuple[bool, list[str]]:
     """Runs the up-to-3-attempt loop for ONE criterion. `project_root` is
     where the coding agent actually runs and where gates are evaluated —
@@ -1222,6 +1225,15 @@ def _build_one_criterion(
             agent_prompt = _build_retry_prompt(feedback)
             session_flag = ["--resume", agent_session_id]
 
+        # Escalate to Opus on the final attempt -- two Sonnet attempts already
+        # failed, a real complexity signal worth paying up for before handing
+        # off to human escalation. Never overrides an explicit human choice:
+        # PCP_BUILD_MODEL set on attempt 1 stays in effect on attempt 3 too,
+        # rather than silently switching models without being asked.
+        attempt_model = build_model
+        if attempt == 3 and not build_model_explicit:
+            attempt_model = llm.ESCALATION_MODEL
+
         cmd = [
             _claude_bin(),
             "-p",
@@ -1230,8 +1242,8 @@ def _build_one_criterion(
             "--max-budget-usd", _build_agent_max_budget_usd(),
             *session_flag,
         ]
-        if build_model:
-            cmd += ["--model", build_model]
+        if attempt_model:
+            cmd += ["--model", attempt_model]
 
         # Run Claude agent — wall-clock capped. A stuck/looping agent must
         # not be able to run unbounded just because it hasn't returned yet.
@@ -1260,12 +1272,12 @@ def _build_one_criterion(
                 continue
             with _STATE_LOCK:
                 _log_usage(
-                    pcp_dir, "build-agent", build_model, envelope.get("session_id"),
+                    pcp_dir, "build-agent", attempt_model, envelope.get("session_id"),
                     envelope.get("usage", {}), envelope.get("total_cost_usd"),
                 )
             budget.add_cost(envelope.get("total_cost_usd"))
             agent_usage = {
-                "model": build_model or "default",
+                "model": attempt_model or "default",
                 "session_id": envelope.get("session_id"),
                 "usage": envelope.get("usage", {}),
                 "cost_usd": envelope.get("total_cost_usd"),
@@ -1364,7 +1376,7 @@ def _mark_criterion_complete(mod: dict, criterion_id: str) -> None:
 
 def _build_module_worker(
     pcp_dir: Path, mod: dict, project_root: Path,
-    build_model: str | None, budget: "_BuildBudget",
+    build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
 ) -> dict:
     """Runs all of one module's pending criteria inside `project_root` (its
     own worktree when building in parallel across modules). Stops at the
@@ -1381,7 +1393,7 @@ def _build_module_worker(
     if not _criteria_parallel_enabled(mod):
         for c in mod["pending_criteria"]:
             console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
-            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, budget)
+            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget)
 
             if success:
                 console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
@@ -1409,7 +1421,7 @@ def _build_module_worker(
         if len(wave_criteria) == 1:
             c = wave_criteria[0]
             console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
-            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, budget)
+            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget)
             if success:
                 console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
                 _mark_criterion_complete(mod, c["id"])
@@ -1429,7 +1441,7 @@ def _build_module_worker(
         with ThreadPoolExecutor(max_workers=len(wave_criteria)) as executor:
             futures = {
                 executor.submit(
-                    _build_one_criterion, pcp_dir, worktrees[c["id"]], mod, c, build_model, budget,
+                    _build_one_criterion, pcp_dir, worktrees[c["id"]], mod, c, build_model, build_model_explicit, budget,
                 ): c["id"]
                 for c in wave_criteria
             }
@@ -1545,7 +1557,14 @@ def build(module_name: str | None, project_path: str | None):
     check_agent_depth_or_exit()
 
     budget = _BuildBudget(_max_build_sessions())
-    build_model = os.environ.get("PCP_BUILD_MODEL")
+    # Model-selection strategy (see llm/client.py) -- Sonnet is the reviewed
+    # default for the coding agent, escalating to Opus on a criterion's
+    # final attempt. A human's explicit PCP_BUILD_MODEL always wins outright
+    # and disables escalation -- an explicit override on attempt 1 shouldn't
+    # silently change model again on attempt 3 without being asked.
+    _explicit_build_model = os.environ.get("PCP_BUILD_MODEL")
+    build_model = _explicit_build_model or llm.BUILD_MODEL
+    build_model_explicit = bool(_explicit_build_model)
     max_parallel = _max_parallel_modules()
 
     for wave_number in range(num_waves):
@@ -1560,7 +1579,7 @@ def build(module_name: str | None, project_path: str | None):
             # Single module (or parallelism disabled) — run directly against
             # the main project root, no worktree machinery needed at all.
             for mod in wave_modules:
-                result = _build_module_worker(pcp_dir, mod, project_root, build_model, budget)
+                result = _build_module_worker(pcp_dir, mod, project_root, build_model, build_model_explicit, budget)
                 if not result["success"]:
                     console.print("[bold red]Build execution stopped. Please resolve findings manually.[/bold red]")
                     sys.exit(1)
@@ -1575,7 +1594,7 @@ def build(module_name: str | None, project_path: str | None):
                 with ThreadPoolExecutor(max_workers=min(max_parallel, len(wave_modules))) as executor:
                     futures = {
                         executor.submit(
-                            _build_module_worker, pcp_dir, mod, worktrees[mod["name"]], build_model, budget,
+                            _build_module_worker, pcp_dir, mod, worktrees[mod["name"]], build_model, build_model_explicit, budget,
                         ): mod["name"]
                         for mod in wave_modules
                     }

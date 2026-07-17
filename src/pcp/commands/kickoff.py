@@ -332,7 +332,11 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     console.print("[dim]Analyzing vision and generating Strategy decomposition...[/dim]")
 
     try:
-        result = llm.call_json(SYSTEM_PROMPT, vision_content, pcp_dir=pcp_dir, command="kickoff")
+        # Sonnet is the reviewed default for generation calls (see
+        # llm/client.py's model-selection strategy) -- replaces the prior
+        # ambiguous "inherited/default" (whatever the CLI's own default
+        # happened to be). PCP_MODEL still overrides for a human debugging.
+        result = llm.call_json(SYSTEM_PROMPT, vision_content, model=llm.BUILD_MODEL, pcp_dir=pcp_dir, command="kickoff")
     except RuntimeError as e:
         console.print(f"[red]Error calling LLM:[/red] {e}")
         sys.exit(2)
