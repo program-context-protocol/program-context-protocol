@@ -25,36 +25,111 @@ from pcp.discovery.scanner import detect_stack, collect_source_files, detect_ent
 from pcp.discovery.graph import build_dependency_graph
 from pcp.discovery.clusters import detect_clusters, compute_coupling_matrix
 from pcp.llm import client as llm
+from pcp.commands.kickoff import _normalize_spec, _normalize_acceptance
 
 console = Console()
 
-GENERATE_SPEC_PROMPT = """\
-You are a software architect generating draft module specs for an existing codebase.
+# Brownfield modules get the same v2.0 schema (logic_tier/build_vs_buy
+# enforcement) a fresh `pcp kickoff` already produces for a new project --
+# previously this command wrote the older, ungated v1 acceptance shape via
+# its own terse prompt, so every post-import feature silently bypassed the
+# Logic-Tier Selection framework the same way `pcp pm` did before that gap
+# was closed. _normalize_spec/_normalize_acceptance (kickoff.py) are reused
+# unchanged as the safety net against an LLM-invented enum value, same
+# coercion posture kickoff itself relies on.
+GENERATE_MODULE_PROMPT = """\
+You are a software architect generating draft PCP module specs for an existing (brownfield) codebase.
 
-Given:
-- A PM description of what the project does
-- A detected cluster of files (natural module boundary from import analysis)
-- The cluster name and its files
+Given a PM description of the whole project, a detected cluster of files (a natural module \
+boundary from import-graph analysis), and that cluster's cross-module import edges, generate \
+BOTH a spec.yaml and an acceptance.yaml for this module -- schema version 2.0, the same shape \
+a fresh `pcp kickoff` produces for a new project.
 
-Generate a concise spec.yaml for this module.
+Acceptance criteria for a brownfield module are characterization/decoupling work, not new \
+features: always include exactly one BF_001 characterization-test criterion ("write \
+characterization tests -- golden master, no code changes"), then one BF_00N decouple criterion \
+per cross-cluster import edge given below (up to 3), each describing removing that direct \
+coupling and routing through an interface instead.
 
-Output ONLY valid YAML, no prose, no code fences. Format:
-module: <cluster_name>
-description: "<one sentence: what this module does>"
-_generated: true
-dependencies: [<other_module_names_this_cluster_imports_from>]
-constraints:
-  - "<key constraint visible from the code>"
+Output ONLY valid JSON, no prose, no code fences. Format:
+{
+  "spec": {
+    "module": "<cluster_name>",
+    "description": "<one sentence: what this module actually does, inferred from its files>",
+    "dependencies": [<other module names this cluster imports to/from, from the edges given>],
+    "constraints": ["<key constraint visible from the code>"],
+    "build_vs_buy": {"decision": "not_applicable", "rationale": "brownfield characterization module, no whole-module tool-adoption choice here", "candidates_considered": []}
+  },
+  "acceptance": {
+    "criteria": [
+      {
+        "id": "BF_001",
+        "description": "Write characterization tests for <cluster_name> (golden master -- no code changes)",
+        "check": "test_passes",
+        "status": "pending",
+        "logic_tier": 1,
+        "build_vs_buy": {"decision": "build_fresh", "rationale": "one-sentence rationale", "candidates_considered": []}
+      }
+    ]
+  }
+}
 """
 
 
-def _generate_module_spec(
+def _default_module_shape(cluster_name: str, files: list[str], deps: list[str]) -> tuple[dict, dict]:
+    """Deterministic fallback used both when the LLM call fails and for
+    --skip-specs -- same v2.0 shape either way, so a project's module set
+    is never a mix of gated and ungated modules depending on which path
+    happened to generate which one."""
+    spec = {
+        "module": cluster_name,
+        "description": f"Auto-detected cluster ({len(files)} files) -- description not yet reviewed",
+        "_generated": True,
+        "dependencies": deps,
+        "constraints": [],
+    }
+    acceptance = {
+        "criteria": [
+            {
+                "id": "BF_001",
+                "description": f"Write characterization tests for {cluster_name} (golden master — no code changes)",
+                "check": "test_passes",
+                "status": "pending",
+                "logic_tier": 1,
+                "build_vs_buy": {
+                    "decision": "build_fresh",
+                    "rationale": "Characterization tests are project-specific by definition -- nothing to reuse.",
+                    "candidates_considered": [],
+                },
+            }
+        ]
+    }
+    for i, target in enumerate(deps[:3], 2):
+        acceptance["criteria"].append({
+            "id": f"BF_00{i}",
+            "description": f"Remove direct {cluster_name}→{target} coupling — route through interface",
+            "check": "test_passes",
+            "status": "pending",
+            "logic_tier": 1,
+            "build_vs_buy": {
+                "decision": "build_fresh",
+                "rationale": "Decoupling work is project-specific by definition -- nothing to reuse.",
+                "candidates_considered": [],
+            },
+        })
+    return spec, acceptance
+
+
+def _generate_module(
     cluster_name: str,
     files: list[str],
     cross_edges: dict[tuple[str, str], int],
     pm_description: str,
     pcp_dir: Path | None = None,
-) -> dict:
+) -> tuple[dict, dict]:
+    """Returns (spec, acceptance, coercion_warnings), spec/acceptance both
+    v2.0-shaped and already normalized via kickoff.py's own coercion
+    functions -- callers append coercion_warnings to their own list."""
     deps = sorted({
         b for (a, b), count in cross_edges.items()
         if a == cluster_name and count > 0
@@ -73,21 +148,23 @@ Files in cluster ({len(files)} files):
 Cross-cluster imports to/from: {deps or ["none detected"]}
 """
     try:
-        raw = llm.call(GENERATE_SPEC_PROMPT, user_prompt, pcp_dir=pcp_dir, command="import-generate-spec")
-        spec = yaml.safe_load(raw)
-        if not isinstance(spec, dict):
-            raise ValueError("not a dict")
+        result = llm.call_json(GENERATE_MODULE_PROMPT, user_prompt, pcp_dir=pcp_dir, command="import-generate-module")
+        spec = result["spec"]
+        acceptance = result["acceptance"]
+        if not isinstance(spec, dict) or not isinstance(acceptance, dict):
+            raise ValueError("spec/acceptance not a dict")
         spec["module"] = cluster_name
         spec["_generated"] = True
-        return spec
+        acceptance.setdefault("criteria", [])
     except Exception:
-        return {
-            "module": cluster_name,
-            "description": f"Auto-detected cluster ({len(files)} files)",
-            "_generated": True,
-            "dependencies": deps,
-            "constraints": [],
-        }
+        spec, acceptance = _default_module_shape(cluster_name, files, deps)
+
+    spec["version"] = "2.0"
+    acceptance["module"] = cluster_name
+    acceptance["version"] = "2.0"
+    warnings = _normalize_spec(spec, cluster_name)
+    warnings += _normalize_acceptance(acceptance, cluster_name)
+    return spec, acceptance, warnings
 
 
 def _coupling_score(cross_edges: dict, clusters: dict) -> float:
@@ -233,57 +310,39 @@ def import_project(description: str, project_path: str | None, dry_run: bool, sk
         f"---\n_Generated by `pcp import`._\n"
     )
 
-    # Module spec files
+    # Module spec + acceptance files -- v2.0 schema, same logic_tier/
+    # build_vs_buy enforcement `pcp kickoff` already gives a greenfield module.
+    all_coercion_warnings: list[str] = []
     for cluster_name, cluster_files in clusters.items():
         module_dir = pcp_dir / "strategy" / "modules" / cluster_name
         module_dir.mkdir(exist_ok=True)
 
         if skip_specs:
-            spec = {
-                "module": cluster_name,
-                "description": f"(add description — {len(cluster_files)} files)",
-                "_generated": True,
-                "dependencies": [],
-                "constraints": [],
-            }
+            deps = sorted({b for (a, b), c in cross_edges.items() if a == cluster_name and c > 0}
+                          | {a for (a, b), c in cross_edges.items() if b == cluster_name and c > 0})
+            spec, acceptance = _default_module_shape(cluster_name, cluster_files, deps)
+            spec["version"] = "2.0"
+            acceptance["module"] = cluster_name
+            acceptance["version"] = "2.0"
         else:
-            spec = _generate_module_spec(cluster_name, cluster_files, cross_edges, description, pcp_dir=pcp_dir)
+            spec, acceptance, warnings = _generate_module(
+                cluster_name, cluster_files, cross_edges, description, pcp_dir=pcp_dir,
+            )
+            all_coercion_warnings += warnings
 
         (module_dir / "spec.yaml").write_text(
             "# DRAFT — review and remove _generated: true when correct\n"
             + yaml.dump(spec, default_flow_style=False, sort_keys=False)
         )
-
-        # Empty acceptance.yaml
-        acceptance = {
-            "module": cluster_name,
-            "version": "1",
-            "criteria": [
-                {
-                    "id": "BF_001",
-                    "description": f"Write characterization tests for {cluster_name} (golden master — no code changes)",
-                    "check": "test_passes",
-                    "test": f"tests/characterization/test_{cluster_name.replace('-', '_')}_baseline.py",
-                    "status": "pending",
-                }
-            ],
-        }
-        # Add decouple criterion if cross-cluster violations exist
-        outbound = [(b, count) for (a, b), count in cross_edges.items() if a == cluster_name]
-        if outbound:
-            for i, (target, count) in enumerate(outbound[:3], 2):
-                acceptance["criteria"].append({
-                    "id": f"BF_00{i}",
-                    "description": f"Remove direct {cluster_name}→{target} coupling ({count} imports) — route through interface",
-                    "check": "test_passes",
-                    "test": f"tests/modularity/test_drop_{cluster_name.replace('-', '_')}.sh",
-                    "status": "pending",
-                })
-
         (module_dir / "acceptance.yaml").write_text(
             "# DRAFT — add PM-validated acceptance criteria here\n"
             + yaml.dump(acceptance, default_flow_style=False, sort_keys=False)
         )
+
+    if all_coercion_warnings:
+        console.print(f"[yellow]⚠  {len(all_coercion_warnings)} generated field(s) didn't match the schema, coerced to a safe default:[/yellow]")
+        for w in all_coercion_warnings:
+            console.print(f"   {w}")
 
     # baseline_violations.yaml (empty — pcp check --baseline fills this)
     (pcp_dir / "baseline_violations.yaml").write_text(
