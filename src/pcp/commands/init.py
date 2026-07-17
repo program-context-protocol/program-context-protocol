@@ -375,10 +375,12 @@ WARN:
 - A module that owns more than 3 database tables (God module risk)
 - A module that directly modifies another module's database tables
 - A non-trivial module (auth, payment, queue, scheduler, parser, embeddings,
-  state-machine, ETL-class complexity) scaffolded with no prior-art check
-  logged in `.pcp/decision_log.jsonl` — run `/priorart <description>` first
-  and record reuse-as-dependency / fork-adapt / reference-pattern-only /
-  build-fresh + license rationale before building
+  state-machine, ETL-class complexity, OR a mature UI subsystem — canvas/
+  diagram editor, rich text editor, spreadsheet grid, drag-drop builder)
+  scaffolded with no prior-art check logged in `.pcp/decision_log.jsonl` —
+  run `/priorart <description>` first and record reuse-as-dependency /
+  fork-adapt / reference-pattern-only / build-fresh + license rationale
+  before building
 
 ## Project-Specific Principles
 
@@ -474,12 +476,14 @@ do not restate or duplicate their content here.
 6. If work here changes program strategy (drop/add a module, change
    objective coverage), run `pcp validate-strategy` before proceeding.
 7. Before scaffolding a non-trivial module (auth, payment, queue, scheduler,
-   parser, embeddings, state-machine, ETL-class complexity), run
-   `/priorart <description>` first — check for existing projects to reuse,
-   fork, or reference before building from scratch. Log the decision
-   (reuse-as-dependency / fork-adapt / reference-pattern-only / build-fresh
-   + license) via `pcp capture` so it lands in `.pcp/decision_log.jsonl`.
-   Skip for trivial modules (helpers, config parsers, glue code).
+   parser, embeddings, state-machine, ETL-class complexity — OR a mature UI
+   subsystem: canvas/diagram editor, rich text editor, spreadsheet grid,
+   drag-drop builder), run `/priorart <description>` first — check for
+   existing projects to reuse, fork, or reference before building from
+   scratch. Log the decision (reuse-as-dependency / fork-adapt /
+   reference-pattern-only / build-fresh + license) via `pcp capture` so it
+   lands in `.pcp/decision_log.jsonl`. Skip for trivial modules (helpers,
+   config parsers, glue code).
 
 ## Session start checklist
 
