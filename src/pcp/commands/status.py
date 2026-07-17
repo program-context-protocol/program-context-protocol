@@ -161,3 +161,12 @@ def status(project_path: str | None, rescan: bool, print_only: bool, pm_mode: bo
     score = complete / total if total else 0.0
     color = "green" if score >= 0.8 else "yellow" if score >= 0.5 else "red"
     console.print(f"[{color}]{complete}/{total} ({score:.0%})[/{color}]  →  pcp.md")
+
+    # Escalation-acknowledgment watchdog — an escalation recorded but never
+    # acted on must stay loudly visible, not buried in escalations.yaml.
+    from pcp import escalations
+    for e in escalations.find_stale(pcp_dir):
+        console.print(
+            f"[red bold]STALE ESCALATION:[/red bold] {e.get('module')}/{e.get('criterion_id')} "
+            f"escalated {e.get('age_hours')}h ago, criterion still pending — needs a human."
+        )

@@ -103,12 +103,50 @@ def check_deploy_health(health_url: str | None) -> bool | None:
 
 
 def notify(message: str) -> None:
+    """Send via slack-notify if available; NEVER fail silently. A delivery
+    failure downgrading to console-only without saying so is a lived incident
+    class here (an SSL cert error once silently fell back to log-only and a
+    security STOP sat unread for 8 days) — if delivery fails, say so loudly
+    so the console record itself shows the human was probably NOT reached."""
+    delivered = False
     if shutil.which("slack-notify"):
         try:
-            subprocess.run(["slack-notify", message], capture_output=True, text=True, timeout=15)
+            result = subprocess.run(["slack-notify", message], capture_output=True, text=True, timeout=15)
+            delivered = result.returncode == 0
+            if not delivered:
+                console.print(
+                    f"[red bold]Notification delivery FAILED[/red bold] "
+                    f"(slack-notify exit {result.returncode}: {(result.stderr or result.stdout).strip()[:200]}) "
+                    "— message below reached the console ONLY, a human has likely not seen it."
+                )
         except subprocess.TimeoutExpired:
-            pass
+            console.print(
+                "[red bold]Notification delivery FAILED[/red bold] (slack-notify timed out) "
+                "— message below reached the console ONLY, a human has likely not seen it."
+            )
     console.print(f"[dim]Notify: {message}[/dim]")
+
+
+def check_stale_escalations(pcp_dir: Path, already_reported: set) -> None:
+    """Escalation-acknowledgment watchdog: an escalation recorded but never
+    acted on (criterion still pending past PCP_ESCALATION_STALE_HOURS,
+    default 24h) gets re-surfaced — recording an escalation is not the same
+    fact as a human having seen it. Each stale entry is re-notified once per
+    watch run, not once per poll (notification fatigue is its own failure
+    mode: a team trained to ignore pings misses the real one)."""
+    from pcp import escalations
+    for e in escalations.find_stale(pcp_dir):
+        key = (e.get("module"), e.get("criterion_id"), e.get("timestamp"))
+        if key in already_reported:
+            continue
+        already_reported.add(key)
+        msg = (
+            f"pcp watch: STALE ESCALATION — {e.get('module')}/{e.get('criterion_id')} "
+            f"escalated {e.get('age_hours')}h ago and its criterion is still pending. "
+            "No human appears to have acted on it."
+        )
+        console.print(f"[red bold]{msg}[/red bold]")
+        notify(msg)
 
 
 def attempt_auto_fix(pcp_dir: Path, failure_context: str, session_id: str, is_first_attempt: bool) -> bool:
@@ -126,8 +164,20 @@ def attempt_auto_fix(pcp_dir: Path, failure_context: str, session_id: str, is_fi
     Returns True if the agent ran without a process-level error — not a
     guarantee the fix worked, the next poll cycle re-checks CI for that."""
     prompt = (
-        "A CI run failed on this repository. Diagnose the failure from the log below, "
-        "fix the underlying issue, commit, and push to the current branch. "
+        "A CI run failed on this repository. FIRST classify the failure from the log below "
+        "as exactly one of: CODE (a real defect in application/test logic), FLAKY (test "
+        "passes/fails non-deterministically — timing, ordering, network, shared state), or "
+        "INFRA (runner/tooling/dependency-resolution problem outside the code). State the "
+        "classification and your evidence for it before doing anything else.\n"
+        "- CODE: fix the underlying defect, commit, and push to the current branch.\n"
+        "- FLAKY: do NOT patch application code to make the symptom go away — masking an "
+        "unreliable test with application changes creates debt and hides the real problem. "
+        "Quarantine the test instead (mark it skipped/xfail with a comment naming the "
+        "flakiness evidence), commit that, and say clearly a human needs to fix the test's "
+        "underlying non-determinism.\n"
+        "- INFRA: do NOT change application code. Fix the workflow/tooling config only if "
+        "the cause is unambiguous from the log; otherwise change nothing and report what "
+        "you found.\n"
         "Follow this project's CLAUDE.md and ci_rules.yaml.\n\n"
         f"## CI Failure Log\n```\n{failure_context}\n```\n"
     )
@@ -156,7 +206,11 @@ def attempt_auto_fix(pcp_dir: Path, failure_context: str, session_id: str, is_fi
 @click.option("--interval", default=DEFAULT_INTERVAL, show_default=True, help="Poll interval in seconds.")
 @click.option("--once", is_flag=True, help="Single pass, no loop/sleep — for testing or one-shot checks.")
 @click.option("--max-iterations", default=None, type=int, help="Stop after N polls (default: PCP_WATCH_MAX_ITERATIONS env or 200).")
-def watch(project_path: str | None, interval: int, once: bool, max_iterations: int | None):
+@click.option("--report-only", is_flag=True,
+              help="Report + notify on failures but never spawn a fix agent. Recommended first "
+                   "phase on a new project — measure diagnosis signal quality before granting "
+                   "auto-fix. Also enabled via PCP_WATCH_REPORT_ONLY=1.")
+def watch(project_path: str | None, interval: int, once: bool, max_iterations: int | None, report_only: bool):
     """Continuously monitor CI + deploy health, auto-diagnose and fix failures."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
@@ -175,6 +229,10 @@ def watch(project_path: str | None, interval: int, once: bool, max_iterations: i
         console.print("[dim]Run `pcp doctor` to configure a deploy health-check URL.[/dim]")
         sys.exit(0)
 
+    report_only = report_only or os.environ.get("PCP_WATCH_REPORT_ONLY", "") in ("1", "true", "yes")
+    if report_only:
+        console.print("[cyan]Report-only mode: failures will be reported/notified, no fix agent will be spawned.[/cyan]")
+
     max_iterations = max_iterations or _default_max_iterations()
     max_consecutive_fixes = _max_consecutive_auto_fix_attempts()
     last_seen_run_id = None
@@ -182,6 +240,7 @@ def watch(project_path: str | None, interval: int, once: bool, max_iterations: i
     consecutive_fix_attempts = 0
     auto_fix_disabled = False
     fix_session_id = None
+    stale_escalations_reported: set = set()
 
     while True:
         iteration += 1
@@ -192,7 +251,9 @@ def watch(project_path: str | None, interval: int, once: bool, max_iterations: i
             last_seen_run_id = run.get("databaseId")
             if run.get("status") == "completed" and run.get("conclusion") not in ("success", None):
                 console.print(f"[red]CI run failed:[/red] {run.get('name')} — {run.get('url')}")
-                if auto_fix_disabled:
+                if report_only:
+                    notify(f"pcp watch (report-only): CI run failed — {run.get('name')} {run.get('url')}")
+                elif auto_fix_disabled:
                     notify(f"pcp watch: CI still failing after {max_consecutive_fixes} auto-fix attempts — auto-fix paused, needs human attention. {run.get('url')}")
                 else:
                     logs = get_failed_logs(project_root, run["databaseId"])
@@ -217,6 +278,8 @@ def watch(project_path: str | None, interval: int, once: bool, max_iterations: i
                 consecutive_fix_attempts = 0
                 auto_fix_disabled = False
                 fix_session_id = None
+
+        check_stale_escalations(pcp_dir, stale_escalations_reported)
 
         if health_url:
             healthy = check_deploy_health(health_url)

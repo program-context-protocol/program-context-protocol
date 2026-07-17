@@ -1150,6 +1150,99 @@ def _run_build_vs_buy_justification_check(pcp_dir: Path, mod: dict, criterion: d
     return findings
 
 
+_TEST_PATH_SEGMENTS = ("tests", "test", "__tests__", "spec", "specs")
+
+
+def _is_test_file(path: str) -> bool:
+    parts = Path(path).parts
+    if any(seg in _TEST_PATH_SEGMENTS for seg in parts[:-1]):
+        return True
+    name = Path(path).name.lower()
+    return (
+        name.startswith("test_") or name == "conftest.py"
+        or "_test." in name or ".test." in name or ".spec." in name
+    )
+
+
+def _scope_mode() -> str:
+    """PCP_BUILD_SCOPE_MODE: warn (default) | block | off. Ships warn-first
+    deliberately -- the same L1-report-only-before-L2-enforcement rollout
+    discipline PCP recommends for any new automated gate: measure the
+    false-positive rate on real builds (legit cross-cutting writes like a
+    module registry exist) before letting it cost retry attempts."""
+    mode = os.environ.get("PCP_BUILD_SCOPE_MODE", "warn").lower()
+    return mode if mode in ("warn", "block", "off") else "warn"
+
+
+def _scope_allowlist_violations(mod: dict, criterion: dict, changed_files: list[str]) -> list[str]:
+    """Deterministic over-reach check (no LLM): which changed files fall
+    outside what this criterion could legitimately touch? Allowed:
+    - any `target` file declared by ANY criterion in this module (the module's
+      own declared surface, not just this one criterion's file)
+    - anything under .pcp/strategy/modules/<module>/ (the agent legitimately
+      writes design_justification back into its own acceptance.yaml)
+    - .pcp/design_system.md (first UI criterion establishes it)
+    - test files (TDD is mandatory -- tests are always in scope)
+    """
+    module_name = mod["name"]
+    try:
+        all_criteria = load_yaml(mod["acc_path"]).get("criteria", [])
+    except Exception:
+        all_criteria = mod.get("pending_criteria", [])
+    declared_targets = {c.get("target") for c in all_criteria if c.get("target")}
+    if criterion.get("target"):
+        declared_targets.add(criterion["target"])
+    module_prefix = f".pcp/strategy/modules/{module_name}/"
+
+    violations = []
+    for f in changed_files:
+        norm = f.replace("\\", "/").removeprefix("./")
+        if norm in declared_targets:
+            continue
+        if norm.startswith(module_prefix) or norm == ".pcp/design_system.md":
+            continue
+        if _is_test_file(norm):
+            continue
+        violations.append(norm)
+    return violations
+
+
+def _run_scope_check(pcp_dir: Path, mod: dict, criterion: dict, changed_files: list[str], ctx: dict) -> list[str]:
+    """Over-reach guard (CTRL-018): a criterion agent writing files outside
+    its module's declared surface is the "loop touches unrelated code"
+    failure mode -- PCP had a denylist (protected_path) but no allowlist
+    until now. Warn-only by default (see _scope_mode); PCP_BUILD_SCOPE_MODE=
+    block returns the finding into block_findings so it costs the attempt."""
+    mode = _scope_mode()
+    if mode == "off":
+        # Disabled by a human -- still visible in the audit trail as skipped,
+        # never silently indistinguishable from "ran clean".
+        _qa_record(pcp_dir, ctx, "build-scope", [], control_id="CTRL-018", result="skipped")
+        return []
+
+    out_of_scope = _scope_allowlist_violations(mod, criterion, changed_files)
+    findings = []
+    if out_of_scope:
+        findings.append(
+            f"Scope Guard [CTRL-018]: agent modified {len(out_of_scope)} file(s) outside "
+            f"module '{mod['name']}'s declared surface (criterion targets, module spec dir, "
+            f"tests): {', '.join(out_of_scope[:8])}"
+            + (" …" if len(out_of_scope) > 8 else "")
+        )
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "build-scope",
+        "\n".join(out_of_scope) if out_of_scope else "all changed files within declared scope",
+    )
+    _qa_record(
+        pcp_dir, ctx, "build-scope", findings, control_id="CTRL-018", tool="git-diff",
+        evidence_path=evidence_path,
+    )
+    if findings and mode == "warn":
+        console.print(f"[yellow]Scope guard (advisory):[/yellow] {findings[0]}")
+        return []
+    return findings
+
+
 def _record_escalation(pcp_dir: Path, module_name: str, criterion_id: str, block_findings: list[str]) -> None:
     """Route this criterion's final-attempt failure through OPA's escalation
     policy (.pcp/policies/escalation.rego) -- advisory only, doesn't change
@@ -1160,8 +1253,17 @@ def _record_escalation(pcp_dir: Path, module_name: str, criterion_id: str, block
     those should never be treated as routine, low-stakes retries.
 
     Degrades silently if opa isn't installed or no escalation.rego is
-    scaffolded -- this is informational, never a hard dependency on OPA."""
-    from pcp import policy
+    scaffolded -- this is informational, never a hard dependency on OPA.
+
+    Regardless of OPA availability, the escalation itself is appended to
+    .pcp/escalations.yaml -- the staleness watchdog (escalations.find_stale,
+    surfaced by `pcp watch` and `pcp status`) needs a ledger that exists on
+    every project, not only ones with opa installed. Recording an escalation
+    and a human actually seeing it are different facts; the ledger is what
+    lets the second one be checked."""
+    from pcp import escalations, policy
+
+    escalations.record(pcp_dir, module_name, criterion_id, findings=block_findings)
     gate_categories = 6  # test-suite, lint, sast, layer1, architect-review, gate
     distinct_violations = len(block_findings)
     confidence_score = max(0.0, 1.0 - (distinct_violations / gate_categories))
@@ -1338,6 +1440,7 @@ def _build_one_criterion(
         violations_lint = _run_lint_check(pcp_dir, project_root, changed_files, ctx)
         violations_sast = _run_sast_check(pcp_dir, project_root, changed_files, ctx)
         violations_l1 = _run_layer1_check(pcp_dir, project_root, changed_files, ctx)
+        violations_scope = _run_scope_check(pcp_dir, mod, c, changed_files, ctx)
         violations_arch = _run_architect_review(pcp_dir, diff, changed_files, ctx)
         violations_gate = _run_gate_check(pcp_dir, diff, ctx)
         _run_design_consistency_check(pcp_dir, project_root, c, ctx)
@@ -1346,7 +1449,7 @@ def _build_one_criterion(
 
         block_findings = (
             violations_tests + violations_lint + violations_sast
-            + violations_l1 + violations_arch + violations_gate
+            + violations_l1 + violations_scope + violations_arch + violations_gate
             + violations_design_justification + violations_bvb_justification
         )
 

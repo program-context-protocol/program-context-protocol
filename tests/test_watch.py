@@ -186,6 +186,90 @@ def test_session_id_resets_to_fresh_after_ci_success(tmp_path):
     assert mock_fix.call_args_list[1].args[3] is True  # fresh session again, not resumed
 
 
+# ── report-only mode (L1 phased rollout) ──
+
+def test_report_only_flag_never_spawns_fix_agent(tmp_path):
+    _init_pcp(tmp_path)
+    run = {"databaseId": 1, "status": "completed", "conclusion": "failure", "name": "CI", "url": "http://x"}
+    with patch("pcp.commands.watch.shutil.which", return_value="/usr/bin/gh"), \
+            patch("pcp.commands.watch.check_environment"), \
+            patch("pcp.commands.watch.notify") as mock_notify, \
+            patch("pcp.commands.watch.attempt_auto_fix") as mock_fix, \
+            patch("pcp.commands.watch.get_latest_ci_run", return_value=run):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["watch", "--path", str(tmp_path), "--once", "--report-only"])
+    assert result.exit_code == 0
+    mock_fix.assert_not_called()
+    assert any("report-only" in c.args[0] for c in mock_notify.call_args_list)
+
+
+def test_report_only_env_var(tmp_path, monkeypatch):
+    monkeypatch.setenv("PCP_WATCH_REPORT_ONLY", "1")
+    _init_pcp(tmp_path)
+    run = {"databaseId": 1, "status": "completed", "conclusion": "failure", "name": "CI", "url": "http://x"}
+    with patch("pcp.commands.watch.shutil.which", return_value="/usr/bin/gh"), \
+            patch("pcp.commands.watch.check_environment"), \
+            patch("pcp.commands.watch.notify"), \
+            patch("pcp.commands.watch.attempt_auto_fix") as mock_fix, \
+            patch("pcp.commands.watch.get_latest_ci_run", return_value=run):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["watch", "--path", str(tmp_path), "--once"])
+    assert result.exit_code == 0
+    mock_fix.assert_not_called()
+    assert "Report-only mode" in result.output
+
+
+# ── notify: delivery failure must be loud, never silent ──
+
+def test_notify_surfaces_slack_delivery_failure(capsys):
+    from pcp.commands.watch import notify
+    with patch("pcp.commands.watch.shutil.which", return_value="/usr/bin/slack-notify"), \
+            patch("pcp.commands.watch.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stderr="ssl cert error", stdout="")
+        notify("hello")
+    out = " ".join(capsys.readouterr().out.split())  # rich may wrap lines
+    assert "Notification delivery FAILED" in out
+    assert "console ONLY" in out
+
+
+def test_notify_quiet_on_successful_delivery(capsys):
+    from pcp.commands.watch import notify
+    with patch("pcp.commands.watch.shutil.which", return_value="/usr/bin/slack-notify"), \
+            patch("pcp.commands.watch.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="ok")
+        notify("hello")
+    out = capsys.readouterr().out
+    assert "FAILED" not in out
+
+
+# ── flaky-test classification in the auto-fix prompt ──
+
+def test_auto_fix_prompt_requires_failure_classification(tmp_path):
+    with patch("pcp.commands.watch.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        attempt_auto_fix(tmp_path / ".pcp", "log", "abc-123", True)
+    prompt = mock_run.call_args.kwargs["input"]
+    assert "FLAKY" in prompt
+    assert "INFRA" in prompt
+    assert "Quarantine" in prompt
+    assert "do NOT patch application code" in prompt
+
+
+# ── stale-escalation watchdog ──
+
+def test_stale_escalation_surfaced_once_per_run(tmp_path):
+    from pcp.commands.watch import check_stale_escalations
+    pcp_dir = _init_pcp(tmp_path)
+    stale_entry = {"module": "auth", "criterion_id": "A1", "timestamp": "2026-01-01T00:00:00Z", "age_hours": 99.0}
+    reported = set()
+    with patch("pcp.escalations.find_stale", return_value=[stale_entry]), \
+            patch("pcp.commands.watch.notify") as mock_notify:
+        check_stale_escalations(pcp_dir, reported)
+        check_stale_escalations(pcp_dir, reported)  # second poll, same entry
+    assert mock_notify.call_count == 1
+    assert "STALE ESCALATION" in mock_notify.call_args[0][0]
+
+
 def test_deploy_health_check_failure_notifies(tmp_path):
     pcp_dir = _init_pcp(tmp_path)
     with patch("pcp.commands.watch.shutil.which", return_value=None), \

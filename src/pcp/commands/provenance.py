@@ -45,6 +45,7 @@ CHECK_TO_CONTROL = {
     "wave-contract": "CTRL-007",
     "wave-validate-strategy": "CTRL-008",
     "deploy-phase-exit": "CTRL-009",
+    "build-scope": "CTRL-018",
 }
 
 

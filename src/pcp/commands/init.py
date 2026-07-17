@@ -261,7 +261,7 @@ controls:
 
   - id: CTRL-013
     name: "Design consistency check"
-    layer: build
+    layer: build-loop
     mechanism: "build.py _run_design_consistency_check()"
     tool: "n/a — deterministic regex, no external tool"
     enforcement: advisory
@@ -279,7 +279,7 @@ controls:
 
   - id: CTRL-015
     name: "design_justification substance check"
-    layer: build
+    layer: build-loop
     mechanism: "build.py _run_design_justification_check(), JUDGE_MODEL + adversarial verify"
     tool: "LLM judge (JUDGE_MODEL)"
     enforcement: hard_block
@@ -297,12 +297,21 @@ controls:
 
   - id: CTRL-017
     name: "build_vs_buy rationale substance check"
-    layer: build
+    layer: build-loop
     mechanism: "build.py _run_build_vs_buy_justification_check(), deterministic placeholder/word-count check"
     tool: "n/a — deterministic regex/word-count, no external tool"
     enforcement: hard_block
     description: "Structural-forcing for build_vs_buy, same enforcement posture design_justification (CTRL-015) already gets — build_vs_buy's rationale is schema-required to be present but was never checked for substance, so a placeholder string like the literal unfilled prompt template text passed validation as a real decision. Deterministic, not an LLM judge call: unlike design_justification (UI-facing criteria only), build_vs_buy is required on EVERY criterion, so an LLM call here on every attempt would violate Token Discipline for a field that mostly just needs a placeholder-text check, not genuine semantic judgment."
     ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-018
+    name: "Build-agent scope guard (over-reach allowlist)"
+    layer: build-loop
+    mechanism: "build.py _run_scope_check() — git-diff changed files vs the module's declared surface (all criterion target files, .pcp/strategy/modules/<module>/, .pcp/design_system.md, test files)"
+    tool: "n/a — deterministic path matching over git diff, no external tool"
+    enforcement: advisory
+    description: "Over-reach guard: a criterion agent modifying files outside its own module's declared surface is the classic unattended-loop failure mode (loop touches unrelated code). PCP had a denylist (protected_path) but no allowlist until now. Warn-only by default — legitimate cross-cutting writes exist (module registries, shared interfaces), so the false-positive rate should be measured on real builds before enforcement; PCP_BUILD_SCOPE_MODE=block upgrades it to a hard per-attempt gate, =off disables (recorded as skipped, never silently)."
+    ssdf_practice: ["PS.1.1", "PW.7.1"]
 """
 
 SDLC_PHASE_TEMPLATE = """\
