@@ -69,6 +69,17 @@ def telemetry_cmd(project_path: str | None, output_json: bool):
         total_cost += v["cost"]
 
     console.print(table)
+
+    # Worktree merge conflict rate — comparable against AgenticFlict's
+    # (arXiv:2604.03551) 27.67% agent-authored-PR conflict baseline.
+    merges = [r for r in records if r.get("check") == "worktree-merge"]
+    if merges:
+        conflicts = sum(1 for r in merges if r.get("result") == "block")
+        console.print(
+            f"[dim]Worktree merges: {len(merges)}, conflicts: {conflicts} "
+            f"({conflicts / len(merges):.0%}) — agentic-PR literature baseline 27.67% (AgenticFlict)[/dim]"
+        )
+
     console.print(
         f"\n[dim]{len(records)} total records — {len(agg['build_records'])} build, "
         f"{len(agg['qa_records'])} qa — total cost ~${total_cost:.2f}[/dim]"

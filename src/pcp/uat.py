@@ -123,4 +123,28 @@ def check_visual(url: str, screenshot_path: Path | None = None) -> tuple[bool | 
     detail = f"{url} rendered successfully in a headless browser"
     if screenshot_path:
         detail += f" -- screenshot: {screenshot_path}"
+        detail += _baseline_note(screenshot_path)
     return True, detail
+
+
+def _baseline_note(screenshot_path: Path) -> str:
+    """Baseline comparison (Chromatic reference pattern, 2026-07-17, build
+    plan 3.5) — closes part of check_visual's own stated 'not visual
+    regression testing' gap. First successful capture becomes the baseline
+    (`<name>_baseline.png`); later captures are compared by content hash.
+    HONEST SCOPE: hash inequality means "pixels changed since the accepted
+    baseline", not "layout broke" — a changed screenshot is a review signal,
+    never a failure. Accept a new baseline by deleting the old one."""
+    import hashlib
+    baseline = screenshot_path.with_name(screenshot_path.stem + "_baseline.png")
+    try:
+        current = hashlib.sha256(screenshot_path.read_bytes()).hexdigest()
+        if not baseline.exists():
+            baseline.write_bytes(screenshot_path.read_bytes())
+            return " -- baseline established (first capture)"
+        if hashlib.sha256(baseline.read_bytes()).hexdigest() == current:
+            return " -- matches accepted baseline"
+        return (f" -- CHANGED vs accepted baseline ({baseline.name}); review the two "
+                "screenshots and delete the baseline to accept the new look")
+    except OSError as e:
+        return f" -- baseline comparison skipped: {e}"

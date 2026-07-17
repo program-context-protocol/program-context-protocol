@@ -278,6 +278,21 @@ def scan(project_path: str | None, quiet: bool, with_coverage: bool):
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     out_path = _write_current_state(pcp_dir, modules_results, timestamp, coverage)
 
+    # Per-symbol fingerprint churn (build plan 3.4): symbol-level, not
+    # file-level, change signal — "file touched but relevant symbol
+    # unchanged" stops counting as drift noise.
+    try:
+        from pcp import symbols
+        delta = symbols.update_fingerprints(pcp_dir)
+        n_changed = len(delta["changed"])
+        if not quiet and (n_changed or delta["added"] or delta["removed"]):
+            console.print(
+                f"[dim]Symbols since last scan: {n_changed} changed, "
+                f"{len(delta['added'])} added, {len(delta['removed'])} removed[/dim]"
+            )
+    except Exception:
+        pass
+
     total = sum(len(m["criteria"]) for m in modules_results)
     complete = sum(1 for m in modules_results for c in m["criteria"] if c["status"] == "complete")
 

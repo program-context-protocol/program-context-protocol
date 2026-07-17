@@ -7,6 +7,7 @@ CI use, deliberately not the default). Extra scrutiny if migration/PII/payment
 -flavoured criteria are detected in this release.
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -154,7 +155,23 @@ def deploy(project_path: str | None, yes: bool, rollout: str):
     if deploy_ok and health_url:
         console.print("[dim]Waiting 10s before smoke test...[/dim]")
         time.sleep(10)
-        smoke_result = check_deploy_health(health_url)
+        # Multi-sample smoke (build plan 3.6 — the Argo/Flagger/LaunchDarkly
+        # baseline gates on error RATE over a window, not one boolean probe;
+        # a single check catches only total outage, not a flapping deploy).
+        # N samples over an interval; more than max_failures failed samples
+        # fails the smoke test. Defaults keep the old behavior cheap-ish:
+        # 3 samples, 5s apart, zero failures tolerated.
+        samples = int(os.environ.get("PCP_DEPLOY_SMOKE_SAMPLES", "3"))
+        interval_s = float(os.environ.get("PCP_DEPLOY_SMOKE_INTERVAL_SEC", "5"))
+        max_failures = int(os.environ.get("PCP_DEPLOY_SMOKE_MAX_FAILURES", "0"))
+        failures = 0
+        for i in range(max(samples, 1)):
+            if i:
+                time.sleep(interval_s)
+            if check_deploy_health(health_url) is not True:
+                failures += 1
+        smoke_result = failures <= max_failures
+        console.print(f"[dim]Smoke: {samples - failures}/{samples} samples healthy (tolerance {max_failures}).[/dim]")
         if smoke_result:
             console.print("[green]✓ Smoke test passed.[/green]")
         else:

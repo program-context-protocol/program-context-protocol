@@ -274,13 +274,27 @@ def _setup_worktree(project_root: Path, module_name: str) -> Path:
     return wt_path
 
 
-def _merge_module_branch(project_root: Path, module_name: str) -> tuple[bool, str]:
+def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | None = None) -> tuple[bool, str]:
     branch = f"feat/{module_name}"
     result = subprocess.run(
         ["git", "merge", "--no-ff", branch, "-m", f"Merge {branch}"],
         cwd=project_root, capture_output=True, text=True,
     )
-    return result.returncode == 0, (result.stdout + result.stderr)
+    ok = result.returncode == 0
+    # Conflict-rate telemetry (2026-07-17): AgenticFlict (arXiv:2604.03551)
+    # measured a 27.67% merge-conflict baseline for agent-authored PRs; PCP's
+    # worktree-isolated wave merges should beat that, and now the data to
+    # prove/refute it accumulates — `pcp telemetry` reports the rate.
+    if pcp_dir is not None:
+        with _STATE_LOCK:
+            telemetry.record(
+                pcp_dir, cycle="qa", cycle_number=None, check="worktree-merge", control_id=None,
+                module=module_name, submodule=None, criterion_id=None, files=[],
+                result="pass" if ok else "block",
+                errors=[] if ok else [(result.stdout + result.stderr)[-500:]],
+                error_count=0 if ok else 1,
+            )
+    return ok, (result.stdout + result.stderr)
 
 
 def _cleanup_worktree(project_root: Path, module_name: str, wt_path: Path) -> None:
@@ -1058,14 +1072,43 @@ def _verify_block_findings(
         return findings, pre_dropped
 
     verdicts = {v.get("index"): v for v in res.get("verdicts", []) if isinstance(v, dict)}
+
+    # Opt-in two-verifier ensemble (FUSE, arXiv:2604.18547; disagreement-as-
+    # signal rather than majority-silencing). Second verifier gets an
+    # INVERTED framing (confirm, don't refute) — prompt-level decorrelation.
+    # A finding is dropped only when BOTH agree it's ungrounded; disagreement
+    # keeps the finding, tagged, so the retry agent (and telemetry) see that
+    # verification was contested. PCP_VERIFIER_ENSEMBLE=1 to enable — one
+    # extra call per check, only on BLOCK findings.
+    verdicts2: dict = {}
+    if os.environ.get("PCP_VERIFIER_ENSEMBLE") == "1":
+        confirm_system = (
+            "You are a supportive verifier for code-review findings: for each GIVEN finding, "
+            "try to CONFIRM it against the diff. Mark refuted=true only if you find clear "
+            "evidence the finding is wrong or refers to code not present."
+        )
+        try:
+            res2, _ = llm.call_json(
+                confirm_system, prompt, model=verifier_model, pcp_dir=pcp_dir,
+                command=f"build-{check}-verify2", return_meta=True,
+            )
+            verdicts2 = {v.get("index"): v for v in res2.get("verdicts", []) if isinstance(v, dict)}
+        except Exception:
+            verdicts2 = {}
+
     kept: list[str] = []
     dropped: list[str] = list(pre_dropped)
     for i, f in enumerate(findings):
         v = verdicts.get(i)
-        if v and v.get("refuted"):
-            dropped.append(f"{f}  [dropped by verifier: {v.get('reason', '(no reason given)')}]")
-        else:
+        refuted1 = bool(v and v.get("refuted"))
+        if not refuted1:
             kept.append(f)
+            continue
+        v2 = verdicts2.get(i)
+        if v2 is not None and not v2.get("refuted"):
+            kept.append(f"{f}  [verifier disagreement — kept, contested]")
+        else:
+            dropped.append(f"{f}  [dropped by verifier: {(v or {}).get('reason', '(no reason given)')}]")
 
     evidence_path = evidence.store(
         pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], f"{check}-verify",
@@ -1531,6 +1574,45 @@ def _record_escalation(pcp_dir: Path, module_name: str, criterion_id: str, block
         )
 
 
+_COMPLEXITY_KEYWORDS = (
+    "integrat", "concurren", "parallel", "migrat", "auth", "encrypt", "distributed",
+    "real-time", "realtime", "websocket", "transaction", "cache invalidat", "state machine",
+)
+
+
+def _complexity_route(pcp_dir: Path, mod: dict, c: dict) -> tuple[bool, dict]:
+    """Deterministic pre-attempt-1 complexity signal (2026-07-17). Routing
+    beats cascading — a cascade pays the cheap model's cost BEFORE the
+    escalation decision ("Is Escalation Worth It?", arXiv:2605.06350) — but
+    PCP has no learned router yet, so this is a rung-1 heuristic: description
+    length, complexity keywords, module dependency count, and this module's
+    own historical retry rate from telemetry (bandit-ish: only outcomes PCP
+    actually observed, the BaRP framing).
+
+    REPORT-FIRST rollout (standing rule): by default this only records what
+    it WOULD do (telemetry check="complexity-route", result="pass"); routing
+    only takes effect with PCP_COMPLEXITY_ROUTING=1. Returns
+    (route_to_escalation_model, signal_dict)."""
+    desc = c.get("description", "")
+    score = 0.0
+    if len(desc) > 200:
+        score += 1
+    hits = [k for k in _COMPLEXITY_KEYWORDS if k in desc.lower()]
+    score += min(len(hits), 3)
+    deps = (mod.get("spec") or {}).get("dependencies") or []
+    if len(deps) >= 2:
+        score += 1
+    # historical: this module's build records — retries per criterion
+    module_builds = [r for r in telemetry.load(pcp_dir)
+                     if r.get("cycle") == "build" and r.get("module") == mod["name"]]
+    retries = sum(1 for r in module_builds if (r.get("cycle_number") or 1) > 1)
+    if module_builds and retries / max(len(module_builds), 1) > 0.4:
+        score += 2
+    route = score >= 3
+    return route, {"score": score, "keyword_hits": hits, "deps": len(deps),
+                   "module_retry_ratio": round(retries / max(len(module_builds), 1), 2) if module_builds else 0.0}
+
+
 def _build_one_criterion(
     pcp_dir: Path, project_root: Path, mod: dict, c: dict,
     build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
@@ -1552,6 +1634,22 @@ def _build_one_criterion(
     # Everything the agent does this criterion — committed or not — is
     # measured against this ref, so committing can't hide work from gates.
     criterion_start_ref = _git_head(project_root)
+
+    # Complexity routing (report-first; see _complexity_route). Never
+    # overrides an explicit human PCP_BUILD_MODEL.
+    route_up, route_signal = _complexity_route(pcp_dir, mod, c)
+    routing_active = os.environ.get("PCP_COMPLEXITY_ROUTING") == "1"
+    with _STATE_LOCK:
+        telemetry.record(
+            pcp_dir, cycle="qa", cycle_number=0, check="complexity-route", control_id=None,
+            module=mod["name"], submodule=None, criterion_id=c["id"], files=[],
+            result="pass",
+            errors=[f"would_route_to_escalation_model={route_up} active={routing_active} signal={route_signal}"],
+            error_count=0,
+        )
+    if route_up and routing_active and not build_model_explicit:
+        console.print(f"[dim]Complexity routing: starting on {llm.ESCALATION_MODEL} (signal {route_signal['score']}).[/dim]")
+        build_model = llm.ESCALATION_MODEL
 
     for attempt in range(1, 4):
         console.print(f"\n[dim]Attempt {attempt}/3 — {mod['name']}/{c['id']}...[/dim]")
@@ -1848,7 +1946,7 @@ def _build_module_worker(
             cid = c["id"]
             success, block_findings = results.get(cid, (False, ["no result — worker crashed"]))
             if success:
-                ok, merge_output = _merge_module_branch(project_root, units[cid])
+                ok, merge_output = _merge_module_branch(project_root, units[cid], pcp_dir=pcp_dir)
                 if ok:
                     _cleanup_worktree(project_root, units[cid], worktrees[cid])
                     console.print(f"[green]✓ Criterion [{cid}] passed all gates successfully![/green]")
@@ -2000,7 +2098,7 @@ def build(module_name: str | None, project_path: str | None):
                 m_name = mod["name"]
                 result = results.get(m_name, {"success": False})
                 if result["success"]:
-                    ok, merge_output = _merge_module_branch(project_root, m_name)
+                    ok, merge_output = _merge_module_branch(project_root, m_name, pcp_dir=pcp_dir)
                     if ok:
                         _cleanup_worktree(project_root, m_name, worktrees[m_name])
                     else:
