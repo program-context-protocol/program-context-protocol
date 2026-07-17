@@ -65,7 +65,45 @@ def _run_audit(project_root: Path) -> dict:
     return {"tool": None, "findings": []}
 
 
-def _write_audit_md(pcp_dir: Path, result: dict, timestamp: str) -> Path:
+def _source_metrics(project_root: Path) -> dict:
+    """Cheap erosion proxies: total source lines + file count for the primary
+    source tree. Deterministic, tool-free."""
+    target = _detect_python_src(project_root) or project_root
+    total_lines = files = 0
+    for p in target.rglob("*.py"):
+        if any(seg in p.parts for seg in ("__pycache__", ".venv", "venv", "node_modules", ".pcp")):
+            continue
+        try:
+            total_lines += sum(1 for _ in open(p, errors="replace"))
+            files += 1
+        except OSError:
+            continue
+    return {"source_lines": total_lines, "source_files": files}
+
+
+def _append_trend(pcp_dir: Path, timestamp: str, result: dict, metrics: dict) -> list[dict]:
+    """Erosion TREND, not snapshot (SlopCodeBench, arXiv:2603.24755: structural
+    erosion is the default trajectory of iterative agentic coding — 77% of
+    trajectories — so a single audit run can look fine while the slope is
+    bad). Plain JSONL, operational record."""
+    import json
+    path = pcp_dir / "audit_trend.jsonl"
+    entry = {
+        "timestamp": timestamp, "tool": result["tool"],
+        "findings": len(result["findings"]), **metrics,
+    }
+    with open(path, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    rows = []
+    for line in path.read_text().splitlines():
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def _write_audit_md(pcp_dir: Path, result: dict, timestamp: str, trend: list[dict] | None = None) -> Path:
     tool = result["tool"]
     findings = result["findings"]
     lines = [
@@ -96,6 +134,20 @@ def _write_audit_md(pcp_dir: Path, result: dict, timestamp: str) -> Path:
                 lines.append(f"- _...and {len(findings) - MAX_FINDINGS_SHOWN} more (see full tool output)_")
         else:
             lines.append("_No findings._")
+
+    if trend and len(trend) >= 2:
+        lines += ["", "## Erosion Trend (last runs)", "",
+                  "| When | Findings | Source lines | Files |", "|---|---|---|---|"]
+        for row in trend[-8:]:
+            lines.append(f"| {row.get('timestamp', '')} | {row.get('findings', '')} | "
+                         f"{row.get('source_lines', '')} | {row.get('source_files', '')} |")
+        first, last = trend[0], trend[-1]
+        if last.get("source_lines") and first.get("source_lines"):
+            growth = last["source_lines"] / max(first["source_lines"], 1)
+            lines += ["", f"Source growth since first audit: {growth:.2f}x lines; "
+                          f"dead-code findings {first.get('findings', 0)} → {last.get('findings', 0)}. "
+                          "Rising findings alongside faster-than-feature line growth is the erosion signature "
+                          "(SlopCodeBench: default trajectory of iterative agentic coding, not an edge case)."]
     lines.append("")
     out = pcp_dir / "audit.md"
     out.write_text("\n".join(lines))
@@ -117,7 +169,9 @@ def audit(project_path: str | None, quiet: bool):
     project_root = pcp_dir.parent
     result = _run_audit(project_root)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    out_path = _write_audit_md(pcp_dir, result, timestamp)
+    metrics = _source_metrics(project_root)
+    trend = _append_trend(pcp_dir, timestamp, result, metrics)
+    out_path = _write_audit_md(pcp_dir, result, timestamp, trend)
 
     if quiet:
         sys.exit(0)

@@ -100,6 +100,26 @@ def deploy(project_path: str | None, yes: bool, rollout: str):
 
     modules_dir = get_modules_dir(pcp_dir)
     risk_flags = collect_risk_flags(modules_dir)
+
+    # Deploy-time OPA policy (deploy_policy.rego — freeze windows, rollback
+    # requirements). Advisory infrastructure but its deny rules DO block:
+    # a policy a human wrote saying "don't deploy Fridays" means exactly that.
+    # Missing opa / missing policy file degrades silently, same as the other
+    # rego consumers.
+    from pcp import policy
+    decision = policy.evaluate(pcp_dir, "data.pcp.deploy.deny", {
+        "utc_weekday": datetime.now(timezone.utc).weekday(),
+        "risk_flag_count": len(risk_flags),
+        "rollback_configured": bool(rollback_command),
+    })
+    if decision.get("available") and not decision.get("undefined"):
+        denies = decision.get("value") or []
+        if denies:
+            for d in denies:
+                console.print(f"[red bold]Deploy policy DENY:[/red bold] {d}")
+            console.print("[dim]Edit .pcp/policies/deploy_policy.rego to change deploy-time policy.[/dim]")
+            sys.exit(1)
+
     if risk_flags:
         console.print("\n[yellow bold]Risk flags detected — review before approving:[/yellow bold]")
         for f in risk_flags:

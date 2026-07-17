@@ -124,6 +124,58 @@ def configure_context7(project_root: Path) -> bool:
     return True
 
 
+def _declared_tiers(pcp_dir: Path) -> set[int]:
+    tiers: set[int] = set()
+    modules_dir = pcp_dir / "strategy" / "modules"
+    if not modules_dir.exists():
+        return tiers
+    for acc in modules_dir.glob("*/acceptance.yaml"):
+        try:
+            data = yaml.safe_load(acc.read_text()) or {}
+        except yaml.YAMLError:
+            continue
+        for c in data.get("criteria", []):
+            tier = c.get("logic_tier")
+            if isinstance(tier, int):
+                tiers.add(tier)
+    return tiers
+
+
+def _project_mentions(project_root: Path, names: tuple[str, ...]) -> bool:
+    """Cheap check: any of these package names in requirements/pyproject/package.json."""
+    for fname in ("requirements.txt", "pyproject.toml", "package.json", "requirements-dev.txt"):
+        p = project_root / fname
+        if p.exists():
+            text = p.read_text(errors="replace").lower()
+            if any(n in text for n in names):
+                return True
+    return False
+
+
+def _rung_tooling_recommendations(pcp_dir: Path, project_root: Path) -> list[str]:
+    """Advisory lines for logic-tier declarations missing their standard
+    tooling. Deterministic, zero LLM."""
+    tiers = _declared_tiers(pcp_dir)
+    recs = []
+    if 6 in tiers and not _project_mentions(project_root, ("outlines", "instructor", "guardrails", "baml")):
+        recs.append(
+            "rung-6 (LLM) criteria declared but no structured-output library found "
+            "(outlines/instructor/guardrails/baml) — rung-6 outputs must be schema-validated; "
+            "Outlines (constrained decoding) or Instructor (typed retry) are the standard picks"
+        )
+    if 5 in tiers and not _project_mentions(project_root, ("gptcache", "redis", "litellm", "bifrost")):
+        recs.append(
+            "rung-5 (cached-reuse) criteria declared but no semantic-cache dependency found — "
+            "GPTCache successors: Bifrost (gateway-native), LiteLLM, RedisSemanticCache"
+        )
+    if 4 in tiers and not _project_mentions(project_root, ("semantic-router", "semantic_router", "chromadb", "faiss", "pinecone", "qdrant", "weaviate")):
+        recs.append(
+            "rung-4 (RAG) criteria declared but no retrieval dependency found — "
+            "semantic-router (pre-LLM intent routing) or a vector store (chroma/faiss/qdrant) expected"
+        )
+    return recs
+
+
 def load_integrations(pcp_dir: Path) -> dict:
     path = pcp_dir / "integrations.yaml"
     if not path.exists():
@@ -202,6 +254,15 @@ def doctor(project_path: str | None, check_only: bool):
         else "[dim]npx not found[/dim]"
     )
     console.print(f"Context7 (live library docs for `pcp build`'s coding agent): {c7_status}")
+
+    # Rung-aware tooling recommendations (2026-07-17): projects declaring
+    # rung-6 criteria should schema-validate LLM output with a real library
+    # (Outlines = constrained decoding, strongest guarantee; Instructor =
+    # typed-retry, most portable); rung 4/5 declarations get pointed at the
+    # mature reuse-whole options by name — same shape as the Context7 offer.
+    _rung_recs = _rung_tooling_recommendations(pcp_dir, project_root)
+    for line in _rung_recs:
+        console.print(f"[yellow]⚠[/yellow] {line}")
 
     # Agent-config surface audit (ECC AgentShield reference-pattern, scoped to
     # a deterministic scan): the config an agent executes FROM — settings

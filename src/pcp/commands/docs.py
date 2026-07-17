@@ -124,6 +124,28 @@ def _keyword_match(text: str, keywords: set[str]) -> bool:
     return any(kw in text_l for kw in keywords if kw)
 
 
+def _specificity_rank(items: list[dict], keywords: set[str]) -> list[dict]:
+    """Specificity reordering (deterministic half of T-SimCSE's trick,
+    arXiv:2603.11800): a match on a RARE keyword (appears in few BRD items)
+    is stronger evidence of real attribution than a match on a word half the
+    items contain. Rank matched items by summed inverse-document-frequency of
+    their matched keywords — no embeddings, no LLM, pure counting; the
+    embedding-similarity half of the technique is deliberately not built
+    (PCP's zero-API-key architecture has no embedding provider)."""
+    if not items:
+        return items
+    texts = [str(i.get("description", "")).lower() for i in items]
+    doc_freq = {kw: sum(1 for t in texts if kw in t) for kw in keywords if kw}
+    n = len(items)
+
+    def score(idx: int) -> float:
+        t = texts[idx]
+        return sum((n / doc_freq[kw]) for kw in doc_freq if doc_freq[kw] and kw in t)
+
+    order = sorted(range(n), key=score, reverse=True)
+    return [items[i] for i in order]
+
+
 def _compute_drift_score(timeline: list[dict], build_records: list[dict], bypass_count: int) -> dict:
     """Promotes the visual-adjacency signal this doc kit already showed (a
     human has to notice a `spec.yaml changed` entry sitting between two
@@ -179,7 +201,9 @@ def build_module_docs(pcp_dir: Path, module_dir: Path) -> dict:
     brd_path = pcp_dir / "brd_items.yaml"
     all_brd_items = (yaml.safe_load(brd_path.read_text()) or {}).get("items", []) if brd_path.exists() else []
     keywords = _brd_keywords(module_name, spec)
-    matched_brd = [i for i in all_brd_items if _keyword_match(i.get("description", ""), keywords)]
+    matched_brd = _specificity_rank(
+        [i for i in all_brd_items if _keyword_match(i.get("description", ""), keywords)], keywords,
+    )
 
     telemetry_records = telemetry_mod.load(pcp_dir)
     build_records = [

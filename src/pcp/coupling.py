@@ -112,3 +112,67 @@ def compute_communities(G: nx.DiGraph) -> dict:
     cohesion = score_all(G, communities)
     multi_node = {cid: nodes for cid, nodes in communities.items() if len(nodes) > 1}
     return {"available": True, "communities": multi_node, "cohesion": {cid: cohesion[cid] for cid in multi_node}}
+
+
+def compute_change_coupling(project_root, modules: dict[str, dict], max_commits: int = 200) -> list[dict]:
+    """Git-history co-change analysis (CodeScene behavioral-analysis reference
+    pattern, 2026-07-17) — a second, independent coupling signal. Files that
+    change together over time reveal coupling a static import graph
+    structurally cannot see (implicit contracts, config coupling, copy-paste).
+    Deterministic (rung 1), zero LLM.
+
+    Maps commits to modules via each module's declared criterion `target`
+    files. Flags module pairs that co-change in >=50% of the less-active
+    module's commits (min 5 co-changes) AND have no declared dependency in
+    either direction — "hidden coupling", advisory only, never feeds
+    coupling_score.
+    """
+    import subprocess
+    from collections import defaultdict
+    from pathlib import Path as _P
+
+    module_files: dict[str, set] = {}
+    declared: set = set()
+    for name, m in modules.items():
+        targets = set()
+        for c in (m.get("acceptance") or {}).get("criteria", []):
+            if c.get("target"):
+                targets.add(c["target"].replace("\\", "/"))
+        module_files[name] = targets
+        for dep in (m.get("spec") or {}).get("dependencies", []) or []:
+            declared.add((name, dep))
+            declared.add((dep, name))
+
+    result = subprocess.run(
+        ["git", "log", f"-{max_commits}", "--name-only", "--pretty=format:@@COMMIT@@"],
+        capture_output=True, text=True, cwd=project_root,
+    )
+    if result.returncode != 0:
+        return []
+
+    commit_counts: dict[str, int] = defaultdict(int)
+    pair_counts: dict[tuple, int] = defaultdict(int)
+    for chunk in result.stdout.split("@@COMMIT@@"):
+        files = {f.strip().replace("\\", "/") for f in chunk.splitlines() if f.strip()}
+        if not files:
+            continue
+        touched = sorted(n for n, targets in module_files.items() if targets & files)
+        for n in touched:
+            commit_counts[n] += 1
+        for i in range(len(touched)):
+            for j in range(i + 1, len(touched)):
+                pair_counts[(touched[i], touched[j])] += 1
+
+    hidden = []
+    for (a, b), count in sorted(pair_counts.items()):
+        if count < 5 or (a, b) in declared:
+            continue
+        denom = min(commit_counts[a], commit_counts[b])
+        ratio = count / denom if denom else 0.0
+        if ratio >= 0.5:
+            hidden.append({
+                "modules": [a, b], "co_changes": count,
+                "ratio": round(ratio, 2),
+                "note": "co-change without declared dependency — possible hidden coupling",
+            })
+    return hidden

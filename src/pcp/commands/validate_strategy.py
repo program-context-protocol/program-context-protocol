@@ -123,11 +123,19 @@ def _add_deterministic_coverage(result: dict, objective: str, modules: dict[str,
     return result
 
 
-def _add_coupling(result: dict, modules: dict[str, dict]) -> dict:
+def _add_coupling(result: dict, modules: dict[str, dict], project_root: Path | None = None) -> dict:
     """Merge deterministic coupling analysis into the LLM's coverage-only result."""
     graph = coupling_lib.build_dependency_graph(modules)
     result.update(coupling_lib.compute_coupling(graph))
     result["communities"] = coupling_lib.compute_communities(graph)
+    # Second, independent signal (CodeScene pattern): git-history co-change
+    # coupling the static import graph can't see. Advisory only — surfaced,
+    # never scored.
+    if project_root is not None:
+        try:
+            result["hidden_coupling"] = coupling_lib.compute_change_coupling(project_root, modules)
+        except Exception:
+            result["hidden_coupling"] = []
     return result
 
 
@@ -160,6 +168,12 @@ def _render_results(pcp_dir: Path, result: dict, output_json: bool) -> int:
         gaps = result.get("coverage_gaps", [])
         return 1 if gaps else 0
 
+    hidden = result.get("hidden_coupling") or []
+    for h in hidden:
+        console.print(
+            f"[yellow]Hidden coupling (advisory):[/yellow] {h['modules'][0]} ↔ {h['modules'][1]} "
+            f"co-changed {h['co_changes']}x (ratio {h['ratio']}) with no declared dependency"
+        )
     score = result.get("coverage_score", 0.0)
     coupling_score = result.get("coupling_score", 1.0)
     gaps = result.get("coverage_gaps", [])
@@ -258,7 +272,7 @@ def run_validate_strategy(pcp_dir: Path, command: str = "validate-strategy") -> 
     user_prompt = _build_user_prompt(objective, decomposition, modules)
     result = llm.call_json(SYSTEM_PROMPT, user_prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command=command)
     result = _add_deterministic_coverage(result, objective, modules)
-    result = _add_coupling(result, modules)
+    result = _add_coupling(result, modules, project_root=pcp_dir.parent)
     return _add_coverage_audit(pcp_dir, result, objective, modules)
 
 
@@ -307,7 +321,7 @@ def validate_strategy(output_json: bool, project_path: str | None):
         sys.exit(2)
 
     result = _add_deterministic_coverage(result, objective, modules)
-    result = _add_coupling(result, modules)
+    result = _add_coupling(result, modules, project_root=pcp_dir.parent)
     result = _add_coverage_audit(pcp_dir, result, objective, modules)
 
     exit_code = _render_results(pcp_dir, result, output_json)

@@ -1082,6 +1082,33 @@ def _verify_block_findings(
     return kept, dropped
 
 
+def _dismissal_context(pcp_dir: Path, module: str) -> str:
+    """Learnings from past human overrides (Greptile feedback-loop reference
+    pattern: storing dismissals and reusing them took comments-addressed from
+    19%→55%+). PCP's dismissal signal = attributed [pcp-bypass] entries for
+    this module — a human explicitly overrode a gate there. Surfaced as
+    context to the next judge call so equivalent findings aren't re-raised
+    without new evidence. Deterministic read, no LLM."""
+    try:
+        import yaml as _yaml
+        path = pcp_dir / "bypass_log.yaml"
+        if not path.exists():
+            return ""
+        data = _yaml.safe_load(path.read_text()) or {}
+        entries = [e for e in data.get("bypasses", [])
+                   if module in (e.get("modules") or [])][-5:]
+        if not entries:
+            return ""
+        lines = [f"- {e.get('timestamp', '')}: {e.get('reason', '')}" for e in entries]
+        return (
+            "\n\nPRIOR HUMAN OVERRIDES in this module (gate findings a human explicitly "
+            "bypassed — do not re-raise equivalent findings without new evidence):\n"
+            + "\n".join(lines) + "\n"
+        )
+    except Exception:
+        return ""
+
+
 def _criterion_scope_framing(ctx: dict) -> str:
     """Prepended to build-loop judge prompts (gate + architect-review) so a
     single criterion's diff is judged as an increment, not the finished
@@ -1110,7 +1137,7 @@ def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ct
     architecture = (pcp_dir / "architecture.md").read_text() if (pcp_dir / "architecture.md").exists() else ""
     kb = _load_kb(pcp_dir, changed_files)
 
-    prompt = _criterion_scope_framing(ctx) + _build_prompt(persona, architecture, kb, diff, "diff")
+    prompt = _criterion_scope_framing(ctx) + _build_prompt(persona, architecture, kb, diff, "diff") + _dismissal_context(pcp_dir, ctx["module"])
     try:
         res, meta = llm.call_json(
             SYSTEM_PROMPT, prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir,
@@ -1144,7 +1171,7 @@ def _run_gate_check(pcp_dir: Path, diff: str, ctx: dict) -> list[str]:
     current_state = (pcp_dir / "current_state.md").read_text() if (pcp_dir / "current_state.md").exists() else ""
     llm_rules = _load_llm_rules(pcp_dir)
 
-    prompt = _criterion_scope_framing(ctx) + _build_prompt(objective, target_state, current_state, diff, llm_rules)
+    prompt = _criterion_scope_framing(ctx) + _build_prompt(objective, target_state, current_state, diff, llm_rules) + _dismissal_context(pcp_dir, ctx["module"])
     try:
         res, meta = llm.call_json(
             SYSTEM_PROMPT, prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir,
@@ -1204,6 +1231,19 @@ def _run_design_consistency_check(pcp_dir: Path, project_root: Path, criterion: 
             f"{len(hex_matches)} hardcoded hex color literal(s) in {target} while "
             f".pcp/design_system.md has established color tokens — consider reusing "
             f"those instead. Examples: {', '.join(hex_matches[:5])}"
+        )
+    # Positive check (stylelint no-raw-colors posture, 2026-07-17): absence of
+    # violations isn't adherence — a UI file that references ZERO named tokens
+    # from the established system isn't using it at all. Token vocabulary =
+    # CSS custom properties declared in design_system.md. Advisory, same as
+    # the hex check; "token systems erode within weeks without hard gates" is
+    # the eventual argument for upgrading this, measured first.
+    declared_tokens = set(re.findall(r"--[\w-]{3,}", design_system_path.read_text()))
+    if declared_tokens and not any(t in content for t in declared_tokens):
+        findings.append(
+            f"{target} references none of the {len(declared_tokens)} named design-system "
+            "tokens (--*) declared in .pcp/design_system.md — the screen may be styled "
+            "outside the system entirely"
         )
     evidence_path = evidence.store(
         pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "design-consistency",

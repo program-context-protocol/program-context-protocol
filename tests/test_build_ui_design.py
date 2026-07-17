@@ -80,7 +80,11 @@ def test_design_consistency_check_flags_hardcoded_hex_when_system_established(tm
     records = [r for r in telemetry.load(pcp_dir) if r.get("check") == "design-consistency"]
     assert len(records) == 1
     assert records[0]["result"] == "block"
-    assert records[0]["error_count"] == 1
+    # Two findings since 2026-07-17: the hardcoded hex AND the positive check
+    # (file references zero named --tokens from the established system).
+    assert records[0]["error_count"] == 2
+    assert any("hardcoded hex" in e for e in records[0]["errors"])
+    assert any("references none" in e for e in records[0]["errors"])
 
 
 def test_design_consistency_check_passes_when_no_hardcoded_colors(tmp_path):
