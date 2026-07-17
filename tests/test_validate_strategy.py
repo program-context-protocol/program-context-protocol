@@ -196,3 +196,62 @@ def test_consistent_coverage_score_no_warning(tmp_path):
         result = runner.invoke(cli, ["validate-strategy", "--path", str(tmp_path)])
     assert "internally inconsistent" not in result.output
     assert "drifted" not in result.output
+
+
+# ── deterministic coverage-score assertions (Goodhart mitigation, phase 2) ──
+
+def _init_pcp_with_assertions(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text(
+        "# Objective\n\n## What Success Looks Like\n"
+        "1. Customers can complete checkout with a saved payment method\n"
+        "2. Administrators can generate quarterly export reports\n"
+    )
+    (pcp_dir / "strategy").mkdir(exist_ok=True)
+    return pcp_dir
+
+
+def test_objective_with_numbered_assertions_uses_deterministic_scoring(tmp_path):
+    pcp_dir = _init_pcp_with_assertions(tmp_path)
+    _write_module(pcp_dir, "checkout", description="Handles checkout completion using a saved payment method")
+    _write_module(pcp_dir, "reporting", description="Generates quarterly export reports for administrators")
+    with patch("pcp.llm.client.call_json") as mock_llm:
+        # LLM's own coverage_score is deliberately wrong (0.1) -- deterministic
+        # scoring must win, proving this isn't just passing through the LLM value.
+        mock_llm.return_value = {**MOCK_COVERAGE_FULL, "coverage_score": 0.1}
+        runner = CliRunner()
+        result = runner.invoke(cli, ["validate-strategy", "--path", str(tmp_path), "--json"])
+    output = json.loads(result.output)
+    assert output["scoring_method"] == "deterministic"
+    assert output["coverage_score"] == 1.0
+    assert output["llm_coverage_score"] == 0.1
+    assert output["assertions_total"] == 2
+    assert output["assertions_covered"] == 2
+
+
+def test_objective_without_assertions_falls_back_to_llm_scoring(tmp_path):
+    pcp_dir = _init_pcp(tmp_path)  # old-format objective.md, no numbered list
+    _write_module(pcp_dir, "add")
+    with patch("pcp.llm.client.call_json") as mock_llm:
+        mock_llm.return_value = {**MOCK_COVERAGE_FULL, "coverage_score": 0.85}
+        runner = CliRunner()
+        result = runner.invoke(cli, ["validate-strategy", "--path", str(tmp_path), "--json"])
+    output = json.loads(result.output)
+    assert output["scoring_method"] == "llm"
+    assert output["coverage_score"] == 0.85
+    assert "llm_coverage_score" not in output
+
+
+def test_deterministic_gap_shown_in_cli_output(tmp_path):
+    pcp_dir = _init_pcp_with_assertions(tmp_path)
+    _write_module(pcp_dir, "checkout", description="Handles checkout completion using a saved payment method")
+    # No module covers the reporting assertion -- deterministic scoring must
+    # catch this even if the LLM (mocked here to claim full coverage) doesn't.
+    with patch("pcp.llm.client.call_json") as mock_llm:
+        mock_llm.return_value = dict(MOCK_COVERAGE_FULL)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["validate-strategy", "--path", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "deterministic" in result.output
+    assert "quarterly export reports" in result.output

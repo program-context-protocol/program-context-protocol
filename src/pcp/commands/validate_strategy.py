@@ -17,6 +17,7 @@ from pcp.pcp_dir import find_pcp_dir, get_modules_dir, get_objective, get_decomp
 from pcp.schema.validator import validate_file, load_yaml
 from pcp.llm import client as llm
 from pcp import coupling as coupling_lib
+from pcp import assertions as assertions_lib
 
 console = Console()
 
@@ -97,6 +98,31 @@ def _load_modules(modules_dir: Path) -> dict[str, dict]:
     return modules
 
 
+def _add_deterministic_coverage(result: dict, objective: str, modules: dict[str, dict]) -> dict:
+    """Overrides the LLM-judged coverage_score/coverage_gaps with a
+    deterministic keyword-overlap score when objective.md has a numbered
+    assertion list to score against — same Goodhart-mitigation move
+    coupling.py already made for coupling_score (see assertions.py's own
+    docstring for the full reasoning). Falls through to the LLM's own
+    coverage judgment unchanged when objective.md has no numbered list (an
+    old-format file) — never hard-breaks backward compatibility. The LLM's
+    own coverage_score is kept (not discarded) under llm_coverage_score so
+    the two can be compared, even when the deterministic one wins."""
+    assertions = assertions_lib.parse_assertions(objective)
+    if not assertions:
+        result["scoring_method"] = "llm"
+        return result
+    det = assertions_lib.compute_coverage(assertions, modules)
+    result["llm_coverage_score"] = result.get("coverage_score")
+    result["coverage_score"] = det["coverage_score"]
+    result["coverage_gaps"] = det["coverage_gaps"]
+    result["assertions_total"] = det["assertions_total"]
+    result["assertions_covered"] = det["assertions_covered"]
+    result["assertion_coverage_map"] = det["assertion_coverage_map"]
+    result["scoring_method"] = "deterministic"
+    return result
+
+
 def _add_coupling(result: dict, modules: dict[str, dict]) -> dict:
     """Merge deterministic coupling analysis into the LLM's coverage-only result."""
     graph = coupling_lib.build_dependency_graph(modules)
@@ -145,7 +171,12 @@ def _render_results(pcp_dir: Path, result: dict, output_json: bool) -> int:
     score_color = "green" if score >= 0.8 else "yellow" if score >= 0.5 else "red"
     coupling_color = _coupling_color(pcp_dir, coupling_score)
 
-    console.print(f"\n[bold]Coverage score:[/bold]  [{score_color}]{score:.0%}[/{score_color}]")
+    method = result.get("scoring_method", "llm")
+    method_label = "deterministic — keyword-overlap graph reachability" if method == "deterministic" else "LLM-judged"
+    console.print(f"\n[bold]Coverage score:[/bold]  [{score_color}]{score:.0%}[/{score_color}]  [dim]({method_label})[/dim]")
+    if method == "deterministic":
+        console.print(f"[dim]  {result.get('assertions_covered', 0)}/{result.get('assertions_total', 0)} "
+                       f"objective assertions covered — LLM's own judgment was {result.get('llm_coverage_score', 0):.0%}[/dim]")
     for finding in result.get("coverage_audit_findings", []):
         console.print(f"  [yellow]⚠  {finding}[/yellow]")
     console.print(f"[bold]Coupling score:[/bold]  [{coupling_color}]{coupling_score:.0%}[/{coupling_color}]  "
@@ -226,6 +257,7 @@ def run_validate_strategy(pcp_dir: Path, command: str = "validate-strategy") -> 
         return None
     user_prompt = _build_user_prompt(objective, decomposition, modules)
     result = llm.call_json(SYSTEM_PROMPT, user_prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command=command)
+    result = _add_deterministic_coverage(result, objective, modules)
     result = _add_coupling(result, modules)
     return _add_coverage_audit(pcp_dir, result, objective, modules)
 
@@ -274,6 +306,7 @@ def validate_strategy(output_json: bool, project_path: str | None):
         console.print(f"[red]LLM returned invalid JSON:[/red] {e}")
         sys.exit(2)
 
+    result = _add_deterministic_coverage(result, objective, modules)
     result = _add_coupling(result, modules)
     result = _add_coverage_audit(pcp_dir, result, objective, modules)
 
