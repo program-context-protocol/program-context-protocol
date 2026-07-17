@@ -58,6 +58,44 @@ def _build_agent_max_budget_usd() -> str:
     return os.environ.get("PCP_BUILD_AGENT_MAX_BUDGET_USD", "5")
 
 
+def _max_agent_depth() -> int:
+    """Hard cap on pcp build/pcp watch re-entrancy depth -- how many times a
+    coding agent spawned by this process may itself trigger another pcp
+    build/watch session before being refused. Mirrors Grok Build's
+    depth-limit-1 subagent guard (see CLAUDE.md's Token Discipline section,
+    2026-07-16 entry) but only covers PCP's own spawn points -- the
+    `subprocess.run` calls to `claude -p` in build.py/watch.py. It does NOT
+    and cannot enforce depth on Claude Code's own Agent/Workflow tools if a
+    spawned agent calls those directly; that remains an instruction-level
+    guard only (stated honestly in CLAUDE.md, not overclaimed as fixed here).
+    Override with PCP_MAX_AGENT_DEPTH."""
+    return int(os.environ.get("PCP_MAX_AGENT_DEPTH", "1"))
+
+
+def check_agent_depth_or_exit() -> None:
+    """Call once at the top of any command that spawns a coding-agent
+    subprocess (pcp build, pcp watch's auto-fix loop). PCP_AGENT_DEPTH is
+    set on this process's own environ after the check passes, which
+    subprocess.run inherits automatically in every spawned `claude` child --
+    the same zero-extra-plumbing mechanism PCP_AGENT_SESSION already uses
+    below. If that child agent itself re-invokes `pcp build`/`pcp watch`,
+    the nested call reads the inherited depth and is refused once the max
+    is reached."""
+    current_depth = int(os.environ.get("PCP_AGENT_DEPTH", "0"))
+    max_depth = _max_agent_depth()
+    if current_depth >= max_depth:
+        console.print(
+            f"[red bold]Subagent spawn-depth limit hit (depth={current_depth}, max={max_depth}).[/red bold]"
+        )
+        console.print(
+            "[dim]A coding agent already running inside pcp build/watch attempted to spawn "
+            "another pcp build/watch session -- refused. Override with PCP_MAX_AGENT_DEPTH=<n> "
+            "only if you understand the runaway-recursion risk this guards against.[/dim]"
+        )
+        sys.exit(1)
+    os.environ["PCP_AGENT_DEPTH"] = str(current_depth + 1)
+
+
 def _max_parallel_modules() -> int:
     """Cap on concurrent module builds within one dependency wave, each in its
     own git worktree + branch — mirrors the /pcp orchestrator skill's module-
@@ -1215,6 +1253,7 @@ def build(module_name: str | None, project_path: str | None):
     # spec-file edits when this is set — a human's own interactive commit never
     # sets it and is never blocked from editing spec files directly.
     os.environ["PCP_AGENT_SESSION"] = "1"
+    check_agent_depth_or_exit()
 
     budget = _BuildBudget(_max_build_sessions())
     build_model = os.environ.get("PCP_BUILD_MODEL")

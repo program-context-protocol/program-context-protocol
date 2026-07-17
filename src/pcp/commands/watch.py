@@ -21,6 +21,7 @@ from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 from pcp.commands.doctor import load_integrations, check_environment
+from pcp.commands.build import check_agent_depth_or_exit
 from pcp.llm.client import _claude_bin
 
 console = Console()
@@ -165,6 +166,7 @@ def watch(project_path: str | None, interval: int, once: bool, max_iterations: i
 
     project_root = pcp_dir.parent
     check_environment(pcp_dir, fatal_on_missing_required=False)
+    check_agent_depth_or_exit()
     integrations = load_integrations(pcp_dir)
     health_url = (integrations.get("deploy") or {}).get("health_check_url")
 
