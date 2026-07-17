@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from pcp.schema import validator
 from pcp.schema.validator import SCHEMA_DIR, validate_file
 
@@ -36,7 +38,10 @@ def test_pyproject_wheel_artifacts_include_schema_json():
     schema file that exists on disk in the dev repo but isn't declared here
     would build a wheel that's STILL broken despite SCHEMA_DIR being
     correct, since the file simply wouldn't be in the package at all."""
-    import tomllib
+    # tomllib is stdlib only on 3.11+; this checks version-independent
+    # packaging config, so skipping on 3.10 loses nothing — the 3.13 CI
+    # leg still runs it.
+    tomllib = pytest.importorskip("tomllib")
 
     pyproject = Path(__file__).parent.parent / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text())
