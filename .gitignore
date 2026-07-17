@@ -13,3 +13,42 @@ hermes_memory.md
 .coverage
 presentations/
 graphify-out/
+
+# --- internal docs & operational data (local-only, launch-prep 2026-07-17) ---
+CLAUDE.md
+AGENTS.md
+pcp.md
+dashboard.html
+hermes_memory.md
+docs/market-research.md
+docs/build-plan.md
+presentations/
+graphify-out/
+.coverage
+.claude/
+
+# PCP's own session-derived operational data (regenerable, may embed session/deploy ids)
+.pcp/telemetry.jsonl
+.pcp/token_ledger.yaml
+.pcp/decision_log.jsonl
+.pcp/brd.md
+.pcp/brd_items.yaml
+.pcp/bypass_log.yaml
+.pcp/deploy_log.yaml
+.pcp/integrations.yaml
+.pcp/audit.md
+.pcp/provenance.md
+.pcp/architecture_justification.md
+.pcp/design_audit.md
+.pcp/coverage_audit.jsonl
+.pcp/escalations.yaml
+.pcp/prune_log.yaml
+.pcp/transcripts/
+.pcp/evidence/
+
+# stale leftovers from the ontology-foundry extraction
+.pcp/observatory.md
+.pcp/ontology_review_log.jsonl
+.pcp/ontology_state.yaml
+.pcp/traceability_map.yaml
+.pcp/traceability_review_log.jsonl
