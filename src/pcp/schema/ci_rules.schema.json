@@ -10,6 +10,15 @@
       "type": "string",
       "enum": ["1.0"]
     },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional pruning config for `pcp prune` -- how many days of raw QA evidence (.pcp/evidence/*.txt) and session transcripts (.pcp/transcripts/*.jsonl.gz) to keep before they're eligible for deletion. Unset means pcp prune does nothing unless overridden by its own --evidence-days/--transcript-days CLI flags -- no retention happens by default, since a silent auto-delete of audit evidence would be a worse default than an unbounded-growth warning.",
+      "properties": {
+        "evidence_days": { "type": "integer", "minimum": 1 },
+        "transcript_days": { "type": "integer", "minimum": 1 }
+      }
+    },
     "rules": {
       "type": "array",
       "items": {
