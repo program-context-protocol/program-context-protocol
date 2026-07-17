@@ -147,6 +147,82 @@ def test_changelog_includes_module_attributed_bypasses(tmp_path):
     assert data["bypass_count"] == 1
 
 
+def test_drift_score_flags_spec_change_between_two_builds(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    mod_dir = _write_module(pcp_dir, "widgets")
+    # Deliberately NOT committed yet -- spec.yaml/acceptance.yaml have no git
+    # history at all until the one commit below, so that commit is the ONLY
+    # spec/acceptance-change event on the timeline (a clean, deterministic
+    # count instead of also picking up an initial-scaffold commit).
+
+    before = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    telemetry.record(
+        pcp_dir, cycle="build", module="widgets", criterion_id="A001",
+        files=["src/widgets.py"], lines_added=10, lines_removed=0,
+        timestamp=before,
+    )
+
+    # spec + acceptance change mid-build -- git commit timestamps are real
+    # system time, bracketed here by build timestamps 5 min before/after.
+    spec_path = mod_dir / "spec.yaml"
+    spec = yaml.safe_load(spec_path.read_text())
+    spec["constraints"].append("also must be cheap")
+    spec_path.write_text(yaml.dump(spec))
+    _git(["add", "-A"], repo)
+    _git(["commit", "-q", "-m", "widen widgets scope"], repo)
+
+    after = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    telemetry.record(
+        pcp_dir, cycle="build", module="widgets", criterion_id="A002",
+        files=["src/widgets2.py"], lines_added=5, lines_removed=0,
+        timestamp=after,
+    )
+
+    data = build_module_docs(pcp_dir, mod_dir)
+    drift = data["drift"]
+    # One commit touching both spec.yaml and acceptance.yaml == 2 in-flight events.
+    assert len(drift["in_flight_changes"]) == 2
+    assert drift["score"] > 0
+
+
+def test_drift_score_zero_with_no_activity(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    mod_dir = _write_module(pcp_dir, "widgets")
+    data = build_module_docs(pcp_dir, mod_dir)
+    assert data["drift"] == {"score": 0.0, "in_flight_changes": [], "bypass_count": 0, "retry_count": 0}
+
+
+def test_drift_score_counts_retries_and_bypasses(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    mod_dir = _write_module(pcp_dir, "widgets")
+    _commit_all(repo)
+
+    # Two build attempts for the same criterion == 1 retry.
+    telemetry.record(pcp_dir, cycle="build", cycle_number=1, module="widgets", criterion_id="A001",
+                      files=[], timestamp="2026-01-01T00:00:00Z")
+    telemetry.record(pcp_dir, cycle="build", cycle_number=2, module="widgets", criterion_id="A001",
+                      files=[], timestamp="2026-01-01T00:05:00Z")
+
+    (pcp_dir / "bypass_log.yaml").write_text(yaml.dump({"bypasses": [
+        {"timestamp": "2026-01-01T00:02:00Z", "reason": "known false positive",
+         "files": ["src/widgets.py"], "modules": ["widgets"]},
+    ]}))
+
+    data = build_module_docs(pcp_dir, mod_dir)
+    drift = data["drift"]
+    assert drift["retry_count"] == 1
+    assert drift["bypass_count"] == 1
+    assert drift["score"] == round(0.2 * 1 + 0.1 * 1, 2)
+
+
 def test_no_activity_yields_empty_timeline(tmp_path):
     repo = _init_repo(tmp_path / "repo")
     pcp_dir = repo / ".pcp"

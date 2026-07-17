@@ -22,6 +22,7 @@ silent gap.
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -55,6 +56,23 @@ def _load_module_bypasses(pcp_dir: Path, module_name: str) -> list[dict]:
     return [b for b in data.get("bypasses", []) if module_name in (b.get("modules") or [])]
 
 
+def _normalize_to_utc_z(ts: str) -> str:
+    """git's %aI format carries the commit's local timezone offset (e.g.
+    +05:30), while telemetry.jsonl timestamps are always UTC `Z`. Comparing
+    the two as raw strings (this module's own timeline sort, and
+    _compute_drift_score's in-flight window check) silently misorders events
+    on any machine not in UTC — a +05:30 offset timestamp sorts as "later"
+    than a same-instant-or-earlier Z timestamp purely because '+' > digits
+    lexicographically. Normalize every git timestamp to Z before it enters
+    the timeline so all timestamps are directly, correctly comparable as
+    strings. Falls back to the raw value if parsing fails rather than
+    dropping the entry."""
+    try:
+        return datetime.fromisoformat(ts).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return ts
+
+
 def _git_log_for_file(project_root: Path, path: Path) -> list[dict]:
     """Chronological (oldest-first) commit history for one file — deterministic,
     no LLM. Used to surface spec/acceptance.yaml changes as drift signals."""
@@ -73,7 +91,7 @@ def _git_log_for_file(project_root: Path, path: Path) -> list[dict]:
         parts = line.split("|", 2)
         if len(parts) != 3:
             continue
-        entries.append({"commit": parts[0][:8], "timestamp": parts[1], "subject": parts[2]})
+        entries.append({"commit": parts[0][:8], "timestamp": _normalize_to_utc_z(parts[1]), "subject": parts[2]})
     return entries
 
 
@@ -104,6 +122,47 @@ def _brd_keywords(module_name: str, spec: dict) -> set[str]:
 def _keyword_match(text: str, keywords: set[str]) -> bool:
     text_l = text.lower()
     return any(kw in text_l for kw in keywords if kw)
+
+
+def _compute_drift_score(timeline: list[dict], build_records: list[dict], bypass_count: int) -> dict:
+    """Promotes the visual-adjacency signal this doc kit already showed (a
+    human has to notice a `spec.yaml changed` entry sitting between two
+    `built` entries) into an explicit, computed flag — the exact next step
+    CLAUDE.md names for this doc kit. No new data source: everything here
+    is already present in this module's own timeline/telemetry.
+
+    Three signals, weighted (deliberately simple, not tuned against real
+    outcome data yet — phase 1, same honest framing as the rest of this doc
+    kit): in-flight spec/acceptance changes weigh heaviest since they're the
+    closest thing to a directly-observed drift event (the module's declared
+    intent moved while a build was still active); bypass count next (a gate
+    was overridden on this module's own files); retry count least (a
+    criterion can need extra attempts for reasons unrelated to drift, e.g.
+    a flaky test — correlated with instability, not proof of it)."""
+    build_timestamps = sorted(e["timestamp"] for e in timeline if e["kind"] == "build" and e.get("timestamp"))
+    in_flight: list[dict] = []
+    if len(build_timestamps) >= 2:
+        window_start, window_end = build_timestamps[0], build_timestamps[-1]
+        in_flight = [
+            e for e in timeline
+            if e["kind"] in ("spec_change", "acceptance_change")
+            and window_start < (e.get("timestamp") or "") < window_end
+        ]
+
+    retries_by_criterion: dict[str, int] = {}
+    for r in build_records:
+        cid = r.get("criterion_id")
+        if cid:
+            retries_by_criterion[cid] = retries_by_criterion.get(cid, 0) + 1
+    retry_count = sum(max(0, n - 1) for n in retries_by_criterion.values())
+
+    score = min(1.0, 0.5 * len(in_flight) + 0.2 * bypass_count + 0.1 * retry_count)
+    return {
+        "score": round(score, 2),
+        "in_flight_changes": in_flight,
+        "bypass_count": bypass_count,
+        "retry_count": retry_count,
+    }
 
 
 def build_module_docs(pcp_dir: Path, module_dir: Path) -> dict:
@@ -161,10 +220,12 @@ def build_module_docs(pcp_dir: Path, module_dir: Path) -> dict:
             "reason": b.get("reason", ""), "files": b.get("files") or [],
         })
     timeline.sort(key=lambda e: e.get("timestamp") or "")
+    drift = _compute_drift_score(timeline, build_records, len(bypasses))
 
     return {
         "module_name": module_name, "spec": spec, "criteria": criteria,
         "matched_brd": matched_brd, "timeline": timeline, "bypass_count": len(bypasses),
+        "drift": drift,
     }
 
 
@@ -249,6 +310,27 @@ def _render_changelog(data: dict) -> str:
         "excluded here — check `.pcp/bypass_log.yaml` directly for those.",
         "",
     ]
+
+    drift = data.get("drift", {})
+    lines += [
+        f"## Drift Score: {drift.get('score', 0):.2f}",
+        "",
+        "> Computed, not just visually adjacent: weighted from in-flight spec/"
+        "acceptance changes (0.5 each), attributed bypasses (0.2 each), and "
+        "criterion retries (0.1 each). Phase 1 — weights are deliberately "
+        "simple, not tuned against real outcome data yet.",
+        "",
+        f"- In-flight spec/acceptance changes: {len(drift.get('in_flight_changes', []))}",
+        f"- Attributed bypasses: {drift.get('bypass_count', 0)}",
+        f"- Criterion retries: {drift.get('retry_count', 0)}",
+        "",
+    ]
+    if drift.get("in_flight_changes"):
+        lines.append("**In-flight changes** (spec moved while this module was still mid-build):")
+        for e in drift["in_flight_changes"]:
+            lines.append(f"- `{e.get('timestamp', '?')}` `{e.get('commit', '')}` {e.get('subject', '')}")
+        lines.append("")
+
     if not data["timeline"]:
         lines.append("_No recorded activity for this module yet._")
         return "\n".join(lines) + "\n"
