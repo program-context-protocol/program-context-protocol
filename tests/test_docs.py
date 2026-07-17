@@ -124,6 +124,29 @@ def test_changelog_includes_module_tagged_decisions(tmp_path):
     assert "SQLite" in decisions[0]["summary"]
 
 
+def test_changelog_includes_module_attributed_bypasses(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    mod_dir = _write_module(pcp_dir, "widgets")
+    _commit_all(repo)
+
+    (pcp_dir / "bypass_log.yaml").write_text(yaml.dump({"bypasses": [
+        {"timestamp": "2026-01-01T00:00:00Z", "reason": "known false positive",
+         "files": ["src/widgets.py"], "modules": ["widgets"]},
+        {"timestamp": "2026-01-02T00:00:00Z", "reason": "unrelated module bypass",
+         "files": ["src/other.py"], "modules": ["other"]},
+        {"timestamp": "2026-01-03T00:00:00Z", "reason": "legacy entry, pre-attribution",
+         "files": ["src/legacy.py"]},
+    ]}))
+
+    data = build_module_docs(pcp_dir, mod_dir)
+    bypass_entries = [e for e in data["timeline"] if e["kind"] == "bypass"]
+    assert len(bypass_entries) == 1
+    assert bypass_entries[0]["reason"] == "known false positive"
+    assert data["bypass_count"] == 1
+
+
 def test_no_activity_yields_empty_timeline(tmp_path):
     repo = _init_repo(tmp_path / "repo")
     pcp_dir = repo / ".pcp"

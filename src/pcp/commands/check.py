@@ -41,7 +41,8 @@ def _read_bypass_reason(commit_msg_file: Path | None) -> str | None:
     return None
 
 
-def _log_bypass(pcp_dir: Path, reason: str, rules_checked: list[str]) -> None:
+def _log_bypass(pcp_dir: Path, reason: str, rules_checked: list[str],
+                 files: list[str] | None = None, modules: list[str] | None = None) -> None:
     from datetime import datetime, timezone
     from pcp.evidence_chain import chain_entry
 
@@ -56,11 +57,54 @@ def _log_bypass(pcp_dir: Path, reason: str, rules_checked: list[str]) -> None:
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": reason,
         "rules_bypassed": rules_checked,
+        "files": files or [],
+        "modules": modules or [],
     }
     existing.append(chain_entry(prev_hash, fields))
 
     with open(log_path, "w") as f:
         yaml.dump({"bypasses": existing}, f, default_flow_style=False)
+
+
+def _attributed_modules(project_root: Path, pcp_dir: Path, staged_files: list[str],
+                         module_names: list[str]) -> list[str]:
+    """Map staged files to the module(s) they belong to, so a bypass entry can
+    be placed on that module's own docs/changelog.md timeline instead of
+    sitting as an unattributed global entry (the gap CLAUDE.md's Per-Module
+    Doc Kit section names explicitly -- bypass_log.yaml has no file/module
+    field, so changelog.md excludes bypasses today).
+
+    Two match strategies, both cheap/deterministic (no LLM):
+    1. Direct spec-dir match -- a staged file under strategy/modules/<name>/
+       belongs to <name>.
+    2. Criterion target match -- a staged source file matches a criterion's
+       declared `target` path in that module's acceptance.yaml.
+    """
+    modules_dir = get_modules_dir(pcp_dir)
+    matched: set[str] = set()
+
+    for rel_path in staged_files:
+        for name in module_names:
+            prefix = f"strategy/modules/{name}/"
+            if rel_path.startswith(prefix) or rel_path.startswith(".pcp/" + prefix):
+                matched.add(name)
+
+    for name in module_names:
+        acceptance_path = modules_dir / name / "acceptance.yaml"
+        if not acceptance_path.exists():
+            continue
+        try:
+            acc_data = yaml.safe_load(acceptance_path.read_text()) or {}
+        except yaml.YAMLError:
+            continue
+        targets = {c.get("target") for c in acc_data.get("criteria", []) if c.get("target")}
+        if not targets:
+            continue
+        for rel_path in staged_files:
+            if rel_path in targets:
+                matched.add(name)
+
+    return sorted(matched)
 
 
 def _match_scope(file_path: str, scope_patterns: list[str]) -> bool:
@@ -293,12 +337,15 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
             sys.exit(1)
 
         rule_ids = [r["id"] for r in rules + required_rules + file_rules + protected_rules]
-        _log_bypass(pcp_dir, bypass_reason, rule_ids)
+        bypass_files = file_list.split(",") if file_list else _get_staged_files()
+        bypass_modules = _attributed_modules(project_root, pcp_dir, bypass_files, module_names)
+        _log_bypass(pcp_dir, bypass_reason, rule_ids, files=bypass_files, modules=bypass_modules)
         from pcp import telemetry
         telemetry.record(
             pcp_dir, cycle="qa", cycle_number=None, check="layer1-bypass",
-            control_id="CTRL-004", module=None, submodule=None, criterion_id=None,
-            files=(file_list.split(",") if file_list else _get_staged_files()),
+            control_id="CTRL-004", module=(bypass_modules[0] if bypass_modules else None),
+            submodule=None, criterion_id=None,
+            files=bypass_files,
             result="bypassed", errors=[f"reason: {bypass_reason}"] + [f"rule bypassed: {r}" for r in rule_ids],
             error_count=len(rule_ids),
         )

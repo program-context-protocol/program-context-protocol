@@ -340,6 +340,78 @@ def test_bypass_log_entries_chain_across_multiple_bypasses(tmp_path):
     assert verify_chain(bypasses) == []
 
 
+# ── bypass module attribution — check.py:_attributed_modules ──────────────
+
+def _write_module(pcp_dir, name, criteria=None):
+    module_dir = pcp_dir / "strategy" / "modules" / name
+    module_dir.mkdir(parents=True)
+    (module_dir / "spec.yaml").write_text(yaml.dump({"description": f"{name} module"}))
+    (module_dir / "acceptance.yaml").write_text(yaml.dump({"criteria": criteria or []}))
+    return module_dir
+
+
+def test_check_cli_bypass_attributes_module_via_spec_dir_path(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "SEC_001", "name": "No hardcoded secrets", "check": "ast_pattern",
+         "pattern": r"password\s*=\s*['\"]", "severity": "hard_block", "scope": ["*.py"]},
+    ])
+    _write_module(pcp_dir, "auth")
+    (tmp_path / "bad.py").write_text("password = 'hunter2'\n")
+    rel_spec = str((pcp_dir / "strategy" / "modules" / "auth" / "spec.yaml").relative_to(tmp_path))
+    msg_file = _write_commit_msg(tmp_path, "Fix\n\n[pcp-bypass: known false positive, verified safe]\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "check", "--path", str(tmp_path), "--files", f"bad.py,{rel_spec}", "--commit-msg-file", str(msg_file),
+    ])
+    assert result.exit_code == 0
+    bypass_log = yaml.safe_load((pcp_dir / "bypass_log.yaml").read_text())
+    assert bypass_log["bypasses"][0]["modules"] == ["auth"]
+
+
+def test_check_cli_bypass_attributes_module_via_criterion_target(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "SEC_001", "name": "No hardcoded secrets", "check": "ast_pattern",
+         "pattern": r"password\s*=\s*['\"]", "severity": "hard_block", "scope": ["*.py"]},
+    ])
+    _write_module(pcp_dir, "billing", criteria=[{"id": "C1", "description": "x", "target": "src/billing.py"}])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "billing.py").write_text("password = 'hunter2'\n")
+    msg_file = _write_commit_msg(tmp_path, "Fix\n\n[pcp-bypass: known false positive, verified safe]\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "check", "--path", str(tmp_path), "--files", "src/billing.py", "--commit-msg-file", str(msg_file),
+    ])
+    assert result.exit_code == 0
+    bypass_log = yaml.safe_load((pcp_dir / "bypass_log.yaml").read_text())
+    assert bypass_log["bypasses"][0]["modules"] == ["billing"]
+
+
+def test_check_cli_bypass_no_module_match_leaves_modules_empty(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "SEC_001", "name": "No hardcoded secrets", "check": "ast_pattern",
+         "pattern": r"password\s*=\s*['\"]", "severity": "hard_block", "scope": ["*.py"]},
+    ])
+    (tmp_path / "bad.py").write_text("password = 'hunter2'\n")
+    msg_file = _write_commit_msg(tmp_path, "Fix\n\n[pcp-bypass: known false positive, verified safe]\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, [
+        "check", "--path", str(tmp_path), "--files", "bad.py", "--commit-msg-file", str(msg_file),
+    ])
+    assert result.exit_code == 0
+    bypass_log = yaml.safe_load((pcp_dir / "bypass_log.yaml").read_text())
+    assert bypass_log["bypasses"][0]["modules"] == []
+    assert bypass_log["bypasses"][0]["files"] == ["bad.py"]
+
+
 def test_check_cli_no_ci_rules_skips(tmp_path):
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()
