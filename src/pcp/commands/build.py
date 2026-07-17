@@ -596,14 +596,51 @@ def _get_staged_files(cwd: Path) -> list[str]:
     return [f.strip() for f in result.stdout.splitlines() if f.strip()]
 
 
-def _get_working_diff(cwd: Path) -> str:
+def _get_untracked_files(cwd: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        capture_output=True, text=True, cwd=cwd,
+    )
+    if result.returncode != 0:
+        return []
+    return [f.strip() for f in result.stdout.splitlines() if f.strip()]
+
+
+def _get_committed_files_since(cwd: Path, since_ref: str) -> list[str]:
+    result = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=ACMR", since_ref],
+        capture_output=True, text=True, cwd=cwd,
+    )
+    if result.returncode != 0:
+        return []
+    return [f.strip() for f in result.stdout.splitlines() if f.strip()]
+
+
+def _get_changed_files_since(cwd: Path, since_ref: str | None) -> list[str]:
+    """Everything the agent touched this criterion, however it left it:
+    committed (diff since the criterion-start ref), staged, unstaged, or
+    still untracked. Found dogfooding 2026-07-17 (round 2): the agent
+    COMMITTED its work — perfectly reasonable, nothing told it not to — and
+    the old staged+unstaged-only view reported 'No files were modified by
+    the agent' against a 65-line committed implementation, then the gates
+    judged an empty diff. An agent must not be able to make its work
+    invisible to the gates by committing it."""
+    files = set(_get_staged_files(cwd) + _get_unstaged_files(cwd) + _get_untracked_files(cwd))
+    if since_ref:
+        files.update(_get_committed_files_since(cwd, since_ref))
+    return sorted(files)
+
+
+def _get_working_diff(cwd: Path, since_ref: str | None = None) -> str:
     # :(exclude) pathspecs keep PCP's own operational writes (token ledger,
     # telemetry, evidence) out of the diff the LLM judges see — see
-    # _PCP_OPERATIONAL_PATHS above for why.
+    # _PCP_OPERATIONAL_PATHS above for why. Diff base is the criterion-start
+    # ref when given (covers work the agent committed), falling back to HEAD.
     excludes = [f":(exclude){p}" for p in _PCP_OPERATIONAL_PATHS] + \
                [f":(exclude){d.rstrip('/')}" for d in _PCP_OPERATIONAL_DIRS]
+    base = since_ref or "HEAD"
     result = subprocess.run(
-        ["git", "diff", "HEAD", "--", ".", *excludes],
+        ["git", "diff", base, "--", ".", *excludes],
         capture_output=True, text=True, cwd=cwd,
     )
     if result.returncode != 0:
@@ -712,6 +749,9 @@ def _build_agent_prompt(
         "lint, and a SAST/secret scan will run against your changes after you finish — "
         "fix anything those would flag before considering the criterion done.",
         "Use editing tools to modify files and run tests to verify your implementation.",
+        "Git rules: stay on the current branch — never create or switch branches. "
+        "You may commit your work or leave it uncommitted; the build loop measures "
+        "everything you changed since this criterion started either way.",
     ]
     return "\n".join(prompt_parts)
 
@@ -1369,6 +1409,9 @@ def _build_one_criterion(
     success = False
     block_findings: list[str] = []
     agent_session_id = str(uuid.uuid4())
+    # Everything the agent does this criterion — committed or not — is
+    # measured against this ref, so committing can't hide work from gates.
+    criterion_start_ref = _git_head(project_root)
 
     for attempt in range(1, 4):
         console.print(f"\n[dim]Attempt {attempt}/3 — {mod['name']}/{c['id']}...[/dim]")
@@ -1455,14 +1498,15 @@ def _build_one_criterion(
 
         # Run checks. PCP's own operational writes (token ledger, telemetry)
         # are not agent work product — never fed to gates or the scope guard.
-        staged = _get_staged_files(project_root)
-        unstaged = _get_unstaged_files(project_root)
-        changed_files = [f for f in set(staged + unstaged) if not _is_pcp_operational(f)]
+        changed_files = [
+            f for f in _get_changed_files_since(project_root, criterion_start_ref)
+            if not _is_pcp_operational(f)
+        ]
 
         if not changed_files:
-            console.print("[yellow]No files were modified by the agent.[/yellow]")
+            console.print("[yellow]No files were modified by the agent (committed or uncommitted).[/yellow]")
 
-        diff = _get_working_diff(project_root)
+        diff = _get_working_diff(project_root, criterion_start_ref)
 
         lines_added, lines_removed = telemetry.count_diff_lines(diff)
         usage = agent_usage.get("usage", {})

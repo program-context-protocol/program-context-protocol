@@ -26,15 +26,19 @@ def _run_build_one_criterion(tmp_path, build_model, build_model_explicit, test_s
     captured_models = []
 
     def fake_run(cmd, **kwargs):
-        captured_models.append(cmd[cmd.index("--model") + 1] if "--model" in cmd else None)
+        # Only claude agent invocations carry a session flag — git helper
+        # calls (rev-parse, diff, ls-files) also route through subprocess.run
+        # and must not pollute the captured model list.
+        if "--session-id" in cmd or "--resume" in cmd:
+            captured_models.append(cmd[cmd.index("--model") + 1] if "--model" in cmd else None)
         result = MagicMock()
         result.returncode = 0
         result.stdout = _envelope()
         return result
 
     with patch("pcp.commands.build.subprocess.run", side_effect=fake_run), \
-         patch("pcp.commands.build._get_staged_files", return_value=[]), \
-         patch("pcp.commands.build._get_unstaged_files", return_value=[]), \
+         patch("pcp.commands.build._git_head", return_value="REF0"), \
+         patch("pcp.commands.build._get_changed_files_since", return_value=[]), \
          patch("pcp.commands.build._get_working_diff", return_value=""), \
          patch("pcp.commands.build._run_test_suite_check", side_effect=test_suite_results), \
          patch("pcp.commands.build._run_lint_check", return_value=[]), \

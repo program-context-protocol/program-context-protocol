@@ -1,13 +1,54 @@
 """Dogfood-found gate-input fixes (2026-07-17): PCP-operational file exclusion
 and criterion-scoped judge framing."""
 
+import subprocess
 from unittest.mock import patch
 
 from pcp.commands.build import (
     _criterion_scope_framing,
+    _get_changed_files_since,
+    _get_working_diff,
     _is_pcp_operational,
     _run_gate_check,
 )
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+
+
+def _repo(tmp_path):
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "t@t")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "base.py").write_text("x = 1\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_committed_agent_work_is_visible(tmp_path):
+    """Dogfood round 2: agent committed a 65-line implementation and the old
+    staged+unstaged view reported 'No files were modified'. Committed work
+    since the criterion-start ref must count."""
+    start = _repo(tmp_path)
+    (tmp_path / "impl.py").write_text("def f():\n    return 42\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "agent work, committed")
+    files = _get_changed_files_since(tmp_path, start)
+    assert files == ["impl.py"]
+    diff = _get_working_diff(tmp_path, start)
+    assert "return 42" in diff
+
+
+def test_uncommitted_and_untracked_work_still_visible(tmp_path):
+    start = _repo(tmp_path)
+    (tmp_path / "base.py").write_text("x = 2\n")          # unstaged edit
+    (tmp_path / "new_untracked.py").write_text("y = 3\n")  # never git-added
+    files = _get_changed_files_since(tmp_path, start)
+    assert "base.py" in files
+    assert "new_untracked.py" in files
 
 
 def test_operational_paths_detected():
