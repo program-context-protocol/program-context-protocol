@@ -285,6 +285,24 @@ controls:
     enforcement: hard_block
     description: "Active structural-forcing for PCP Design lifecycle stage 4 — design_audit.py's Feature Exposure Ladder is a passive post-hoc rollup (pure keyword/presence logic, a checklist full of junk strings still classifies as rung 3/4). This check runs during the build itself: judges whether a UI-facing criterion's submitted checklist_passed/jtbd_framing/deviations_from_system reflects real design thinking or was lazily filled just to pass validation, re-verified adversarially before it can block the criterion the same way architect-review/gate findings do."
     ssdf_practice: ["PW.7.1"]
+
+  - id: CTRL-016
+    name: "build_vs_buy drift at wave-merge"
+    layer: wave-merge
+    mechanism: "build.py:_run_wave_build_vs_buy_drift_check(), 6th wave-merge sub-check"
+    tool: "n/a — deterministic Python import analysis, no external tool"
+    enforcement: hard_block
+    description: "A completed criterion declaring build_vs_buy=reuse_whole or fork_adapt implies an external dependency should be visible in its target file — zero external imports despite that claim is a real signal the declared decision no longer matches what was built. Deliberately narrower than the logic_tier drift check (CTRL-014): build_fresh is NOT checked in the other direction (package names routinely differ from import names — pyyaml/yaml, beautifulsoup4/bs4 — too noisy to trust as a hard gate), and reuse_partial/reimplement_from_reference are skipped entirely (no distinguishing import signature either way)."
+    ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-017
+    name: "build_vs_buy rationale substance check"
+    layer: build
+    mechanism: "build.py _run_build_vs_buy_justification_check(), deterministic placeholder/word-count check"
+    tool: "n/a — deterministic regex/word-count, no external tool"
+    enforcement: hard_block
+    description: "Structural-forcing for build_vs_buy, same enforcement posture design_justification (CTRL-015) already gets — build_vs_buy's rationale is schema-required to be present but was never checked for substance, so a placeholder string like the literal unfilled prompt template text passed validation as a real decision. Deterministic, not an LLM judge call: unlike design_justification (UI-facing criteria only), build_vs_buy is required on EVERY criterion, so an LLM call here on every attempt would violate Token Discipline for a field that mostly just needs a placeholder-text check, not genuine semantic judgment."
+    ssdf_practice: ["PW.1.1"]
 """
 
 SDLC_PHASE_TEMPLATE = """\

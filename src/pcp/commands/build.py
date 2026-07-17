@@ -409,11 +409,16 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
         _wave_record(pcp_dir, wave_number, "architect-review", "CTRL-005", [f"call failed: {e}"],
                      files=wave_mod_names, result="error")
 
-    # 5. logic_tier/build_vs_buy drift -- does what actually got built still
-    #    match the tier a criterion declared at spec time? Advisory/informational
-    #    like the other sub-checks above, findings still block the next wave.
+    # 5. logic_tier drift -- does what actually got built still match the
+    #    tier a criterion declared at spec time?
     tier_findings = _run_wave_tier_drift_check(pcp_dir, wave_modules, wave_number)
     findings += tier_findings
+
+    # 6. build_vs_buy drift -- narrower scope than tier drift, see the
+    #    function's own docstring for why only reuse_whole/fork_adapt get
+    #    checked, not build_fresh.
+    bvb_findings = _run_wave_build_vs_buy_drift_check(pcp_dir, wave_modules, wave_number)
+    findings += bvb_findings
 
     return findings
 
@@ -433,9 +438,8 @@ def _run_wave_tier_drift_check(pcp_dir: Path, wave_modules: list[dict], wave_num
     through cached-reuse -- no runtime LLM call expected by definition) whose
     own target file demonstrably imports an LLM SDK is a real signal the
     declared decision no longer matches what was actually built. Only rung 6
-    (deep-think LLM) is expected to import one. Does NOT re-examine
-    build_vs_buy -- no comparably cheap deterministic signal exists for that
-    field yet, left for a future pass rather than guessed at."""
+    (deep-think LLM) is expected to import one. build_vs_buy gets its own,
+    narrower, separate check -- _run_wave_build_vs_buy_drift_check below."""
     project_root = pcp_dir.parent
     findings: list[str] = []
     checked_files: list[str] = []
@@ -469,6 +473,81 @@ def _run_wave_tier_drift_check(pcp_dir: Path, wave_modules: list[dict], wave_num
                 )
 
     _wave_record(pcp_dir, wave_number, "tier-drift", "CTRL-014", findings, files=checked_files)
+    return findings
+
+
+def _stdlib_module_names() -> frozenset[str]:
+    import sys
+    names = getattr(sys, "stdlib_module_names", None)
+    return frozenset(names) if names else frozenset()
+
+
+def _local_package_names(project_root: Path) -> frozenset[str]:
+    """Top-level directory names under src/ (or the project root itself if
+    no src/ layout) -- a Python `import` of one of these is a local project
+    import, not an external dependency."""
+    src = project_root / "src"
+    base = src if src.exists() else project_root
+    return frozenset(p.name for p in base.iterdir() if p.is_dir() and not p.name.startswith("."))
+
+
+def _external_python_imports(target_path: Path, project_root: Path) -> set[str]:
+    """Top-level import names from a Python file, excluding stdlib and this
+    project's own local packages -- what's left is a real external/
+    third-party dependency. Python-only: generalizing import extraction
+    across every EXTRACTORS language (discovery/graph.py) for one heuristic
+    check isn't worth the added surface for this pass."""
+    if target_path.suffix != ".py":
+        return set()
+    from pcp.discovery.graph import extract_imports_python
+    raw = extract_imports_python(target_path, project_root)
+    return {i for i in raw if i not in _stdlib_module_names() and i not in _local_package_names(project_root)}
+
+
+def _run_wave_build_vs_buy_drift_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
+    """6th wave-merge sub-check, CTRL-016. Same "does the declared decision
+    still match what got built" question _run_wave_tier_drift_check asks of
+    logic_tier, applied to build_vs_buy -- but deliberately narrower scope:
+    only `reuse_whole`/`fork_adapt` get checked (declaring one of these
+    means an external dependency SHOULD be there -- a target file with zero
+    external imports despite that claim is a real, cheap, low-false-positive
+    signal). `build_fresh` is NOT checked in the other direction ("does it
+    import something new"): package names routinely differ from their
+    import names (pyyaml->yaml, beautifulsoup4->bs4, pillow->PIL), which
+    would make a "no new external import" check noisy enough to be
+    untrustworthy as a hard_block gate. `reuse_partial`/
+    `reimplement_from_reference` are skipped entirely -- vendored or
+    reimplemented code has no distinguishing import signature either way.
+    Left for a future pass rather than shipping something that guesses."""
+    project_root = pcp_dir.parent
+    findings: list[str] = []
+    checked_files: list[str] = []
+
+    for mod in wave_modules:
+        acc_path = pcp_dir / "strategy" / "modules" / mod["name"] / "acceptance.yaml"
+        if not acc_path.exists():
+            continue
+        acc = load_yaml(acc_path)
+        for c in acc.get("criteria", []):
+            if c.get("status") != "complete":
+                continue
+            decision = (c.get("build_vs_buy") or {}).get("decision")
+            target = c.get("target")
+            if decision not in ("reuse_whole", "fork_adapt") or not target:
+                continue
+            full_path = project_root / target
+            if not full_path.exists() or not full_path.is_file():
+                continue
+            checked_files.append(target)
+            externals = _external_python_imports(full_path, project_root)
+            if not externals:
+                findings.append(
+                    f"Build-vs-buy drift: '{mod['name']}/{c['id']}' declares "
+                    f"build_vs_buy={decision} but {target} imports no external package -- "
+                    f"the declared decision no longer matches what was built."
+                )
+
+    _wave_record(pcp_dir, wave_number, "build-vs-buy-drift", "CTRL-016", findings, files=checked_files)
     return findings
 
 
@@ -1009,6 +1088,63 @@ def _run_design_justification_check(pcp_dir: Path, mod: dict, criterion: dict, c
     return kept
 
 
+_BVB_PLACEHOLDER_PHRASES = frozenset({
+    "not specified", "not specified by generator", "todo", "tbd", "n/a", "na",
+    "placeholder", "reason", "why this decision", "why this decision, one sentence",
+    "one sentence rationale", "one-sentence rationale", "...", "x", "-", "unspecified",
+    "not specified by generator -- coerced placeholder, review before treating as a real decision.",
+})
+_BVB_MIN_WORDS = 4
+
+
+def _run_build_vs_buy_justification_check(pcp_dir: Path, mod: dict, criterion: dict, ctx: dict) -> list[str]:
+    """Structural-forcing for build_vs_buy, same enforcement posture
+    design_justification just got (CTRL-015) -- CLAUDE.md names this exact
+    gap: build_vs_buy's rationale field is schema-required (must be present)
+    but never checked for substance, so "x" or the literal unfilled prompt
+    template text passes validation as a real decision.
+
+    Deterministic, NOT an LLM judge call -- unlike design_justification
+    (fires only for the UI-facing subset of criteria), build_vs_buy is
+    required on EVERY criterion, so an LLM call here on every attempt of
+    every criterion would be a real Token Discipline violation for a field
+    that mostly just needs a placeholder-text check, not genuine semantic
+    judgment. Same placeholder-rejection posture bypass_approval.rego
+    already established for bypass reasons (see policy.py), reimplemented
+    here in plain Python so it works with zero OPA setup -- build_vs_buy
+    validation can't depend on an optional external tool being installed.
+
+    Re-reads acceptance.yaml fresh for the same reason
+    _run_design_justification_check does: build_vs_buy can be touched by
+    the coding agent during this attempt, so the pre-attempt `criterion`
+    snapshot is stale for this field."""
+    acc_data = load_yaml(mod["acc_path"])
+    fresh = next((c for c in acc_data.get("criteria", []) if c["id"] == criterion["id"]), None)
+    bvb = (fresh or {}).get("build_vs_buy") or {}
+    decision = bvb.get("decision")
+    rationale = (bvb.get("rationale") or "").strip()
+
+    findings = []
+    if decision and decision != "not_applicable":
+        normalized = rationale.lower().rstrip(".")
+        word_count = len(rationale.split())
+        if not rationale or normalized in _BVB_PLACEHOLDER_PHRASES or word_count < _BVB_MIN_WORDS:
+            findings.append(
+                f"build_vs_buy rationale for {criterion['id']} reads as a placeholder, not a "
+                f"real decision: '{rationale or '(empty)'}'"
+            )
+
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "build-vs-buy-justification",
+        rationale or "(empty)",
+    )
+    _qa_record(
+        pcp_dir, ctx, "build-vs-buy-justification", findings, control_id="CTRL-017",
+        tool="regex", evidence_path=evidence_path,
+    )
+    return findings
+
+
 def _record_escalation(pcp_dir: Path, module_name: str, criterion_id: str, block_findings: list[str]) -> None:
     """Route this criterion's final-attempt failure through OPA's escalation
     policy (.pcp/policies/escalation.rego) -- advisory only, doesn't change
@@ -1192,11 +1328,12 @@ def _build_one_criterion(
         violations_gate = _run_gate_check(pcp_dir, diff, ctx)
         _run_design_consistency_check(pcp_dir, project_root, c, ctx)
         violations_design_justification = _run_design_justification_check(pcp_dir, mod, c, ctx)
+        violations_bvb_justification = _run_build_vs_buy_justification_check(pcp_dir, mod, c, ctx)
 
         block_findings = (
             violations_tests + violations_lint + violations_sast
             + violations_l1 + violations_arch + violations_gate
-            + violations_design_justification
+            + violations_design_justification + violations_bvb_justification
         )
 
         if block_findings:
