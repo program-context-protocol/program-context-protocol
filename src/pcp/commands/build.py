@@ -1591,6 +1591,11 @@ def _build_one_criterion(
             session_flag = ["--session-id", escalation_session_id]
             agent_session_id = escalation_session_id
 
+        # Commit-trailer attribution: the installed commit-msg hook stamps
+        # PCP-Agent-Session onto any commit made inside this subprocess —
+        # set AFTER the escalation branch so attempt 3 carries its own id.
+        os.environ["PCP_AGENT_SESSION_ID"] = agent_session_id
+
         # Escalate to Opus on the final attempt -- two Sonnet attempts already
         # failed, a real complexity signal worth paying up for before handing
         # off to human escalation. Never overrides an explicit human choice:

@@ -208,6 +208,30 @@ def _render_markdown(project_root: Path, data: dict, timestamp: str) -> str:
         lines.append("_No escalations recorded._")
     lines.append("")
 
+    # Auditability Card (adapted from "Auditable Agents", arXiv:2604.05485 —
+    # its 5-dimension framework maps 1:1 onto PCP's mechanisms). Deterministic
+    # self-score from artifacts that exist, not aspiration.
+    _pcp = project_root / ".pcp"
+    card = [
+        ("Action recoverability", (_pcp / "telemetry.jsonl").exists() and (_pcp / "evidence").exists(),
+         "per-attempt telemetry + raw untruncated QA evidence"),
+        ("Lifecycle coverage", (_pcp / "controls.yaml").exists() and (_pcp / "deploy_log.yaml").exists(),
+         "controls span commit->PR->wave->deploy; deploy log present"),
+        ("Policy checkability", (_pcp / "ci_rules.yaml").exists() and (_pcp / "policies").exists(),
+         "machine-checkable rules (ci_rules.yaml) + human-editable OPA policies"),
+        ("Responsibility attribution", (_pcp / "bypass_log.yaml").exists() or (_pcp / "escalations.yaml").exists(),
+         "attributed bypasses and/or escalation ledger with ack states"),
+        ("Evidence integrity", bool(data.get("chain_integrity")),
+         "hash-chained logs, verified each provenance run (unsigned — see roadmap)"),
+    ]
+    lines += ["## Auditability Card", "",
+              "Five dimensions from the 'Auditable Agents' framework (arXiv:2604.05485), "
+              "scored from artifacts actually present in this project:", "",
+              "| Dimension | Present | Basis |", "|---|---|---|"]
+    for name, ok, basis in card:
+        lines.append(f"| {name} | {'✓' if ok else '✗'} | {basis} |")
+    lines.append("")
+
     lines += ["## Chain Integrity", "", "Each evidence log is hash-chained — an entry's hash covers its own "
               "content plus the previous entry's hash, so an edit/reorder/deletion after the fact is "
               "detectable even though the files themselves are plain, editable JSON/YAML.", ""]
@@ -256,13 +280,23 @@ def write_provenance(pcp_dir: Path) -> Path:
 @click.command()
 @click.option("--path", "project_path", type=click.Path(), default=None)
 @click.option("--json", "output_json", is_flag=True, help="Print raw JSON instead of writing provenance.md.")
-def provenance(project_path: str | None, output_json: bool):
+@click.option("--attest", "attest_flag", is_flag=True,
+              help="Also export in-toto Statement v1 / DSSE envelopes to .pcp/attestations.jsonl "
+                   "(unsigned unless --sign and cosign present).")
+@click.option("--sign", "sign_flag", is_flag=True,
+              help="Sign the attestation export via cosign sign-blob (requires cosign; interactive OIDC).")
+def provenance(project_path: str | None, output_json: bool, attest_flag: bool, sign_flag: bool):
     """Audit-evidence document — every file, every gate, any skip/bypass made visible."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
     except NoPCPDir as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(2)
+
+    if attest_flag or sign_flag:
+        from pcp.attest import export_attestations
+        out, count, signing_note = export_attestations(pcp_dir, sign=sign_flag)
+        console.print(f"[green]✓[/green] {count} in-toto attestation(s) -> {out.name}  [{signing_note}]")
 
     if output_json:
         click.echo(json.dumps(build_provenance(pcp_dir), indent=2, default=str))

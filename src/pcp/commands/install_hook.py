@@ -23,6 +23,19 @@ COMMIT_MSG_HOOK = """\
 # GNU (Linux) sed -- perl -ni is identical on both.
 perl -ni -e 'print unless /^Co-Authored-By:.*(claude|anthropic)/i' "$1"
 #
+# Agent-session attribution trailer (2026-07-17, incremental identity
+# hardening): when the commit happens inside a PCP agent session, stamp the
+# session id into the commit message as a queryable trailer. Still rooted in
+# a self-declared env var — honestly NOT cryptographic identity (the IETF
+# dynamic-attestation draft is the eventual target) — but it moves the
+# marker from "ambient env var at gate time" to "recorded on the commit
+# object itself", queryable via plain `git log --grep`.
+if [ -n "$PCP_AGENT_SESSION" ]; then
+  if ! grep -q '^PCP-Agent-Session:' "$1"; then
+    printf '\nPCP-Agent-Session: %s\n' "${PCP_AGENT_SESSION_ID:-unidentified}" >> "$1"
+  fi
+fi
+#
 # Runs as a commit-msg hook, not pre-commit: git does not write the final
 # commit message to disk until after pre-commit runs (confirmed empirically —
 # COMMIT_EDITMSG holds the PREVIOUS commit's message at pre-commit time when
