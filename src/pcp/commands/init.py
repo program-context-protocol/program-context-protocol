@@ -276,6 +276,15 @@ controls:
     enforcement: hard_block
     description: "A completed criterion declaring logic_tier 1-5 (deterministic through cached-reuse — no runtime LLM call expected by definition) whose own target file demonstrably imports an LLM SDK is a real signal the declared decision no longer matches what was actually built. Only rung 6 (deep-think LLM) is expected to import one. Does not re-examine build_vs_buy — no comparably cheap deterministic signal exists for that field yet."
     ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-015
+    name: "design_justification substance check"
+    layer: build
+    mechanism: "build.py _run_design_justification_check(), JUDGE_MODEL + adversarial verify"
+    tool: "LLM judge (JUDGE_MODEL)"
+    enforcement: hard_block
+    description: "Active structural-forcing for PCP Design lifecycle stage 4 — design_audit.py's Feature Exposure Ladder is a passive post-hoc rollup (pure keyword/presence logic, a checklist full of junk strings still classifies as rung 3/4). This check runs during the build itself: judges whether a UI-facing criterion's submitted checklist_passed/jtbd_framing/deviations_from_system reflects real design thinking or was lazily filled just to pass validation, re-verified adversarially before it can block the criterion the same way architect-review/gate findings do."
+    ssdf_practice: ["PW.7.1"]
 """
 
 SDLC_PHASE_TEMPLATE = """\

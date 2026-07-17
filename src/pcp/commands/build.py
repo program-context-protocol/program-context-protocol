@@ -931,6 +931,84 @@ def _run_design_consistency_check(pcp_dir: Path, project_root: Path, criterion: 
         console.print(f"[yellow]Design consistency (advisory):[/yellow] {findings[0]}")
 
 
+DESIGN_JUSTIFICATION_SYSTEM_PROMPT = (
+    "You judge whether a UI criterion's design_justification block reflects real design "
+    "thinking or was filled in lazily just to pass validation. You are given the "
+    "criterion's own description, an excerpt of the project's design_system.md, and the "
+    "submitted checklist_passed/jtbd_framing/deviations_from_system fields. Flag it as NOT "
+    "substantive if: checklist_passed is empty or contains junk/placeholder strings; "
+    "jtbd_framing is a generic restatement of the criterion description rather than a real "
+    "'when a user is X, this lets them Y' conditional; or the whole block reads as "
+    "boilerplate. Default to substantive=true when genuinely uncertain -- you are the first "
+    "check on this, not the only one; a human still reviews design_audit.md."
+)
+
+
+def _run_design_justification_check(pcp_dir: Path, mod: dict, criterion: dict, ctx: dict) -> list[str]:
+    """PCP Design lifecycle stage 4, closing the gap CLAUDE.md names for this
+    pillar: design_audit.py's Feature Exposure Ladder (_classify_rung) is
+    pure presence/keyword logic -- a checklist_passed full of junk strings or
+    a jtbd_framing sentence that merely contains the word "when" anywhere
+    still classifies as rung 3/4. That's a passive rollup computed after the
+    fact, not enforcement. This is the active check during the build itself:
+    same llm.call_json + _verify_block_findings adversarial pattern as
+    _run_architect_review/_run_gate_check, and findings BLOCK the criterion
+    the same way -- a lazily filled design_justification is exactly the
+    "structural-forcing" mechanism CLAUDE.md flags as still missing here.
+
+    Re-reads acceptance.yaml fresh rather than trusting the `criterion` dict
+    passed in, which is the pre-attempt snapshot from before the coding
+    agent ran -- design_justification is written BY the agent during this
+    attempt, so the caller's copy is always stale for this field."""
+    if not _is_ui_facing_criterion(criterion):
+        return []
+
+    acc_data = load_yaml(mod["acc_path"])
+    fresh = next((c for c in acc_data.get("criteria", []) if c["id"] == criterion["id"]), None)
+    dj = (fresh or {}).get("design_justification")
+    if not dj:
+        return []  # rung 1 (Built, Hidden) -- design_audit.py's rollup already surfaces this
+
+    design_system = (pcp_dir / "design_system.md").read_text() if (pcp_dir / "design_system.md").exists() else ""
+    prompt = (
+        f"## Criterion\n{criterion.get('description', '')}\n\n"
+        f"## design_system.md excerpt\n{design_system[:3000]}\n\n"
+        f"## design_justification submitted\n"
+        f"checklist_passed: {dj.get('checklist_passed')}\n"
+        f"jtbd_framing: {dj.get('jtbd_framing')}\n"
+        f"deviations_from_system: {dj.get('deviations_from_system')}\n\n"
+        '## Respond with JSON only\n'
+        '{"substantive": true, "reason": "..."}'
+    )
+    try:
+        res, meta = llm.call_json(
+            DESIGN_JUSTIFICATION_SYSTEM_PROMPT, prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir,
+            command="build-design-justification", return_meta=True,
+        )
+    except Exception as e:
+        console.print(f"[yellow]Warning: design_justification check call failed: {e}[/yellow]")
+        _qa_record(pcp_dir, ctx, "design-justification", [f"call failed: {e}"], control_id="CTRL-015", result="error")
+        return []
+
+    findings = []
+    if not res.get("substantive", True):
+        findings.append(
+            f"design_justification for {criterion['id']} reads as lazily filled, not real "
+            f"design thinking: {res.get('reason', '')}"
+        )
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "design-justification", json.dumps(res, indent=2),
+    )
+    # _verify_block_findings' first positional param is normally a code diff to
+    # ground findings against -- repurposed here as the submitted justification
+    # block itself, since that (not a code diff) is what this finding is about.
+    kept, _dropped = _verify_block_findings(
+        pcp_dir, json.dumps(dj), findings, ctx, "design-justification", "CTRL-015",
+    )
+    _qa_record(pcp_dir, ctx, "design-justification", kept, meta, control_id="CTRL-015", evidence_path=evidence_path)
+    return kept
+
+
 def _record_escalation(pcp_dir: Path, module_name: str, criterion_id: str, block_findings: list[str]) -> None:
     """Route this criterion's final-attempt failure through OPA's escalation
     policy (.pcp/policies/escalation.rego) -- advisory only, doesn't change
@@ -1113,10 +1191,12 @@ def _build_one_criterion(
         violations_arch = _run_architect_review(pcp_dir, diff, changed_files, ctx)
         violations_gate = _run_gate_check(pcp_dir, diff, ctx)
         _run_design_consistency_check(pcp_dir, project_root, c, ctx)
+        violations_design_justification = _run_design_justification_check(pcp_dir, mod, c, ctx)
 
         block_findings = (
             violations_tests + violations_lint + violations_sast
             + violations_l1 + violations_arch + violations_gate
+            + violations_design_justification
         )
 
         if block_findings:
