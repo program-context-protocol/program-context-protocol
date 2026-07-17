@@ -57,7 +57,7 @@ Autonomous software factory. PM describes what to build. PCP builds it.
 
 ## REVIEW ROUTER — the PM should never need to remember a command name
 
-Real gap found dogfooding: PCP has grown ~29 CLI commands across the whole lifecycle
+Real gap found dogfooding: PCP has grown ~32 CLI commands across the whole lifecycle
 (architecture, logic-tier decisions, design/UI, security, QA, deploy). A PM asking to
 "review the UI strategy" or "check the security posture" shouldn't need to know the
 exact command (`design-audit`, `architecture-justification`, `check`...) exists, let
@@ -80,6 +80,8 @@ Language Rule as above applies here too).
 | "what's the overall status" / "show me everything" | `pcp dashboard` — single HTML, 5 tabs (Overview / Objective & Gaps / Audit Trail / Architecture Justification / Design), already visualizes most of the rows above. Open this first before running things piecemeal. |
 | "what's blocked or bypassed" | `pcp report` (bypass history, coverage score, gate outcomes) |
 | "give me a plain-English status" | `pcp status --pm` |
+| "what changed in this module" / "module history" / "drift ledger for X" | `pcp docs [--module <name>]` — per-module vision/BRD/built/changelog, `changelog.md` is a drift ledger with a computed drift score (in-flight spec changes, bypasses, retries) |
+| "clean up old logs" / "disk is full" / "prune old evidence" | `pcp prune [--evidence-days N] [--transcript-days N]` — deletes stale `.pcp/evidence/`/`.pcp/transcripts/` past a retention window; no-op unless configured, `--dry-run` to preview, mandatory confirmation unless `--yes` |
 
 ### Full command reference, by lifecycle stage (all current as of this skill's own version — re-check `pcp --help` if something here feels stale)
 
@@ -123,10 +125,12 @@ Language Rule as above applies here too).
 - `pcp status [--pm] [--rescan] [--print]` — `pcp.md` snapshot, or a plain-English PM report
 - `pcp dashboard` — unified 5-tab HTML view (see above)
 - `pcp context` — dump `.pcp/` context for LLM consumption at session start
+- `pcp docs [--module <name>]` — per-module doc kit (vision/BRD/built/changelog); `changelog.md` is a chronological drift ledger with a computed drift score, not just a build log
 
 **Deploy / ops**
 - `pcp deploy [--yes] [--rollout N]` — checklist → Layer 3 gate → approval → trigger → smoke test → auto-rollback
 - `pcp watch [--once] [--interval N]` — continuous CI/deploy monitoring, auto-fix on failure
+- `pcp prune [--evidence-days N] [--transcript-days N] [--dry-run] [--yes]` — retention cleanup for `.pcp/evidence/`/`.pcp/transcripts/` (the two directories that actually grow unbounded); does nothing unless a retention window is configured or passed; mandatory confirmation like `pcp deploy`, `--yes` opts out
 
 **Narrow / utility**
 - `pcp verify-syntax-fix <file>` — deterministic SAFE/UNSAFE verdict for a protected-path syntax-only edit (used by the `verify-syntax-fix` PreToolUse hook, not typically invoked directly by a PM)
@@ -567,6 +571,8 @@ Why: a module with 8 criteria accumulates 8 × (code + tests + CI output + error
 
 The fix: each criterion is an independent job. Agent starts clean, does exactly one criterion, commits, exits. Orchestrator spawns the next agent with a fresh context for the next criterion.
 
+**Depth limit: one. Non-negotiable, reference-pattern borrowed from Grok Build's subagent model 2026-07-16** (its `spawn_subagent` tool hard-errors if a subagent tries to call it again — "maximum nesting depth is one"). A criterion agent MUST NOT call the `Agent` or `Workflow` tool itself. Only the top-level orchestrator session spawns criterion agents. This is enforced here as an explicit instruction, not a harness-level denial the way Grok's Rust runtime enforces it structurally — be explicit about that gap rather than implying a guarantee that doesn't exist. Why it matters: a criterion agent that spawns its own helper subagent reintroduces exactly the unbounded-growth failure the orchestrator-session-bound section below exists to prevent, one level down and outside the orchestrator's own turn-count/checkpoint visibility.
+
 **Context budget per agent (strict):**
 ```
 objective.md          — always included (short)
@@ -593,8 +599,10 @@ Do NOT manually spawn Agent tool calls in a loop. Use the `Workflow` tool — it
 
 **Max parallel agents: 25.** The Workflow runtime queues excess calls and runs them as slots free — pass all criteria at once.
 
-**Within a module: criteria are sequential** (each builds on the prior commit).
+**Within a module: criteria are sequential by default** (each builds on the prior commit).
 **Across modules in the same wave: fully parallel.**
+
+**Opt-in exception, 2026-07-16:** if — and only if — a criterion in `acceptance.yaml` declares `depends_on: [<criterion_id>, ...]` (an empty list still counts as the opt-in signal; the *presence* of the key is what matters, same as `design_justification`/`build_vs_buy` elsewhere), criteria in that module are grouped into dependency waves and independent criteria within a wave build concurrently, each in its own git worktree (mirrors module-level worktree isolation one level down — reference-pattern borrowed from Grok Build's per-task worktree-isolated subagents, not module-shaped like PCP's existing pattern). A module where no criterion declares `depends_on` behaves exactly as before — this is additive, never a default-behavior change. The Python CLI's `pcp build` implements this in `build.py`'s `_criteria_parallel_enabled`/`_compute_criterion_waves`; mirror the same opt-in check here before parallelizing criteria within a `pipeline()` call.
 
 Use `pipeline()` — not `parallel()`. Pipeline lets criterion A of module X stream into gate while criterion A of module Y is still being built. No barrier between stages.
 
@@ -668,6 +676,7 @@ ${criterion.prevCommit ? `## Prior work\n${criterion.module}/${criterion.prevId}
 
 Return: { commit: "<hash>", summary: "<one line what was added>", escalation: null | "<what>" }
 Do NOT read other modules. Do NOT continue to next criterion. Exit after step 6.
+Do NOT call the Agent or Workflow tool yourself — depth limit is one level, you are the leaf.
 ```
 
 ### Escalation Bubbling
