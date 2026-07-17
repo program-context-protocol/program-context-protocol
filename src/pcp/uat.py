@@ -1,15 +1,19 @@
-"""UAT checks — `url_responds` and `dom_contains` acceptance criteria.
+"""UAT checks — `url_responds`, `dom_contains`, and `visual` acceptance criteria.
 
-Honest scope: both checks here are real and deterministic, no browser
-involved. `url_responds` is a plain HTTP request. `dom_contains` fetches
-the raw HTML response and searches it as text — it does NOT execute
-JavaScript, so content only rendered client-side (a typical SPA) will not
-be found even if a real browser would show it. That gap needs actual
-browser automation (Playwright, or an agent session with browser MCP
-tools) — not built here, flagged in doctor.py's own "not directly
-verified" note. `visual` (screenshot/visual-diff) criteria are not
-implemented at all and fall through to manual trust, same as before this
-module existed — nothing here silently claims visual coverage.
+Honest scope: `url_responds`/`dom_contains` are deterministic, no browser
+involved — `dom_contains` fetches the raw HTML response and searches it as
+text, so it does NOT execute JavaScript and content only rendered
+client-side (a typical SPA) won't be found even if a real browser would
+show it. `visual` (check_visual) closes part of that gap with a real
+headless browser via Playwright — an OPTIONAL dependency
+(`pip install program-context-protocol[visual]`), never a hard requirement
+of this package. It proves the page renders without crashing/timing out
+and saves a screenshot for human review; it deliberately does NOT attempt
+automated layout-break detection via a vision LLM — this codebase's LLM
+client (llm/client.py) has no image-input plumbing, and building that
+untested here would ship an unverifiable claim. Same honest-disclosure
+posture as `dom_contains`'s own limitation, not overclaiming AI coverage
+this doesn't have.
 
 Same tool-wrapping shape as qa.py: never raises, degrades to a clear
 failure detail instead.
@@ -18,6 +22,7 @@ failure detail instead.
 import re
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 TIMEOUT_SEC = 10
 
@@ -60,3 +65,38 @@ def check_dom_contains(url: str, selector: str) -> tuple[bool, str]:
     except re.error:
         pass
     return False, f"'{selector}' not found in {url}'s static HTML (JS-rendered content won't show here)"
+
+
+def check_visual(url: str, screenshot_path: Path | None = None) -> tuple[bool | None, str]:
+    """Loads `url` in a real headless browser (Playwright/Chromium) and
+    captures a screenshot. Returns (None, detail) — not (False, detail) —
+    when playwright isn't installed: this means "could not check", not
+    "failed". Callers must preserve whatever status a criterion already had
+    rather than downgrading it on a missing optional dependency, the same
+    posture a manual/visual criterion without this check already gets in
+    scan.py."""
+    if not url:
+        return False, "no url configured for visual check"
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None, (
+            "playwright not installed -- visual check skipped, not failed. "
+            "Install with: pip install program-context-protocol[visual] && playwright install chromium"
+        )
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.goto(url, timeout=TIMEOUT_SEC * 1000)
+            if screenshot_path:
+                screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(screenshot_path))
+            browser.close()
+    except Exception as e:
+        return False, f"{url} failed to render in a headless browser: {e}"
+
+    detail = f"{url} rendered successfully in a headless browser"
+    if screenshot_path:
+        detail += f" -- screenshot: {screenshot_path}"
+    return True, detail

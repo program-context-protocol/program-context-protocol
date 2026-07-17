@@ -105,6 +105,7 @@ def _evaluate_criterion(
     project_root: Path,
     prior_manual: dict[str, str],
     spec: dict,
+    pcp_dir: Path | None = None,
 ) -> tuple[str, str]:
     """Returns (status, detail)."""
     cid = criterion["id"]
@@ -133,7 +134,19 @@ def _evaluate_criterion(
         ok, detail = uat.check_dom_contains(criterion.get("url", ""), criterion.get("selector", ""))
         return ("complete" if ok else "pending"), detail
 
-    else:  # manual, visual
+    elif check == "visual":
+        screenshot_path = None
+        if pcp_dir:
+            screenshot_path = pcp_dir / "evidence" / "_visual" / module_name / f"{cid}.png"
+        ok, detail = uat.check_visual(criterion.get("url", ""), screenshot_path)
+        if ok is None:
+            # Optional dependency not installed -- "could not check", not a
+            # verdict. Preserve prior status rather than downgrading it, same
+            # posture the manual fallback below already uses.
+            return criterion.get("status", "pending"), detail
+        return ("complete" if ok else "pending"), detail
+
+    else:  # manual
         key = f"{module_name.upper()}/{cid}"
         prior = prior_manual.get(key)
         if prior:
@@ -146,6 +159,7 @@ def _scan_module(
     acceptance_path: Path,
     project_root: Path,
     prior_manual: dict[str, str],
+    pcp_dir: Path | None = None,
 ) -> dict:
     errors = validate_file(acceptance_path, "module_acceptance")
     if errors:
@@ -158,7 +172,7 @@ def _scan_module(
     results = []
 
     for c in criteria:
-        status, detail = _evaluate_criterion(c, module_name, project_root, prior_manual, data)
+        status, detail = _evaluate_criterion(c, module_name, project_root, prior_manual, data, pcp_dir)
         results.append({
             "id": c["id"],
             "description": c["description"],
@@ -250,7 +264,7 @@ def scan(project_path: str | None, quiet: bool, with_coverage: bool):
     modules_results = []
     for af in acceptance_files:
         module_name = af.parent.name
-        result = _scan_module(module_name, af, project_root, prior_manual)
+        result = _scan_module(module_name, af, project_root, prior_manual, pcp_dir)
         modules_results.append(result)
 
     coverage = None

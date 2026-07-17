@@ -1,6 +1,7 @@
 import http.server
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -132,3 +133,22 @@ def test_evaluate_criterion_dom_contains_pending_when_text_absent(local_server):
     criterion = {"id": "A001", "check": "dom_contains", "url": local_server, "selector": "Goodbye"}
     status, detail = _evaluate_criterion(criterion, "mod", Path("."), {}, {})
     assert status == "pending"
+
+
+def test_evaluate_criterion_visual_complete_on_real_render(local_server, tmp_path):
+    pytest.importorskip("playwright")
+    criterion = {"id": "A001", "check": "visual", "url": local_server}
+    pcp_dir = tmp_path / ".pcp"
+    status, detail = _evaluate_criterion(criterion, "mod", Path("."), {}, {}, pcp_dir)
+    assert status == "complete"
+    assert (pcp_dir / "evidence" / "_visual" / "mod" / "A001.png").exists()
+
+
+def test_evaluate_criterion_visual_preserves_prior_status_when_playwright_missing(tmp_path):
+    """Missing optional dependency must never downgrade a criterion that was
+    already marked complete from a prior scan."""
+    with patch.dict("sys.modules", {"playwright.sync_api": None}):
+        criterion = {"id": "A001", "check": "visual", "url": "http://example.invalid", "status": "complete"}
+        status, detail = _evaluate_criterion(criterion, "mod", Path("."), {}, {}, tmp_path / ".pcp")
+    assert status == "complete"
+    assert "not installed" in detail

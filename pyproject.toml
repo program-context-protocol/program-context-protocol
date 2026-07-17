@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "program-context-protocol"
-version = "0.5.17"
+version = "0.5.18"
 description = "PCP — prevent LLM hallucination and context drift across dev sessions"
 requires-python = ">=3.10"
 dependencies = [
@@ -21,6 +21,11 @@ dependencies = [
 # declared dependencies. Optional: pulls in numpy + ~20 tree-sitter grammars,
 # not needed for the core coupling computation, which only needs networkx.
 graph = ["graphifyy>=0.8"]
+# `visual` acceptance-criterion checks (uat.py's check_visual) — real headless-
+# browser rendering, the one thing dom_contains's static-HTML fetch can't do.
+# Optional: pulls in a Chromium binary via `playwright install`, not needed
+# for anything else in this package.
+visual = ["playwright>=1.40"]
 
 [project.scripts]
 pcp = "pcp.cli:cli"
