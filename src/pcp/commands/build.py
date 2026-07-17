@@ -555,6 +555,27 @@ def _run_wave_build_vs_buy_drift_check(pcp_dir: Path, wave_modules: list[dict], 
     return findings
 
 
+# PCP's own operational writes during a build attempt (usage logging, telemetry,
+# evidence, capture). Found dogfooding 2026-07-17: every LLM call appends to the
+# project's .pcp/token_ledger.yaml, which then landed in changed_files and the
+# judge diff — attempt 1's alignment gate literally scored the token ledger as
+# the PR ("Score 0%: token ledger entry; no implementation progress") and the
+# scope guard flagged PCP's own write as agent over-reach. These paths are never
+# an agent deliverable; they are excluded from gate inputs entirely.
+_PCP_OPERATIONAL_PATHS = (
+    ".pcp/token_ledger.yaml", ".pcp/telemetry.jsonl", ".pcp/decision_log.jsonl",
+    ".pcp/brd.md", ".pcp/brd_items.yaml", ".pcp/coverage_audit.jsonl",
+    ".pcp/escalations.yaml", ".pcp/prune_log.yaml", ".pcp/current_state.md",
+    ".pcp/diff.md",
+)
+_PCP_OPERATIONAL_DIRS = (".pcp/evidence/", ".pcp/transcripts/")
+
+
+def _is_pcp_operational(path: str) -> bool:
+    norm = path.replace("\\", "/").removeprefix("./")
+    return norm in _PCP_OPERATIONAL_PATHS or any(norm.startswith(d) for d in _PCP_OPERATIONAL_DIRS)
+
+
 def _get_unstaged_files(cwd: Path) -> list[str]:
     result = subprocess.run(
         ["git", "diff", "--name-only"],
@@ -576,14 +597,19 @@ def _get_staged_files(cwd: Path) -> list[str]:
 
 
 def _get_working_diff(cwd: Path) -> str:
+    # :(exclude) pathspecs keep PCP's own operational writes (token ledger,
+    # telemetry, evidence) out of the diff the LLM judges see — see
+    # _PCP_OPERATIONAL_PATHS above for why.
+    excludes = [f":(exclude){p}" for p in _PCP_OPERATIONAL_PATHS] + \
+               [f":(exclude){d.rstrip('/')}" for d in _PCP_OPERATIONAL_DIRS]
     result = subprocess.run(
-        ["git", "diff", "HEAD"],
+        ["git", "diff", "HEAD", "--", ".", *excludes],
         capture_output=True, text=True, cwd=cwd,
     )
     if result.returncode != 0:
         # Fallback to general diff
         result = subprocess.run(
-            ["git", "diff"],
+            ["git", "diff", "--", ".", *excludes],
             capture_output=True, text=True, cwd=cwd,
         )
     return result.stdout[:14000]
@@ -917,6 +943,27 @@ def _verify_block_findings(
     return kept, dropped
 
 
+def _criterion_scope_framing(ctx: dict) -> str:
+    """Prepended to build-loop judge prompts (gate + architect-review) so a
+    single criterion's diff is judged as an increment, not the finished
+    product. Found dogfooding 2026-07-17: without this, the alignment gate
+    scored criterion 1 of 13 against the ENTIRE target state and blocked all
+    3 attempts with 'regressions' like 'no CLI entry point' — functionality
+    that simply belonged to later criteria. Incompleteness is not drift.
+    The standalone `pcp gate` command (a real whole-PR review) deliberately
+    keeps its original framing — this applies only inside the build loop."""
+    return (
+        "IMPORTANT CONTEXT: this diff implements exactly ONE acceptance criterion of an "
+        f"in-progress multi-criterion build — [{ctx['criterion_id']}] "
+        f"{ctx.get('criterion_description', '')} (module '{ctx['module']}'). "
+        "Most other criteria and modules are intentionally NOT built yet. Judge only "
+        "whether THIS increment moves correctly: flag genuine contradictions of the "
+        "objective/target state, rule violations, or code that moves away from them. "
+        "Functionality that is merely missing because it belongs to another criterion or "
+        "module is NOT a regression — do not list it and do not lower the score for it.\n\n"
+    )
+
+
 def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ctx: dict) -> list[str]:
     """Run architect review and return BLOCK findings that survive adversarial verification."""
     from pcp.commands.architect_review import SYSTEM_PROMPT, _build_prompt, _load_persona, _load_kb
@@ -924,7 +971,7 @@ def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ct
     architecture = (pcp_dir / "architecture.md").read_text() if (pcp_dir / "architecture.md").exists() else ""
     kb = _load_kb(pcp_dir, changed_files)
 
-    prompt = _build_prompt(persona, architecture, kb, diff, "diff")
+    prompt = _criterion_scope_framing(ctx) + _build_prompt(persona, architecture, kb, diff, "diff")
     try:
         res, meta = llm.call_json(
             SYSTEM_PROMPT, prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir,
@@ -958,7 +1005,7 @@ def _run_gate_check(pcp_dir: Path, diff: str, ctx: dict) -> list[str]:
     current_state = (pcp_dir / "current_state.md").read_text() if (pcp_dir / "current_state.md").exists() else ""
     llm_rules = _load_llm_rules(pcp_dir)
 
-    prompt = _build_prompt(objective, target_state, current_state, diff, llm_rules)
+    prompt = _criterion_scope_framing(ctx) + _build_prompt(objective, target_state, current_state, diff, llm_rules)
     try:
         res, meta = llm.call_json(
             SYSTEM_PROMPT, prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir,
@@ -1406,10 +1453,11 @@ def _build_one_criterion(
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # Run checks
+        # Run checks. PCP's own operational writes (token ledger, telemetry)
+        # are not agent work product — never fed to gates or the scope guard.
         staged = _get_staged_files(project_root)
         unstaged = _get_unstaged_files(project_root)
-        changed_files = list(set(staged + unstaged))
+        changed_files = [f for f in set(staged + unstaged) if not _is_pcp_operational(f)]
 
         if not changed_files:
             console.print("[yellow]No files were modified by the agent.[/yellow]")
@@ -1451,7 +1499,11 @@ def _build_one_criterion(
         # should overlap across concurrently-building modules. Each check
         # function's own _qa_record call is internally lock-guarded.
         console.print(f"[dim]Evaluating gates ({mod['name']}/{c['id']})...[/dim]")
-        ctx = {"module": mod["name"], "submodule": None, "criterion_id": c["id"], "attempt": attempt, "files": changed_files}
+        ctx = {
+            "module": mod["name"], "submodule": None, "criterion_id": c["id"],
+            "criterion_description": c.get("description", ""),
+            "attempt": attempt, "files": changed_files,
+        }
         violations_tests = _run_test_suite_check(pcp_dir, project_root, ctx)
         violations_lint = _run_lint_check(pcp_dir, project_root, changed_files, ctx)
         violations_sast = _run_sast_check(pcp_dir, project_root, changed_files, ctx)
