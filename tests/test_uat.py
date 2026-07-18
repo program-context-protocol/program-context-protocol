@@ -1,6 +1,7 @@
 import http.server
+import subprocess
 import threading
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -137,3 +138,122 @@ def test_check_visual_works_without_screenshot_path(local_server):
     ok, detail = uat.check_visual(f"{local_server}/ok", screenshot_path=None)
     assert ok is True
     assert "screenshot" not in detail
+
+
+# ── check_axe ──
+
+def test_check_axe_false_when_no_url():
+    ok, detail = uat.check_axe("")
+    assert ok is False
+
+
+def test_check_axe_none_when_npx_not_installed():
+    with patch("pcp.uat.shutil.which", return_value=None):
+        ok, detail = uat.check_axe("http://example.com")
+    assert ok is None
+    assert "npx not found" in detail
+
+
+def test_check_axe_true_on_clean_scan():
+    with patch("pcp.uat.shutil.which", return_value="/usr/bin/npx"), \
+         patch("pcp.uat.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="0 violations found!", stderr="")
+        ok, detail = uat.check_axe("http://example.com")
+    assert ok is True
+    assert "no violations" in detail
+
+
+def test_check_axe_false_on_violations():
+    with patch("pcp.uat.shutil.which", return_value="/usr/bin/npx"), \
+         patch("pcp.uat.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stdout="3 violations found", stderr="")
+        ok, detail = uat.check_axe("http://example.com")
+    assert ok is False
+    assert "violation" in detail
+
+
+def test_check_axe_false_on_timeout():
+    with patch("pcp.uat.shutil.which", return_value="/usr/bin/npx"), \
+         patch("pcp.uat.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="npx", timeout=120)):
+        ok, detail = uat.check_axe("http://example.com")
+    assert ok is False
+    assert "timed out" in detail
+
+
+def test_check_axe_invokes_expected_cli_flags():
+    with patch("pcp.uat.shutil.which", return_value="/usr/bin/npx"), \
+         patch("pcp.uat.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        uat.check_axe("http://example.com/page")
+    cmd = mock_run.call_args.args[0]
+    assert cmd[:3] == ["npx", "--yes", "@axe-core/cli"]
+    assert "http://example.com/page" in cmd
+    assert "--exit" in cmd
+    assert "--stdout" in cmd
+
+
+# ── check_visual_quality ──
+
+def test_check_visual_quality_none_when_no_screenshot(tmp_path):
+    ok, detail, items = uat.check_visual_quality(tmp_path / "missing.png")
+    assert ok is None
+    assert items == []
+
+
+def test_check_visual_quality_passes_screenshot_to_judge(tmp_path):
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"fake-png-bytes")
+    verdict = {"items": [{"item": "layout ok", "passed": True, "reason": "looks fine"}], "overall_passed": True}
+    with patch("pcp.llm.client.call_json_with_images", return_value=verdict) as mock_call:
+        ok, detail, items = uat.check_visual_quality(shot)
+    assert ok is True
+    assert detail == "all checklist items passed"
+    assert items == verdict["items"]
+    image_paths = mock_call.call_args.args[2]
+    assert image_paths == [shot]
+
+
+def test_check_visual_quality_includes_reference_image_when_present(tmp_path):
+    shot = tmp_path / "shot.png"
+    ref = tmp_path / "ref.png"
+    shot.write_bytes(b"fake-shot")
+    ref.write_bytes(b"fake-ref")
+    verdict = {"items": [], "overall_passed": True}
+    with patch("pcp.llm.client.call_json_with_images", return_value=verdict) as mock_call:
+        uat.check_visual_quality(shot, reference_image_path=ref)
+    image_paths = mock_call.call_args.args[2]
+    assert image_paths == [shot, ref]
+
+
+def test_check_visual_quality_omits_missing_reference_image(tmp_path):
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"fake-shot")
+    missing_ref = tmp_path / "does_not_exist.png"
+    verdict = {"items": [], "overall_passed": True}
+    with patch("pcp.llm.client.call_json_with_images", return_value=verdict) as mock_call:
+        uat.check_visual_quality(shot, reference_image_path=missing_ref)
+    image_paths = mock_call.call_args.args[2]
+    assert image_paths == [shot]
+
+
+def test_check_visual_quality_false_on_failed_item(tmp_path):
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"fake-shot")
+    verdict = {
+        "items": [{"item": "layout ok", "passed": False, "reason": "overlapping buttons"}],
+        "overall_passed": False,
+    }
+    with patch("pcp.llm.client.call_json_with_images", return_value=verdict):
+        ok, detail, items = uat.check_visual_quality(shot)
+    assert ok is False
+    assert "overlapping buttons" in detail
+
+
+def test_check_visual_quality_none_when_judge_call_errors(tmp_path):
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"fake-shot")
+    with patch("pcp.llm.client.call_json_with_images", side_effect=RuntimeError("boom")):
+        ok, detail, items = uat.check_visual_quality(shot)
+    assert ok is None
+    assert "boom" in detail
+    assert items == []

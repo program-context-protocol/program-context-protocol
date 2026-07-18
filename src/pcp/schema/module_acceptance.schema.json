@@ -38,6 +38,10 @@
           "url": { "type": "string" },
           "selector": { "type": "string" },
           "notes": { "type": "string" },
+          "reference_image": {
+            "type": "string",
+            "description": "Path to a local screenshot/mockup/Figma export image file, relative to project root, that a PM can point a UI-facing criterion at instead of describing the screen in prose alone. Consumed by build.py's _run_visual_quality_check as a second image the VLM judge compares the rendered screenshot against (layout/structure similarity, not pixel-perfect match). A remote URL is not fetched -- must be a file already present in the repo. Optional -- absence just means that check runs without a reference."
+          },
           "status": {
             "type": "string",
             "enum": ["pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"]

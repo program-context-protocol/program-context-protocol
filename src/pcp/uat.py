@@ -1,4 +1,7 @@
-"""UAT checks — `url_responds`, `dom_contains`, and `visual` acceptance criteria.
+"""UAT checks — `url_responds`, `dom_contains`, and `visual` acceptance criteria,
+plus two advisory checks build.py runs on top of a rendered screenshot:
+`check_axe` (deterministic a11y scan) and `check_visual_quality` (checklist-
+anchored VLM judge).
 
 Honest scope: `url_responds`/`dom_contains` are deterministic, no browser
 involved — `dom_contains` fetches the raw HTML response and searches it as
@@ -8,12 +11,20 @@ show it. `visual` (check_visual) closes part of that gap with a real
 headless browser via Playwright — an OPTIONAL dependency
 (`pip install program-context-protocol[visual]`), never a hard requirement
 of this package. It proves the page renders without crashing/timing out
-and saves a screenshot for human review; it deliberately does NOT attempt
-automated layout-break detection via a vision LLM — this codebase's LLM
-client (llm/client.py) has no image-input plumbing, and building that
-untested here would ship an unverifiable claim. Same honest-disclosure
-posture as `dom_contains`'s own limitation, not overclaiming AI coverage
-this doesn't have.
+and saves a screenshot for human review.
+
+**Updated 2026-07-18** — layout-break detection via a vision LLM is now
+built (`check_visual_quality`), closing the gap this docstring used to name
+as out of scope. What changed: `llm/client.py` gained image-input plumbing
+(`call_with_image`/`call_json_with_image`, via `claude -p`'s
+`--input-format stream-json` multimodal message shape). Deliberately
+**checklist-anchored, not a freeform "does this look good" prompt** —
+research (ArtifactsBench, 2026) found a checklist-anchored VLM judge hits
+~94% human-correlation vs. ~21% for a bare Nielsen-heuristics-style review;
+the checklist is what does the work, not the model. Same advisory,
+never-a-hard-block posture as `check_visual`'s baseline-diff note below —
+a screen scoring poorly on the checklist is a review signal, not proof the
+screen is wrong.
 
 Reconnaissance-then-action pattern (wait for `networkidle` before reading
 DOM state) is a reference-pattern borrowed from Anthropic's own
@@ -35,11 +46,27 @@ failure detail instead.
 """
 
 import re
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 TIMEOUT_SEC = 10
+TIMEOUT_AXE = 120
+
+# Checklist-anchored, per the research finding above -- deliberately generic
+# and small rather than exhaustive, same "advisory signal, not proof" posture
+# as check_visual's baseline diff. A criterion's own design_justification
+# (design_system.md tokens, jtbd_framing) is NOT folded in here as additional
+# checklist items -- that field is a self-report the agent fills in, judging
+# a screen against the agent's own claims about itself would be circular.
+DEFAULT_VISUAL_CHECKLIST = [
+    "layout is not visibly broken (no overlapping elements, no obvious clipping/overflow)",
+    "text is legible (adequate contrast against its background, not truncated where it shouldn't be)",
+    "primary action or focal element is visually prominent and easy to locate",
+    "spacing/alignment reads as intentional, not haphazard",
+]
 
 
 def check_url_responds(url: str) -> tuple[bool, str]:
@@ -148,3 +175,97 @@ def _baseline_note(screenshot_path: Path) -> str:
                 "screenshots and delete the baseline to accept the new look")
     except OSError as e:
         return f" -- baseline comparison skipped: {e}"
+
+
+def check_axe(url: str) -> tuple[bool | None, str]:
+    """Deterministic WCAG a11y scan via `@axe-core/cli` (npx, auto-installed
+    on first run same as the Context7 MCP entry doctor.py already scaffolds
+    via npx -- no new hard dependency added to this package). Returns
+    (None, detail) when npx isn't on PATH -- "could not check", same
+    could-not-check-vs-failed distinction check_visual already makes for a
+    missing optional dependency. --exit makes the CLI process exit 1 if any
+    rule fails; --stdout silences everything but the results/errors so the
+    tail of stdout is a usable detail message on failure."""
+    if not url:
+        return False, "no url configured for axe a11y check"
+    if not shutil.which("npx"):
+        return None, "npx not found -- axe-core a11y scan skipped, not failed"
+    try:
+        result = subprocess.run(
+            ["npx", "--yes", "@axe-core/cli", url, "--exit", "--stdout"],
+            capture_output=True, text=True, timeout=TIMEOUT_AXE,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"axe-core scan of {url} timed out after {TIMEOUT_AXE}s"
+    except Exception as e:
+        return False, f"axe-core scan of {url} failed to run: {e}"
+
+    output = (result.stdout + result.stderr).strip()
+    if result.returncode == 0:
+        return True, f"axe-core: no violations found at {url}"
+    return False, f"axe-core found violation(s) at {url}:\n{output[-3000:]}"
+
+
+def check_visual_quality(
+    screenshot_path: Path,
+    checklist: list[str] | None = None,
+    reference_image_path: Path | None = None,
+    model: str | None = None,
+    pcp_dir: Path | None = None,
+) -> tuple[bool | None, str, list[dict]]:
+    """Checklist-anchored VLM judge over a screenshot check_visual already
+    captured. Returns (None, detail, []) if the screenshot doesn't exist
+    (nothing to judge -- same could-not-check posture as a missing optional
+    dependency elsewhere in this module) or if the judge call itself errors
+    (advisory check, never let an LLM-call failure read as a verdict).
+
+    reference_image_path, if given, is attached as a second inline image so
+    the judge can compare against it -- research finding: screenshot +
+    reference beats either alone as grounding context. Comparison is
+    layout/structure, not pixel-perfect match; the prompt says so explicitly
+    so the judge doesn't fail a screen for a legitimate content difference.
+    """
+    if not screenshot_path or not screenshot_path.exists():
+        return None, "no screenshot available to judge (check_visual must run first)", []
+
+    from pcp.llm import client as llm
+
+    items = checklist or DEFAULT_VISUAL_CHECKLIST
+    checklist_text = "\n".join(f"- {item}" for item in items)
+    system = (
+        "You judge a rendered UI screenshot against a fixed checklist. For EACH "
+        "checklist item, decide pass/fail and give a one-sentence reason grounded "
+        "in what you actually see in the image -- never invent a defect that isn't "
+        "visible. If a reference image is also attached, use it only to judge "
+        "layout/structure similarity, not pixel-perfect match; a legitimate content "
+        "difference (different copy, different data) is not a failure."
+    )
+    user = (
+        f"Checklist:\n{checklist_text}\n\n"
+        "Respond with JSON: "
+        '{"items": [{"item": "<checklist item text>", "passed": true|false, "reason": "..."}], '
+        '"overall_passed": true|false}. overall_passed is true only if every item passed.'
+    )
+    if reference_image_path and reference_image_path.exists():
+        user += "\n\nA reference image is attached second, after the rendered screenshot, for comparison."
+
+    image_paths = [screenshot_path]
+    if reference_image_path and reference_image_path.exists():
+        image_paths.append(reference_image_path)
+
+    try:
+        verdict = llm.call_json_with_images(
+            system, user, image_paths,
+            model=model or llm.JUDGE_MODEL, pcp_dir=pcp_dir, command="uat.check_visual_quality",
+        )
+    except Exception as e:
+        return None, f"visual-quality judge call failed: {e}", []
+
+    checked_items = verdict.get("items", [])
+    overall = bool(verdict.get("overall_passed", all(i.get("passed") for i in checked_items)))
+    failed = [i for i in checked_items if not i.get("passed")]
+    if not overall and failed:
+        detail = "; ".join(f"{i.get('item', '?')}: {i.get('reason', '')}" for i in failed)
+    else:
+        detail = "all checklist items passed"
+    return overall, detail, checked_items

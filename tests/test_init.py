@@ -129,13 +129,13 @@ def test_init_generated_ci_rules_do_not_self_match_their_own_file(tmp_path):
         assert violations == [], f"{rule['id']} self-matches its own ci_rules.yaml definition"
 
 
-def test_init_generated_controls_yaml_parses_and_has_twentyone_controls(tmp_path):
+def test_init_generated_controls_yaml_parses_and_has_twentythree_controls(tmp_path):
     import yaml
     runner = CliRunner()
     runner.invoke(cli, ["init", "--path", str(tmp_path)])
     data = yaml.safe_load((tmp_path / ".pcp" / "controls.yaml").read_text())
-    assert len(data["controls"]) == 21
-    assert {c["id"] for c in data["controls"]} == {f"CTRL-{i:03d}" for i in range(1, 22)}
+    assert len(data["controls"]) == 23
+    assert {c["id"] for c in data["controls"]} == {f"CTRL-{i:03d}" for i in range(1, 24)}
     # schema enum only allows layer1/layer2/layer3/wave-merge/build-loop/cross-cutting —
     # CTRL-013/015/017 shipped with the invalid `layer: build` until 2026-07-17
     valid_layers = {"layer1", "layer2", "layer3", "wave-merge", "build-loop", "cross-cutting"}

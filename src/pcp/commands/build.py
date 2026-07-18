@@ -23,6 +23,7 @@ from pcp import telemetry
 from pcp import qa
 from pcp import evidence
 from pcp import spend
+from pcp import uat
 from pcp.capture import find_transcript_for_session, run_capture
 
 console = Console()
@@ -821,20 +822,28 @@ def _build_agent_prompt(
         prompt_parts.append("")
 
     if _is_ui_facing_criterion(criterion):
+        reference_image = criterion.get("reference_image")
+        reference_line = (
+            f" A reference image is declared for this criterion at `{reference_image}` — "
+            "look at it before building; it's also fed to the automated visual-quality "
+            "check as a comparison target after you finish (layout/structure similarity, "
+            "not pixel-perfect)."
+            if reference_image else ""
+        )
         prompt_parts.append(
             "This criterion renders user-facing UI. Read `.pcp/design_system.md` first "
             "and apply its established tokens/conventions rather than deciding a look "
             "fresh — if it's still the empty scaffold, this is the first UI screen: "
             "establish the system now (see the `pcp-ui-design` skill) and write it there "
             "so later screens stay consistent instead of each looking like a different "
-            "vanilla template. Before finishing, add a `design_justification` block to "
-            "this criterion in acceptance.yaml: `checklist_passed` (which design-system "
-            "conventions this screen actually followed), `jtbd_framing` (one sentence, "
-            "'when a user is X, this lets them Y' — not a restatement of the description), "
-            "and `deviations_from_system` if this screen needed a new pattern the system "
-            "didn't have yet. If a `webapp-testing` skill is available, use it to actually "
-            "load the running page and verify it renders/behaves as intended before "
-            "finishing — don't just trust that the code compiles."
+            f"vanilla template.{reference_line} Before finishing, add a `design_justification` "
+            "block to this criterion in acceptance.yaml: `checklist_passed` (which "
+            "design-system conventions this screen actually followed), `jtbd_framing` "
+            "(one sentence, 'when a user is X, this lets them Y' — not a restatement of "
+            "the description), and `deviations_from_system` if this screen needed a new "
+            "pattern the system didn't have yet. If a `webapp-testing` skill is available, "
+            "use it to actually load the running page and verify it renders/behaves as "
+            "intended before finishing — don't just trust that the code compiles."
         )
         prompt_parts.append("")
 
@@ -1346,6 +1355,80 @@ def _run_design_consistency_check(pcp_dir: Path, project_root: Path, criterion: 
     )
     if findings:
         console.print(f"[yellow]Design consistency (advisory):[/yellow] {findings[0]}")
+
+
+def _run_a11y_check(pcp_dir: Path, criterion: dict, ctx: dict) -> None:
+    """PCP Design lifecycle, stage 4 addendum. Advisory only -- never
+    returned into block_findings, same posture as _run_design_consistency_check.
+    Deterministic WCAG scan (axe-core via npx, uat.check_axe) against a
+    UI-facing criterion's declared url. Only fires when both hold -- most
+    criteria have no url at all, and this can't scan a page it can't reach.
+    CTRL-022."""
+    if not _is_ui_facing_criterion(criterion):
+        return
+    url = criterion.get("url")
+    if not url:
+        _qa_record(pcp_dir, ctx, "a11y", [], control_id="CTRL-022", tool=None)
+        return
+    ok, detail = uat.check_axe(url)
+    if ok is None:
+        # npx not on PATH -- "could not check", not "failed" (see uat.check_axe).
+        _qa_record(pcp_dir, ctx, "a11y", [], control_id="CTRL-022", tool=None)
+        return
+    findings = [] if ok else [detail]
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "a11y", detail,
+    )
+    _qa_record(pcp_dir, ctx, "a11y", findings, control_id="CTRL-022", tool="axe-core", evidence_path=evidence_path)
+    if findings:
+        console.print(f"[yellow]Accessibility (advisory):[/yellow] {detail.splitlines()[0][:200]}")
+
+
+def _run_visual_quality_check(pcp_dir: Path, project_root: Path, criterion: dict, ctx: dict) -> None:
+    """PCP Design lifecycle, stage 4 addendum. Advisory only -- never
+    returned into block_findings. Checklist-anchored VLM judge
+    (uat.check_visual_quality) over a fresh screenshot of a UI-facing
+    criterion's declared url -- research finding behind why this is
+    checklist-anchored rather than a freeform "does this look good" prompt:
+    a checklist-anchored VLM judge measures ~94% human-correlation vs. ~21%
+    for a bare Nielsen-heuristics-style review (ArtifactsBench, 2026).
+    Compares against the criterion's own reference_image when declared.
+    CTRL-023."""
+    if not _is_ui_facing_criterion(criterion):
+        return
+    url = criterion.get("url")
+    if not url:
+        _qa_record(pcp_dir, ctx, "visual-quality", [], control_id="CTRL-023", tool=None)
+        return
+
+    screenshot_path = pcp_dir / "evidence" / "_visual" / ctx["module"] / f"{ctx['criterion_id']}.png"
+    rendered, _render_detail = uat.check_visual(url, screenshot_path)
+    if not rendered:
+        # Either playwright isn't installed (None) or the page failed to
+        # render (False) -- either way there's no screenshot to judge.
+        _qa_record(pcp_dir, ctx, "visual-quality", [], control_id="CTRL-023", tool=None)
+        return
+
+    reference_image = criterion.get("reference_image")
+    reference_path = (project_root / reference_image) if reference_image else None
+    ok, detail, items = uat.check_visual_quality(
+        screenshot_path, reference_image_path=reference_path, pcp_dir=pcp_dir,
+    )
+    if ok is None:
+        _qa_record(pcp_dir, ctx, "visual-quality", [], control_id="CTRL-023", tool=None)
+        return
+
+    findings = [] if ok else [detail]
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "visual-quality",
+        json.dumps(items, indent=2) if items else detail,
+    )
+    _qa_record(
+        pcp_dir, ctx, "visual-quality", findings, control_id="CTRL-023", tool="vlm-judge",
+        evidence_path=evidence_path,
+    )
+    if findings:
+        console.print(f"[yellow]Visual quality (advisory):[/yellow] {detail[:200]}")
 
 
 DESIGN_JUSTIFICATION_SYSTEM_PROMPT = (
@@ -2015,6 +2098,8 @@ def _build_one_criterion(
         violations_arch = _run_architect_review(pcp_dir, diff, changed_files, ctx)
         violations_gate = _run_gate_check(pcp_dir, diff, ctx)
         _run_design_consistency_check(pcp_dir, project_root, c, ctx)
+        _run_a11y_check(pcp_dir, c, ctx)
+        _run_visual_quality_check(pcp_dir, project_root, c, ctx)
         violations_design_justification = _run_design_justification_check(pcp_dir, mod, c, ctx)
         violations_bvb_justification = _run_build_vs_buy_justification_check(pcp_dir, mod, c, ctx)
 

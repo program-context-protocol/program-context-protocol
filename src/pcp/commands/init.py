@@ -339,6 +339,24 @@ controls:
     enforcement: advisory
     description: "The Decision Integrity gap: nothing previously challenged a criterion lazily declared rung 6 that a truth table could serve, or rung 1 with judgment-shaped language in its own description. The rung-6 half is the ladder's one irreducibly semantic gate, so it gets the same posture as coverage_score — advisory, recorded, never trusted blindly, never blocking."
     ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-022
+    name: "Accessibility (WCAG) scan"
+    layer: build-loop
+    mechanism: "build.py _run_a11y_check(), uat.check_axe() -- @axe-core/cli via npx"
+    tool: "axe-core"
+    enforcement: advisory
+    description: "PCP Design lifecycle, stage 4 addendum. Only fires on a UI-facing criterion that declares a url -- deterministic WCAG scan of the rendered page, no LLM involved. Advisory, same warn-first rollout posture as CTRL-013/018/019/020: a11y defects are real and common in AI-generated UI, but false-positive rate on real projects isn't measured yet."
+    ssdf_practice: ["PW.7.1"]
+
+  - id: CTRL-023
+    name: "Visual quality (checklist-anchored VLM judge)"
+    layer: build-loop
+    mechanism: "build.py _run_visual_quality_check(), uat.check_visual_quality() -- llm.call_json_with_images against a fresh screenshot"
+    tool: "judge model (JUDGE_MODEL)"
+    enforcement: advisory
+    description: "PCP Design lifecycle, stage 4 addendum, from a 2026-07-18 research pass on the intent-to-UI articulation gap: a checklist-anchored VLM judge measures ~94% human-correlation vs. ~21% for a bare freeform review, so this deliberately judges a fixed checklist rather than asking 'does this look good.' Only fires on a UI-facing criterion that declares a url; compares against the criterion's own reference_image when one is declared. Advisory only -- an LLM visual judgment should never hard-block a build until its own false-positive rate is measured on real projects, same posture every other judge-model gate in this catalog started at."
+    ssdf_practice: ["PW.7.1"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\
