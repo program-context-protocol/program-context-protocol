@@ -255,6 +255,12 @@ def doctor(project_path: str | None, check_only: bool):
     )
     console.print(f"Context7 (live library docs for `pcp build`'s coding agent): {c7_status}")
 
+    # Context-route staleness (CTRL-021): a route resolving to zero files
+    # silently starves agents of context — flag it here where humans look.
+    from pcp import context_map
+    for finding in context_map.validate(pcp_dir):
+        console.print(f"[yellow]⚠[/yellow] {finding}")
+
     # Rung-aware tooling recommendations (2026-07-17): projects declaring
     # rung-6 criteria should schema-validate LLM output with a real library
     # (Outlines = constrained decoding, strongest guarantee; Instructor =

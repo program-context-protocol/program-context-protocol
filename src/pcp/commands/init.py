@@ -322,6 +322,15 @@ controls:
     description: "CTRL-014 checks the negative for rungs <=5 (no LLM SDK); this checks the positive: a rung-2 criterion with no solver import, rung-4 with no retrieval dependency, rung-5 with no cache layer is likely a tier declared but not implemented at that tier. Advisory — the mechanism may live in a shared helper the target imports; earns hard-block only after a measured false-positive rate."
     ssdf_practice: ["PW.1.1"]
 
+  - id: CTRL-021
+    name: "Context-route staleness"
+    layer: wave-merge
+    mechanism: "context_map.validate() — every route in .pcp/context_map.yaml must resolve to at least one existing file (per known module for {module} templates, or via fallback)"
+    tool: "n/a — deterministic path resolution, no external tool"
+    enforcement: advisory
+    description: "The context routing table is itself a drift surface: files evolve, routes go stale, and a stale route silently starves agents of the context they need — worse and less visible than over-feeding, since a missing rule breaks a gate invisibly while an extra file only costs tokens. Checked at wave boundaries and by pcp doctor."
+    ssdf_practice: ["PW.1.1"]
+
   - id: CTRL-020
     name: "Rung-necessity challenge (over/under-declaration)"
     layer: wave-merge
@@ -330,6 +339,36 @@ controls:
     enforcement: advisory
     description: "The Decision Integrity gap: nothing previously challenged a criterion lazily declared rung 6 that a truth table could serve, or rung 1 with judgment-shaped language in its own description. The rung-6 half is the ladder's one irreducibly semantic gate, so it gets the same posture as coverage_score — advisory, recorded, never trusted blindly, never blocking."
     ssdf_practice: ["PW.1.1"]
+"""
+
+CONTEXT_MAP_TEMPLATE = """\
+version: "1.0"
+# Deterministic context routing: which files an agent reads per scenario.
+# Human-editable; consumed by pcp build's prompt builder. Rules that keep
+# routing safe (see logic_tier_guide.md's sibling doc rationale):
+# - scenarios are detected from schema fields, never by an LLM
+# - intent files (objective/spec) are routed WHOLE, never fragmented
+# - sliced state must be a GENERATED projection (docs/built.md), never a
+#   hand-maintained copy -- copies diverge, projections can't
+# `{module}` is substituted per-criterion. `fallback` used only when no
+# primary file exists. Routes resolving to zero files are flagged (CTRL-021).
+routes:
+  always:
+    files:
+      - .pcp/objective.md
+      - .pcp/architecture.md
+      - .pcp/architect_persona.md
+  module_state:
+    files:
+      - .pcp/strategy/modules/{module}/docs/built.md
+    fallback:
+      - .pcp/current_state.md
+  ui_facing:
+    files:
+      - .pcp/design_system.md
+  logic_tier_declared:
+    files:
+      - .pcp/logic_tier_guide.md
 """
 
 LOGIC_TIER_GUIDE_TEMPLATE = """\
@@ -952,6 +991,7 @@ def init(project_path: str, module_name: str | None, force: bool):
         pcp / "hooks" / "pretooluse_guard.sh": PRETOOLUSE_GUARD_TEMPLATE,
         pcp / "policies" / "tier_distribution.rego": POLICY_TIER_DISTRIBUTION_TEMPLATE,
         pcp / "logic_tier_guide.md": LOGIC_TIER_GUIDE_TEMPLATE,
+        pcp / "context_map.yaml": CONTEXT_MAP_TEMPLATE,
     }
 
     if module_name:

@@ -484,6 +484,15 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     _run_wave_tier_presence_check(pcp_dir, wave_modules, wave_number)
     _run_wave_rung_necessity_check(pcp_dir, wave_modules, wave_number)
 
+    # 9. Context-route staleness (CTRL-021, advisory) — the routing table is
+    # itself a drift surface; a stale route starves agents silently.
+    from pcp import context_map
+    route_findings = context_map.validate(pcp_dir)
+    _wave_record(pcp_dir, wave_number, "context-routes", "CTRL-021", route_findings,
+                 files=[], result="pass")
+    for f in route_findings:
+        console.print(f"[yellow]{f}[/yellow]")
+
     return findings
 
 
@@ -737,17 +746,30 @@ def _build_agent_prompt(
     """First-attempt prompt. You have filesystem access — read .pcp/ context yourself
     instead of having it pasted here. Pasting it costs input tokens on every single
     criterion/attempt for content that's identical across the whole build run."""
+    # Context routing (2026-07-18): the file list comes from the declarative
+    # context_map (scenario -> files), not a hardcoded paste-adjacent list.
+    # module_state routes to THIS module's generated state slice
+    # (docs/built.md — a projection regenerated from acceptance.yaml), not
+    # program-wide current_state.md: on a many-module project the global
+    # file is mostly other modules' context — measured contamination, not
+    # useful grounding. Falls back to current_state.md when the slice
+    # doesn't exist yet (pre-docs-kit projects).
+    from pcp import context_map
+    always_files = context_map.resolve(pcp_dir, "always")
+    state_files = context_map.resolve(pcp_dir, "module_state", module=module_name)
+    read_list = [f"- {p}" for p in always_files + state_files] or [
+        "- .pcp/objective.md", "- .pcp/architecture.md", "- .pcp/current_state.md",
+    ]
     prompt_parts = [
         "You are an AI coding agent implementing an acceptance criterion for a program module.",
         "Your task is to write/modify code in the project to implement this feature.",
         f"Module: {module_name}",
         f"Criterion: [{criterion['id']}] {criterion['description']}",
         "",
-        "Before editing, read these files yourself for context (don't ask — just Read them):",
-        "- .pcp/objective.md       (program objective)",
-        "- .pcp/architecture.md    (tech decisions + constraints)",
-        "- .pcp/architect_persona.md (architecture review principles — your code must satisfy these)",
-        "- .pcp/current_state.md   (what's already built)",
+        "Before editing, read these files yourself for context (don't ask — just Read them). "
+        "Read ONLY these — they are routed for this specific criterion; pulling in other "
+        ".pcp/ files adds noise, not grounding:",
+        *read_list,
         "",
     ]
 
