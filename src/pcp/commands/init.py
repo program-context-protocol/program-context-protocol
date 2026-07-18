@@ -312,6 +312,24 @@ controls:
     enforcement: advisory
     description: "Over-reach guard: a criterion agent modifying files outside its own module's declared surface is the classic unattended-loop failure mode (loop touches unrelated code). PCP had a denylist (protected_path) but no allowlist until now. Warn-only by default — legitimate cross-cutting writes exist (module registries, shared interfaces), so the false-positive rate should be measured on real builds before enforcement; PCP_BUILD_SCOPE_MODE=block upgrades it to a hard per-attempt gate, =off disables (recorded as skipped, never silently)."
     ssdf_practice: ["PS.1.1", "PW.7.1"]
+
+  - id: CTRL-019
+    name: "Logic-tier mechanism presence (positive check)"
+    layer: wave-merge
+    mechanism: "build.py _run_wave_tier_presence_check() — rungs 2-5 target files checked for their declared rung's mechanism signature (solver/ML/retrieval/cache imports; stdlib lru_cache counts for rung 5)"
+    tool: "n/a — deterministic import analysis, no external tool"
+    enforcement: advisory
+    description: "CTRL-014 checks the negative for rungs <=5 (no LLM SDK); this checks the positive: a rung-2 criterion with no solver import, rung-4 with no retrieval dependency, rung-5 with no cache layer is likely a tier declared but not implemented at that tier. Advisory — the mechanism may live in a shared helper the target imports; earns hard-block only after a measured false-positive rate."
+    ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-020
+    name: "Rung-necessity challenge (over/under-declaration)"
+    layer: wave-merge
+    mechanism: "build.py _run_wave_rung_necessity_check() — deterministic judgment-keyword contradiction check for rung-1 declarations, plus ONE batched judge call per wave over completed rung-6 criteria (could a cheaper rung serve?)"
+    tool: "judge model (rung-6 half only; rung-1 half is keyword-deterministic)"
+    enforcement: advisory
+    description: "The Decision Integrity gap: nothing previously challenged a criterion lazily declared rung 6 that a truth table could serve, or rung 1 with judgment-shaped language in its own description. The rung-6 half is the ladder's one irreducibly semantic gate, so it gets the same posture as coverage_score — advisory, recorded, never trusted blindly, never blocking."
+    ssdf_practice: ["PW.1.1"]
 """
 
 PRETOOLUSE_GUARD_TEMPLATE = """\
@@ -693,6 +711,20 @@ deny contains msg if {
 }
 """
 
+POLICY_TIER_DISTRIBUTION_TEMPLATE = """\
+package pcp.tier_distribution
+
+# Logic-tier distribution bands (2026-07-18). How much of the product is
+# allowed to live at rung 6 (LLM, nondeterministic) before validate-strategy
+# colors the mix yellow/red? Advisory only -- this encodes a team's
+# predictability budget, human-editable here instead of buried in Python.
+# Defaults mirror validate_strategy.py's fallback bands.
+
+color := "green" if input.rung6_share <= 0.35
+else := "yellow" if input.rung6_share <= 0.6
+else := "red"
+"""
+
 POLICY_COUPLING_TEMPLATE = """\
 package pcp.coupling
 
@@ -825,6 +857,7 @@ def init(project_path: str, module_name: str | None, force: bool):
         pcp / "policies" / "coupling_threshold.rego": POLICY_COUPLING_TEMPLATE,
         pcp / "policies" / "deploy_policy.rego": POLICY_DEPLOY_TEMPLATE,
         pcp / "hooks" / "pretooluse_guard.sh": PRETOOLUSE_GUARD_TEMPLATE,
+        pcp / "policies" / "tier_distribution.rego": POLICY_TIER_DISTRIBUTION_TEMPLATE,
     }
 
     if module_name:

@@ -46,6 +46,8 @@ CHECK_TO_CONTROL = {
     "wave-validate-strategy": "CTRL-008",
     "deploy-phase-exit": "CTRL-009",
     "build-scope": "CTRL-018",
+    "tier-presence": "CTRL-019",
+    "rung-necessity": "CTRL-020",
 }
 
 

@@ -139,6 +139,39 @@ def _add_coupling(result: dict, modules: dict[str, dict], project_root: Path | N
     return result
 
 
+def _add_tier_distribution(pcp_dir: Path, result: dict) -> dict:
+    """Logic-tier distribution policy (2026-07-18). A project can pass every
+    other gate while 80% of its criteria quietly declare rung 6 — 'all LLM
+    all the time' is a legitimate strategy only if chosen deliberately.
+    Deterministic count over acceptance.yaml files; bands human-editable via
+    .pcp/policies/tier_distribution.rego (same pattern as coupling_threshold),
+    hardcoded fallback: rung-6 share green <=0.35, yellow <=0.6, else red.
+    ADVISORY — surfaced, never blocks; predictability budget is a per-project
+    judgment call, the policy file is where a team encodes theirs."""
+    modules_dir = get_modules_dir(pcp_dir)
+    dist: dict[int, int] = {}
+    total = 0
+    for acc_path in sorted(modules_dir.glob("*/acceptance.yaml")):
+        for c in (load_yaml(acc_path) or {}).get("criteria", []):
+            tier = c.get("logic_tier")
+            if isinstance(tier, int):
+                dist[tier] = dist.get(tier, 0) + 1
+                total += 1
+    if not total:
+        return result
+    rung6_share = dist.get(6, 0) / total
+    from pcp import policy
+    decision = policy.evaluate(pcp_dir, "data.pcp.tier_distribution.color", {"rung6_share": rung6_share})
+    if decision.get("available") and not decision.get("undefined") and decision.get("value"):
+        color = decision["value"]
+    else:
+        color = "green" if rung6_share <= 0.35 else "yellow" if rung6_share <= 0.6 else "red"
+    result["tier_distribution"] = {str(k): v for k, v in sorted(dist.items())}
+    result["rung6_share"] = round(rung6_share, 2)
+    result["tier_distribution_color"] = color
+    return result
+
+
 def _add_coverage_audit(pcp_dir: Path, result: dict, objective: str, modules: dict[str, dict]) -> dict:
     """Goodhart mitigation on the LLM-judged coverage_score (see coverage_audit.py):
     never corrects the score, only surfaces internal-inconsistency and drift
@@ -168,6 +201,15 @@ def _render_results(pcp_dir: Path, result: dict, output_json: bool) -> int:
         gaps = result.get("coverage_gaps", [])
         return 1 if gaps else 0
 
+    if result.get("tier_distribution") is not None:
+        color = result.get("tier_distribution_color", "green")
+        share = result.get("rung6_share", 0.0)
+        console.print(
+            f"[{color}]Logic-tier mix:[/{color}] {result['tier_distribution']} — "
+            f"rung-6 (LLM) share {share:.0%} "
+            + ("" if color == "green" else "(advisory: high LLM share — deliberate choice, or tier laziness? "
+               "Bands editable in .pcp/policies/tier_distribution.rego)")
+        )
     hidden = result.get("hidden_coupling") or []
     for h in hidden:
         console.print(
@@ -273,6 +315,7 @@ def run_validate_strategy(pcp_dir: Path, command: str = "validate-strategy") -> 
     result = llm.call_json(SYSTEM_PROMPT, user_prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command=command)
     result = _add_deterministic_coverage(result, objective, modules)
     result = _add_coupling(result, modules, project_root=pcp_dir.parent)
+    result = _add_tier_distribution(pcp_dir, result)
     return _add_coverage_audit(pcp_dir, result, objective, modules)
 
 

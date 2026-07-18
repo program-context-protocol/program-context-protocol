@@ -474,6 +474,16 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     bvb_findings = _run_wave_build_vs_buy_drift_check(pcp_dir, wave_modules, wave_number)
     findings += bvb_findings
 
+    # 7-8. Logic-tier integrity, ADVISORY pair (2026-07-18): positive
+    # mechanism-presence check for rungs 2-5 (CTRL-019) and rung-necessity
+    # challenge (CTRL-020). Both record + print, neither blocks — presence
+    # has a known false-positive path (mechanism can live in an imported
+    # helper, not the target file itself), and necessity is a semantic
+    # judgment; per the L1-report-first standing rule both earn hard-block
+    # status only after a measured false-positive rate says they deserve it.
+    _run_wave_tier_presence_check(pcp_dir, wave_modules, wave_number)
+    _run_wave_rung_necessity_check(pcp_dir, wave_modules, wave_number)
+
     return findings
 
 
@@ -1525,6 +1535,155 @@ def _run_scope_check(pcp_dir: Path, mod: dict, criterion: dict, changed_files: l
     if findings and mode == "warn":
         console.print(f"[yellow]Scope guard (advisory):[/yellow] {findings[0]}")
         return []
+    return findings
+
+
+# Mechanism-signature libraries per rung, for the POSITIVE tier check
+# (CTRL-019). Import-name based, so the same caveat as CTRL-016 applies —
+# package names differ from import names — but these are the import names
+# themselves, curated per rung. Rung 5 additionally matches stdlib
+# `lru_cache`/`cache` decorators by content, since caching legitimately
+# needs no third-party dependency.
+_TIER_MECHANISM_LIBS: dict[int, set[str]] = {
+    2: {"ortools", "pulp", "cvxpy", "z3", "pyomo", "mip", "scipy"},
+    3: {"sklearn", "xgboost", "lightgbm", "catboost", "torch", "tensorflow", "statsmodels", "prophet"},
+    4: {"chromadb", "faiss", "qdrant_client", "weaviate", "pinecone", "semantic_router", "rank_bm25", "whoosh", "elasticsearch", "opensearchpy"},
+    5: {"gptcache", "redis", "diskcache", "cachetools", "memcache", "pymemcache"},
+}
+
+_RUNG5_STDLIB_CACHE_PATTERN = re.compile(r"\blru_cache\b|\bfunctools\.cache\b")
+
+# Judgment-shaped verbs in a criterion description are a cheap contradiction
+# signal against a declared rung 1 ("no judgment, fixed conditions").
+_JUDGMENT_KEYWORDS = (
+    "recommend", "summarize", "summarise", "classify sentiment", "interpret",
+    "understand intent", "natural language", "judge", "assess quality", "generate text",
+)
+
+
+def _run_wave_tier_presence_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
+    """7th wave-merge sub-check, CTRL-019, ADVISORY. CTRL-014 checks the
+    NEGATIVE for rungs <=5 (no LLM SDK may appear); this checks the POSITIVE
+    for rungs 2-5: the declared mechanism should be visible — a rung-2
+    criterion whose target imports no solver, a rung-4 with no retrieval
+    dependency, a rung-5 with no cache layer is likely a tier declared but
+    not actually implemented AT that tier. Advisory because the mechanism may
+    legitimately live in a shared helper module the target imports — measure
+    the false-positive rate before this can earn hard-block status."""
+    project_root = pcp_dir.parent
+    findings: list[str] = []
+    checked_files: list[str] = []
+
+    for mod in wave_modules:
+        acc_path = pcp_dir / "strategy" / "modules" / mod["name"] / "acceptance.yaml"
+        if not acc_path.exists():
+            continue
+        acc = load_yaml(acc_path)
+        for c in acc.get("criteria", []):
+            if c.get("status") != "complete":
+                continue
+            tier = c.get("logic_tier")
+            target = c.get("target")
+            if tier not in _TIER_MECHANISM_LIBS or not target:
+                continue
+            full_path = project_root / target
+            if not full_path.exists() or not full_path.is_file():
+                continue
+            checked_files.append(target)
+            imports = _external_python_imports(full_path, project_root)
+            expected = _TIER_MECHANISM_LIBS[tier]
+            present = bool(imports & expected)
+            if not present and tier == 5:
+                try:
+                    present = bool(_RUNG5_STDLIB_CACHE_PATTERN.search(full_path.read_text(errors="replace")))
+                except OSError:
+                    present = False
+            if not present:
+                findings.append(
+                    f"Tier presence (advisory): '{mod['name']}/{c['id']}' declares logic_tier={tier} "
+                    f"but {target} shows none of that rung's mechanism signatures "
+                    f"({', '.join(sorted(expected)[:4])}…) — tier may be declared but not implemented"
+                )
+
+    _wave_record(pcp_dir, wave_number, "tier-presence", "CTRL-019", findings,
+                 files=checked_files, result="pass")
+    for f in findings:
+        console.print(f"[yellow]{f}[/yellow]")
+    return findings
+
+
+RUNG_NECESSITY_SYSTEM_PROMPT = (
+    "You audit logic-tier declarations for over-use of LLM reasoning. For each numbered "
+    "criterion (all declared rung 6 = deep-think LLM, last resort), answer: could a CHEAPER "
+    "rung correctly make this decision — 1 fixed rules/lookup, 2 solver, 3 trained model, "
+    "4 retrieval over a bounded corpus, 5 cached replay? The rung-6 test is: would two "
+    "competent humans reasonably disagree on the correct output? If they would NOT (the "
+    "answer is mechanically derivable), rung 6 is over-declared. Respond JSON only: "
+    '{"verdicts": [{"index": 0, "over_declared": false, "cheaper_rung": null, "reason": "..."}]} '
+    "— one entry per criterion, in order. Default over_declared=false when genuinely uncertain."
+)
+
+
+def _run_wave_rung_necessity_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
+    """8th wave-merge sub-check, CTRL-020, ADVISORY — the deferred "Decision
+    Integrity" half: nothing previously challenged a criterion lazily
+    declared rung 6 that a truth table could serve. Two layers, cheapest
+    first:
+    - Deterministic: rung-1 declarations whose description contains
+      judgment-shaped language (summarize/recommend/interpret…) — a
+      contradiction needing zero LLM.
+    - LLM (ONE batched Haiku call per wave, rung-6 criteria only — Token
+      Discipline): "did this genuinely need rung 6" is the one irreducibly
+      semantic gate in the ladder, so it gets the same judge treatment as
+      coverage_score, advisory + recorded, never trusted blindly and never
+      blocking. Surfaced in architecture_justification via telemetry."""
+    findings: list[str] = []
+    rung6: list[tuple[str, str, str]] = []  # (module, id, description)
+
+    for mod in wave_modules:
+        acc_path = pcp_dir / "strategy" / "modules" / mod["name"] / "acceptance.yaml"
+        if not acc_path.exists():
+            continue
+        acc = load_yaml(acc_path)
+        for c in acc.get("criteria", []):
+            if c.get("status") != "complete":
+                continue
+            tier = c.get("logic_tier")
+            desc = c.get("description", "")
+            if tier == 1:
+                hits = [k for k in _JUDGMENT_KEYWORDS if k in desc.lower()]
+                if hits:
+                    findings.append(
+                        f"Rung necessity (advisory): '{mod['name']}/{c['id']}' declares logic_tier=1 "
+                        f"(fixed rules, no judgment) but its description contains judgment-shaped "
+                        f"language ({hits[0]!r}) — tier may be under-declared"
+                    )
+            elif tier == 6:
+                rung6.append((mod["name"], c["id"], desc))
+
+    if rung6:
+        numbered = "\n".join(f"[{i}] {m}/{cid}: {desc}" for i, (m, cid, desc) in enumerate(rung6))
+        try:
+            res = llm.call_json(
+                RUNG_NECESSITY_SYSTEM_PROMPT, numbered, model=llm.JUDGE_MODEL,
+                pcp_dir=pcp_dir, command="wave-rung-necessity",
+            )
+            for v in res.get("verdicts", []):
+                if isinstance(v, dict) and v.get("over_declared"):
+                    i = v.get("index")
+                    if isinstance(i, int) and 0 <= i < len(rung6):
+                        m, cid, _ = rung6[i]
+                        findings.append(
+                            f"Rung necessity (advisory): '{m}/{cid}' declared rung 6 but judge "
+                            f"assesses rung {v.get('cheaper_rung')} could serve: {v.get('reason', '')[:200]}"
+                        )
+        except Exception as e:
+            console.print(f"[dim]Rung-necessity judge call failed (advisory check skipped): {e}[/dim]")
+
+    _wave_record(pcp_dir, wave_number, "rung-necessity", "CTRL-020", findings,
+                 files=[], result="pass")
+    for f in findings:
+        console.print(f"[yellow]{f}[/yellow]")
     return findings
 
 
