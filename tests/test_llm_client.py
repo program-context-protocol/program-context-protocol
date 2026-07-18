@@ -167,3 +167,32 @@ def test_call_with_images_logs_usage(tmp_path):
         llm.call_with_images("system", "user", [img], pcp_dir=pcp_dir, command="test-image-call")
     ledger = (pcp_dir / "token_ledger.yaml").read_text()
     assert "test-image-call" in ledger
+
+
+# ── _log_usage concurrency (2026-07-18, ontology-foundry dogfood finding:
+# build.py's per-criterion gate checks now run concurrently via a
+# ThreadPoolExecutor -- several of them call an LLM and log usage. Without a
+# lock around token_ledger.yaml's read-modify-write, two concurrent writers
+# reading the same on-disk snapshot before either writes back silently drop
+# one call's usage record. ──
+
+def test_log_usage_concurrent_calls_do_not_drop_entries(tmp_path):
+    import threading
+
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    n = 20
+    threads = [
+        threading.Thread(target=llm._log_usage, args=(pcp_dir, f"call-{i}", "haiku", "s1", {}, 0.0))
+        for i in range(n)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    import yaml
+    data = yaml.safe_load((pcp_dir / "token_ledger.yaml").read_text())
+    assert len(data["calls"]) == n
+    logged_commands = {c["command"] for c in data["calls"]}
+    assert logged_commands == {f"call-{i}" for i in range(n)}

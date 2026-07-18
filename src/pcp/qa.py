@@ -13,14 +13,31 @@ feature than what's built here.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 
-TIMEOUT_TEST = 300
-TIMEOUT_LINT = 60
-TIMEOUT_SAST = 120
+# Real incident, 2026-07-18 (ontology-foundry dogfood): these were bare
+# module constants with no env override -- a real project's test suite
+# legitimately taking 420-550s against a real Postgres backend always got
+# falsely marked "timed out" against the 300s default, burning a build
+# retry every time. A local hand-patch to the constant had nowhere durable
+# to live and got silently wiped on every reinstall/reset. Same env-override
+# pattern as llm/client.py's _timeout() (PCP_LLM_TIMEOUT) and
+# PCP_BUILD_AGENT_TIMEOUT_SEC -- read lazily so a test can monkeypatch the
+# env var and see the effect without reimporting this module.
+def _timeout_test() -> int:
+    return int(os.environ.get("PCP_QA_TEST_TIMEOUT_SEC", "300"))
+
+
+def _timeout_lint() -> int:
+    return int(os.environ.get("PCP_QA_LINT_TIMEOUT_SEC", "60"))
+
+
+def _timeout_sast() -> int:
+    return int(os.environ.get("PCP_QA_SAST_TIMEOUT_SEC", "120"))
 
 
 def _run_pytest(project_root: Path) -> dict | None:
@@ -28,7 +45,7 @@ def _run_pytest(project_root: Path) -> dict | None:
         return None
     try:
         result = subprocess.run(
-            ["pytest", "-q"], capture_output=True, text=True, cwd=project_root, timeout=TIMEOUT_TEST,
+            ["pytest", "-q"], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
     except subprocess.TimeoutExpired:
         return {"tool": "pytest", "passed": False, "output": "timed out"}
@@ -49,7 +66,7 @@ def _run_npm_test(project_root: Path) -> dict | None:
         return None
     try:
         result = subprocess.run(
-            ["npm", "test", "--silent"], capture_output=True, text=True, cwd=project_root, timeout=TIMEOUT_TEST,
+            ["npm", "test", "--silent"], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
     except subprocess.TimeoutExpired:
         return {"tool": "npm test", "passed": False, "output": "timed out"}
@@ -61,7 +78,7 @@ def _run_go_test(project_root: Path) -> dict | None:
         return None
     try:
         result = subprocess.run(
-            ["go", "test", "./..."], capture_output=True, text=True, cwd=project_root, timeout=TIMEOUT_TEST,
+            ["go", "test", "./..."], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
     except subprocess.TimeoutExpired:
         return {"tool": "go test", "passed": False, "output": "timed out"}
@@ -85,7 +102,7 @@ def _run_ruff(project_root: Path, changed_files: list[str]) -> dict | None:
     if not py_files:
         return {"tool": "ruff", "passed": True, "issues": []}
     result = subprocess.run(
-        ["ruff", "check", *py_files], capture_output=True, text=True, cwd=project_root, timeout=TIMEOUT_LINT,
+        ["ruff", "check", *py_files], capture_output=True, text=True, cwd=project_root, timeout=_timeout_lint(),
     )
     issues = [l for l in result.stdout.splitlines() if l.strip()]
     return {"tool": "ruff", "passed": result.returncode == 0, "issues": issues}
@@ -99,7 +116,7 @@ def _run_eslint(project_root: Path, changed_files: list[str]) -> dict | None:
     if not js_files:
         return {"tool": "eslint", "passed": True, "issues": []}
     result = subprocess.run(
-        [str(eslint_bin), *js_files], capture_output=True, text=True, cwd=project_root, timeout=TIMEOUT_LINT,
+        [str(eslint_bin), *js_files], capture_output=True, text=True, cwd=project_root, timeout=_timeout_lint(),
     )
     issues = [l for l in result.stdout.splitlines() if l.strip()]
     return {"tool": "eslint", "passed": result.returncode == 0, "issues": issues}
@@ -120,7 +137,7 @@ def _run_python_coverage(project_root: Path) -> dict | None:
     try:
         subprocess.run(
             ["coverage", "run", "-m", "pytest", "-q"],
-            capture_output=True, text=True, cwd=project_root, timeout=TIMEOUT_TEST,
+            capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
         result = subprocess.run(
             ["coverage", "report", "--format=total"],
@@ -147,7 +164,7 @@ def _run_npm_coverage(project_root: Path) -> dict | None:
     try:
         result = subprocess.run(
             ["npm", "run", "coverage", "--silent"],
-            capture_output=True, text=True, cwd=project_root, timeout=TIMEOUT_TEST,
+            capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
     except subprocess.TimeoutExpired:
         return {"tool": "npm coverage", "percent": None}
@@ -173,7 +190,7 @@ def run_sast(project_root: Path, changed_files: list[str]) -> dict:
     try:
         result = subprocess.run(
             ["semgrep", "--config=auto", "--quiet", "--error", *changed_files],
-            capture_output=True, text=True, cwd=project_root, timeout=TIMEOUT_SAST,
+            capture_output=True, text=True, cwd=project_root, timeout=_timeout_sast(),
         )
     except subprocess.TimeoutExpired:
         return {"tool": "semgrep", "passed": True, "findings": [], "skipped": "timed out"}

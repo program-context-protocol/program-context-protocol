@@ -2079,34 +2079,50 @@ def _build_one_criterion(
                         session_id=agent_session_id_actual,
                     )
 
-        # Running gates — QA (test suite, lint, SAST) first, then architecture/alignment.
-        # Deliberately outside _STATE_LOCK: these are independent per module
-        # (LLM calls + subprocess test/lint/SAST runs), exactly the work that
-        # should overlap across concurrently-building modules. Each check
-        # function's own _qa_record call is internally lock-guarded.
+        # Running gates -- all twelve checks below are mutually independent
+        # (each reads disk/git/subprocess/an LLM call and writes only its own
+        # evidence file + a lock-guarded _qa_record/_log_usage call), so they
+        # run concurrently rather than one after another. Until 2026-07-18
+        # these ran strictly sequentially within one criterion even though
+        # nothing here depends on another check's output -- a real dogfood
+        # finding (ontology-foundry): with 3 of these being LLM calls and the
+        # rest subprocess/network calls, sequential execution was pure wasted
+        # wall-clock. The comment this replaced only justified running
+        # OUTSIDE _STATE_LOCK for overlap ACROSS concurrently-building
+        # modules -- it never actually parallelized the checks WITHIN one
+        # criterion, which is what actually happens here now. Each check
+        # function's own _qa_record call remains lock-guarded, and
+        # llm.client._log_usage (token_ledger.yaml) now has its own lock too
+        # (previously unguarded -- fine when only one gate call ever ran at
+        # a time, a real race the moment more than one runs concurrently).
         console.print(f"[dim]Evaluating gates ({mod['name']}/{c['id']})...[/dim]")
         ctx = {
             "module": mod["name"], "submodule": None, "criterion_id": c["id"],
             "criterion_description": c.get("description", ""),
             "attempt": attempt, "files": changed_files,
         }
-        violations_tests = _run_test_suite_check(pcp_dir, project_root, ctx)
-        violations_lint = _run_lint_check(pcp_dir, project_root, changed_files, ctx)
-        violations_sast = _run_sast_check(pcp_dir, project_root, changed_files, ctx)
-        violations_l1 = _run_layer1_check(pcp_dir, project_root, changed_files, ctx)
-        violations_scope = _run_scope_check(pcp_dir, mod, c, changed_files, ctx)
-        violations_arch = _run_architect_review(pcp_dir, diff, changed_files, ctx)
-        violations_gate = _run_gate_check(pcp_dir, diff, ctx)
-        _run_design_consistency_check(pcp_dir, project_root, c, ctx)
-        _run_a11y_check(pcp_dir, c, ctx)
-        _run_visual_quality_check(pcp_dir, project_root, c, ctx)
-        violations_design_justification = _run_design_justification_check(pcp_dir, mod, c, ctx)
-        violations_bvb_justification = _run_build_vs_buy_justification_check(pcp_dir, mod, c, ctx)
+        gate_calls = {
+            "tests": lambda: _run_test_suite_check(pcp_dir, project_root, ctx),
+            "lint": lambda: _run_lint_check(pcp_dir, project_root, changed_files, ctx),
+            "sast": lambda: _run_sast_check(pcp_dir, project_root, changed_files, ctx),
+            "l1": lambda: _run_layer1_check(pcp_dir, project_root, changed_files, ctx),
+            "scope": lambda: _run_scope_check(pcp_dir, mod, c, changed_files, ctx),
+            "arch": lambda: _run_architect_review(pcp_dir, diff, changed_files, ctx),
+            "gate": lambda: _run_gate_check(pcp_dir, diff, ctx),
+            "design_consistency": lambda: _run_design_consistency_check(pcp_dir, project_root, c, ctx),
+            "a11y": lambda: _run_a11y_check(pcp_dir, c, ctx),
+            "visual_quality": lambda: _run_visual_quality_check(pcp_dir, project_root, c, ctx),
+            "design_justification": lambda: _run_design_justification_check(pcp_dir, mod, c, ctx),
+            "bvb_justification": lambda: _run_build_vs_buy_justification_check(pcp_dir, mod, c, ctx),
+        }
+        with ThreadPoolExecutor(max_workers=len(gate_calls)) as pool:
+            futures = {name: pool.submit(fn) for name, fn in gate_calls.items()}
+            gate_results = {name: f.result() for name, f in futures.items()}
 
         block_findings = (
-            violations_tests + violations_lint + violations_sast
-            + violations_l1 + violations_scope + violations_arch + violations_gate
-            + violations_design_justification + violations_bvb_justification
+            gate_results["tests"] + gate_results["lint"] + gate_results["sast"]
+            + gate_results["l1"] + gate_results["scope"] + gate_results["arch"] + gate_results["gate"]
+            + gate_results["design_justification"] + gate_results["bvb_justification"]
         )
 
         if block_findings:

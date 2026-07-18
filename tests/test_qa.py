@@ -80,7 +80,7 @@ def test_run_sast_skipped_when_no_changed_files(tmp_path):
 def test_run_sast_finds_issues(tmp_path):
     with patch("shutil.which", return_value="/usr/bin/semgrep"), \
             patch("pcp.qa.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=1, stdout="a.py:3 eval() detected\n", stderr="")
+        mock_run.return_value = MagicMock(returncode=1, stdout="a.py:3 unsafe-dynamic-call detected\n", stderr="")
         result = qa.run_sast(tmp_path, ["a.py"])
     assert result["passed"] is False
     assert len(result["findings"]) == 1
@@ -99,3 +99,35 @@ def test_run_coverage_no_tool(tmp_path):
     with patch("shutil.which", return_value=None):
         result = qa.run_coverage(tmp_path)
     assert result == {"tool": None, "percent": None}
+
+
+# ── env-overridable timeouts (2026-07-18, ontology-foundry dogfood finding:
+# these were bare hardcoded constants -- a real project's suite legitimately
+# taking longer than the default always got falsely marked "timed out") ──
+
+def test_timeout_test_defaults_to_300():
+    assert qa._timeout_test() == 300
+
+
+def test_timeout_test_reads_env_override(monkeypatch):
+    monkeypatch.setenv("PCP_QA_TEST_TIMEOUT_SEC", "900")
+    assert qa._timeout_test() == 900
+
+
+def test_timeout_lint_reads_env_override(monkeypatch):
+    monkeypatch.setenv("PCP_QA_LINT_TIMEOUT_SEC", "30")
+    assert qa._timeout_lint() == 30
+
+
+def test_timeout_sast_reads_env_override(monkeypatch):
+    monkeypatch.setenv("PCP_QA_SAST_TIMEOUT_SEC", "45")
+    assert qa._timeout_sast() == 45
+
+
+def test_run_pytest_passes_overridden_timeout_to_subprocess(tmp_path, monkeypatch):
+    monkeypatch.setenv("PCP_QA_TEST_TIMEOUT_SEC", "900")
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+            patch("pcp.qa.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="1 passed", stderr="")
+        qa.run_test_suite(tmp_path)
+    assert mock_run.call_args.kwargs["timeout"] == 900
