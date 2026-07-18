@@ -20,8 +20,14 @@ FINGERPRINTS_FILE = "symbol_fingerprints.json"
 
 
 def fingerprint_python_file(path: Path) -> dict[str, str]:
+    import warnings
     try:
-        tree = ast.parse(path.read_text(errors="replace"))
+        # Scanned projects' own SyntaxWarnings (invalid escape sequences etc.)
+        # are their lint problem, not scan output — suppress here or every
+        # `pcp scan` re-emits them for files PCP merely fingerprints.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(path.read_text(errors="replace"))
     except (SyntaxError, OSError):
         return {}
     out = {}
