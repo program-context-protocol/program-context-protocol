@@ -782,6 +782,22 @@ def _build_agent_prompt(
         prompt_parts += decision_lines
         prompt_parts.append("")
 
+    # Rung-specific implementation guidance (2026-07-18): the tier is already
+    # declared — point the agent at the guide's process + search-first list
+    # for exactly that rung. One line; the guide is read on demand, never
+    # pasted (Token Discipline).
+    declared_tier = criterion.get("logic_tier")
+    if isinstance(declared_tier, int):
+        prompt_parts.append(
+            f"This criterion declares logic_tier={declared_tier}. Before implementing, read "
+            f"the 'Rung {declared_tier}' section of `.pcp/logic_tier_guide.md` (if present) — "
+            "it gives the implementation process and what to SEARCH FOR before building "
+            "(existing packages/models/patterns). If your implementation ends up needing a "
+            "different rung than declared, STOP and say so in your summary rather than "
+            "quietly building at the wrong tier — the wave gate checks tier honesty."
+        )
+        prompt_parts.append("")
+
     if _is_ui_facing_criterion(criterion):
         prompt_parts.append(
             "This criterion renders user-facing UI. Read `.pcp/design_system.md` first "

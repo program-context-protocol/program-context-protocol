@@ -130,3 +130,40 @@ def test_init_scaffolds_tier_distribution_policy(tmp_path):
     rego = tmp_path / ".pcp" / "policies" / "tier_distribution.rego"
     assert rego.exists()
     assert "rung6_share" in rego.read_text()
+
+
+# ── logic-tier guide (selection/implementation playbook, 2026-07-18) ──
+
+def test_init_scaffolds_logic_tier_guide(tmp_path):
+    CliRunner().invoke(cli, ["init", "--path", str(tmp_path)])
+    guide = tmp_path / ".pcp" / "logic_tier_guide.md"
+    assert guide.exists()
+    text = guide.read_text()
+    assert "CORRECTNESS ORACLE" in text
+    for rung in range(1, 7):
+        assert f"Rung {rung}" in text
+    assert "DECOMPOSE FIRST" in text
+    assert "search for a way OFF rung 6" in text
+
+
+def test_build_prompt_points_agent_at_declared_rung_section(tmp_path):
+    from pcp.commands.build import _build_agent_prompt
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    prompt = _build_agent_prompt(
+        pcp_dir, "m",
+        {"id": "A1", "description": "optimize the schedule", "logic_tier": 2},
+        {"name": "m"},
+    )
+    assert "logic_tier=2" in prompt
+    assert "Rung 2" in prompt
+    assert "logic_tier_guide.md" in prompt
+    assert "wave gate checks tier honesty" in prompt
+
+
+def test_build_prompt_silent_when_no_tier_declared(tmp_path):
+    from pcp.commands.build import _build_agent_prompt
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    prompt = _build_agent_prompt(pcp_dir, "m", {"id": "A1", "description": "x"}, {"name": "m"})
+    assert "logic_tier_guide" not in prompt
