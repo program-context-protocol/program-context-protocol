@@ -8,6 +8,7 @@ only on git/claude (required for the lifecycle to function at all).
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -46,12 +47,31 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _claude_bin_for_detection() -> str:
+    """Real bug, found 2026-07-18 (CI failure, ontology-foundry-adjacent):
+    llm/client.py's _claude_bin() respects PCP_CLAUDE_BIN so callers can
+    substitute a stub agent (real substitution in tests, or a genuinely
+    different install path), but this module's own REQUIRED_TOOLS check for
+    "claude" only ever looked for a literal `claude` on PATH -- two
+    different sources of truth for "is claude available" that silently
+    agreed on every dev machine (both true) and silently disagreed the
+    moment an environment has a working PCP_CLAUDE_BIN stub but no real
+    `claude` binary on PATH (exactly GitHub Actions' ubuntu-latest runners,
+    which is why build.py's fatal preflight check blocked CI even though
+    several tests deliberately point PCP_CLAUDE_BIN at a fake, working
+    agent script). shutil.which() already handles an absolute path
+    correctly (bypasses PATH, just checks that exact file is executable),
+    so this only needs to feed it the right name."""
+    return os.environ.get("PCP_CLAUDE_BIN") or "claude"
+
+
 def detect_tools() -> dict:
     """Pure detection, no prompts. Used by both `pcp doctor` and the
     non-interactive preflight other commands run automatically."""
+    claude_bin = _claude_bin_for_detection()
     return {
         "git": {"available": _which("git") is not None, "path": _which("git")},
-        "claude": {"available": _which("claude") is not None, "path": _which("claude")},
+        "claude": {"available": _which(claude_bin) is not None, "path": _which(claude_bin)},
         "gh": {"available": _which("gh") is not None, "path": _which("gh")},
         "test_runner": _detect_one(["pytest", "npm", "go"]),
         "lint": _detect_one(["ruff", "eslint"]),

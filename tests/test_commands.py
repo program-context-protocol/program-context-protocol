@@ -511,8 +511,13 @@ def test_build_command(temp_project):
     }
     (mod_dir / "acceptance.yaml").write_text(yaml.dump(acc))
 
-    # Mock git status and changes
+    # Mock git status and changes. check_environment is mocked too -- this
+    # test doesn't exercise the real environment preflight, and CI runners
+    # genuinely lack a `claude` binary on PATH (found 2026-07-18: this test
+    # only ever passed locally, where a real `claude` happens to be
+    # installed -- see doctor.py's _claude_bin_for_detection docstring).
     with patch("subprocess.run") as mock_run, \
+            patch("pcp.commands.doctor.check_environment", return_value={}), \
             patch("pcp.commands.build._get_staged_files") as mock_staged, \
             patch("pcp.commands.build._get_unstaged_files") as mock_unstaged, \
             patch("pcp.commands.build._get_working_diff") as mock_diff, \

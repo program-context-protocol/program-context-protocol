@@ -42,6 +42,27 @@ def test_detect_tools_reports_all_categories():
     }
 
 
+# ── PCP_CLAUDE_BIN respected by claude detection (2026-07-18 CI fix: this
+# used to always check a literal `claude` on PATH, ignoring the env override
+# llm/client.py's own _claude_bin() already respects -- silently agreed with
+# reality on any dev machine with a real `claude` install, silently
+# disagreed the moment an environment (GitHub Actions) has a working
+# PCP_CLAUDE_BIN stub but no real `claude` binary on PATH at all) ──
+
+def test_detect_tools_claude_ignores_bare_path_when_no_real_claude_installed(monkeypatch):
+    monkeypatch.delenv("PCP_CLAUDE_BIN", raising=False)
+    with patch("shutil.which", side_effect=_fake_which({"git"})):
+        tools = detect_tools()
+    assert tools["claude"]["available"] is False
+
+
+def test_detect_tools_claude_respects_pcp_claude_bin_override(monkeypatch):
+    monkeypatch.setenv("PCP_CLAUDE_BIN", "/tmp/fake_claude_stub.py")
+    with patch("shutil.which", side_effect=_fake_which({"git", "/tmp/fake_claude_stub.py"})):
+        tools = detect_tools()
+    assert tools["claude"]["available"] is True
+
+
 def test_check_environment_fatal_on_missing_git(tmp_path):
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()
