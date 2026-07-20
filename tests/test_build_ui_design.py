@@ -101,6 +101,59 @@ def test_design_consistency_check_passes_when_no_hardcoded_colors(tmp_path):
     assert records[0]["result"] == "pass"
 
 
+def test_design_consistency_check_reads_as_exploration_for_first_screens(tmp_path):
+    """First PCP_DESIGN_ESTABLISHING_SCREENS (default 2) UI screens are
+    establishing the system -- findings should read as exploration, not
+    drift, and stay advisory (never enough to change `result`)."""
+    from pcp import telemetry
+
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "design_system.md").write_text("# Design System\n\n## Color\n| --accent | #0f6e70 |\n")
+    criterion = {"id": "A001", "description": "Dashboard renders coverage", "target": "app.py"}
+    (tmp_path / "app.py").write_text("color = '#ff0000'\n")
+    _run_design_consistency_check(pcp_dir, tmp_path, criterion, _ctx(criterion_id="A001"))
+    records = [r for r in telemetry.load(pcp_dir) if r.get("check") == "design-consistency"]
+    assert len(records) == 1
+    assert any("[exploration]" in e for e in records[0]["errors"])
+    assert not any("[established-system drift]" in e for e in records[0]["errors"])
+
+
+def test_design_consistency_check_escalates_wording_past_establishing_window(tmp_path):
+    """Once >= PCP_DESIGN_ESTABLISHING_SCREENS distinct UI screens already
+    went through this check, the SAME violation reads as established-system
+    drift instead of exploration -- still advisory (never blocks the
+    criterion; design_consistency's own result stays a telemetry label, it
+    is never merged into build.py's block_findings)."""
+    from pcp import telemetry
+
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "design_system.md").write_text("# Design System\n\n## Color\n| --accent | #0f6e70 |\n")
+    (tmp_path / "app.py").write_text("color = var(--accent)\n")  # clean -- only prior screens matter
+
+    # Simulate 2 prior UI screens already having gone through this check
+    # (default establishing window).
+    for i, prior_id in enumerate(["P001", "P002"]):
+        telemetry.record(
+            pcp_dir, cycle="qa", cycle_number=1, check="design-consistency", control_id="CTRL-013",
+            module="ui-mod", submodule=None, criterion_id=prior_id, files=[], result="pass",
+            errors=[], error_count=0,
+        )
+
+    criterion = {"id": "A003", "description": "Third dashboard screen renders alerts", "target": "app.py"}
+    (tmp_path / "app.py").write_text("color = '#ff0000'\n")  # this screen has a real violation
+    _run_design_consistency_check(pcp_dir, tmp_path, criterion, _ctx(criterion_id="A003"))
+    records = [r for r in telemetry.load(pcp_dir)
+               if r.get("check") == "design-consistency" and r.get("criterion_id") == "A003"]
+    assert len(records) == 1
+    assert any("[established-system drift]" in e for e in records[0]["errors"])
+    assert any("screen #3" in e for e in records[0]["errors"])
+    # Advisory posture unchanged -- CTRL-013 findings never feed block_findings
+    # regardless of establishing-window status (see build.py's gate dispatch).
+    assert records[0]["control_id"] == "CTRL-013"
+
+
 # ── _run_design_justification_check: stage 4, substance check ──
 
 def _mod(pcp_dir, name="widgets", design_justification=None):

@@ -1327,6 +1327,29 @@ def _run_gate_check(pcp_dir: Path, diff: str, ctx: dict) -> list[str]:
     return kept
 
 
+def _prior_ui_screens_checked(pcp_dir: Path, ctx: dict) -> int:
+    """Count distinct (module, criterion_id) pairs that already went through
+    the design-consistency check, excluding this criterion's own -- the
+    "how many screens has this project already built" signal progressive
+    tightening needs. Deterministic, reads telemetry.jsonl only, no LLM."""
+    seen = set()
+    for rec in telemetry.load(pcp_dir):
+        if rec.get("check") != "design-consistency":
+            continue
+        key = (rec.get("module"), rec.get("criterion_id"))
+        if key == (ctx["module"], ctx["criterion_id"]):
+            continue
+        seen.add(key)
+    return len(seen)
+
+
+def _design_establishing_window() -> int:
+    """First N UI-facing criteria are establishing the design system --
+    findings there are exploration, not drift. Configurable since what
+    counts as "established" genuinely varies by project size."""
+    return int(os.environ.get("PCP_DESIGN_ESTABLISHING_SCREENS", "2"))
+
+
 def _run_design_consistency_check(pcp_dir: Path, project_root: Path, criterion: dict, ctx: dict) -> None:
     """PCP Design lifecycle, stage 4 (Verify). Advisory only — never returned
     into block_findings, never blocks a criterion. Only fires for UI-facing
@@ -1336,7 +1359,17 @@ def _run_design_consistency_check(pcp_dir: Path, project_root: Path, criterion: 
     using the project's own design system. Not proof either way — a
     legitimate reason to hardcode a specific value (a brand-mandated exact
     color) is common; this surfaces a signal for human review, same posture
-    as pcp audit's dead-code findings."""
+    as pcp audit's dead-code findings.
+
+    Progressive tightening (2026-07-20, research backlog item 5, "first
+    screen establishes, later screens conform harder"): once a project has
+    already built PCP_DESIGN_ESTABLISHING_SCREENS UI screens against an
+    established system, the SAME findings read as drift from a known
+    pattern, not exploration -- reworded accordingly. Deliberately stays
+    advisory-only regardless of screen count (never joins block_findings) --
+    escalating an unmeasured advisory check straight to a hard gate is
+    exactly the shortcut this codebase's own warn-first rollout doctrine
+    exists to avoid; false-positive rate isn't measured yet at either tier."""
     if not _is_ui_facing_criterion(criterion):
         return
 
@@ -1352,13 +1385,18 @@ def _run_design_consistency_check(pcp_dir: Path, project_root: Path, criterion: 
         return
 
     content = target_path.read_text(errors="replace")
+    prior_screens = _prior_ui_screens_checked(pcp_dir, ctx)
+    established = prior_screens >= _design_establishing_window()
+    severity_prefix = "established-system drift" if established else "exploration"
+
     hex_matches = re.findall(r"#[0-9a-fA-F]{3,8}\b", content)
     findings = []
     if hex_matches:
         findings.append(
-            f"{len(hex_matches)} hardcoded hex color literal(s) in {target} while "
+            f"[{severity_prefix}] {len(hex_matches)} hardcoded hex color literal(s) in {target} while "
             f".pcp/design_system.md has established color tokens — consider reusing "
             f"those instead. Examples: {', '.join(hex_matches[:5])}"
+            + (f" (screen #{prior_screens + 1} against an already-established system)" if established else "")
         )
     # Positive check (stylelint no-raw-colors posture, 2026-07-17): absence of
     # violations isn't adherence — a UI file that references ZERO named tokens
@@ -1369,9 +1407,10 @@ def _run_design_consistency_check(pcp_dir: Path, project_root: Path, criterion: 
     declared_tokens = set(re.findall(r"--[\w-]{3,}", design_system_path.read_text()))
     if declared_tokens and not any(t in content for t in declared_tokens):
         findings.append(
-            f"{target} references none of the {len(declared_tokens)} named design-system "
+            f"[{severity_prefix}] {target} references none of the {len(declared_tokens)} named design-system "
             "tokens (--*) declared in .pcp/design_system.md — the screen may be styled "
             "outside the system entirely"
+            + (f" (screen #{prior_screens + 1} against an already-established system)" if established else "")
         )
     evidence_path = evidence.store(
         pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "design-consistency",
