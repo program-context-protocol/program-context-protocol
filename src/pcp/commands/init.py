@@ -402,6 +402,24 @@ controls:
     enforcement: advisory
     description: "Build-vs-buy for PCP's UI building blocks: PCP does not build or maintain component code -- shadcn/ui (MIT, vendored per-project, official MCP server for search/retrieval) already solves that. PCP owns the thin layer on top: which organisms an archetype needs (recipe completeness -- a criterion declaring screen_archetypes=[dashboard] should show chart-panel/data-table/kpi-tile among its ui_organisms), and whether a declared organism shows real evidence of use (import-path substring match against the criterion's own target file, same mechanism CTRL-019 already uses for logic_tier). Advisory -- a real import can legitimately not match the hint (re-export, alias), so this is a review signal, not proof of non-use. Stays inert (no telemetry record) unless .pcp/ui_kit_recipes.yaml exists."
     ssdf_practice: ["PW.7.1"]
+
+  - id: CTRL-029
+    name: "Generic lazy-marker scan"
+    layer: build-loop
+    mechanism: "build.py _run_lazy_marker_check() -- regex scan of ALL changed files for TODO/FIXME/XXX/HACK/placeholder/not-implemented markers and stub function bodies (pass/... only)"
+    tool: "n/a (deterministic regex)"
+    enforcement: advisory
+    description: "Lazy-agent mitigation backlog item 3 (2026-07-20): PCP previously only checked for placeholder text narrowly, inside build_vs_buy/design_justification's own free-text fields (CTRL-017/015). This is the general form -- any changed file, any lazy-shaped marker or stub body -- surfaced as a count/location for a human to judge, since a TODO or a stub can be legitimate. Advisory only, never blocks."
+    ssdf_practice: ["PW.7.1"]
+
+  - id: CTRL-030
+    name: "Integrity Auditor (retrospective statistical drift)"
+    layer: wave-merge
+    mechanism: "integrity_audit.py analyze() -- generalizes coverage_audit.py's drift-detection pattern across telemetry.jsonl: fast completions vs. declared logic_tier, per-module placeholder-flag concentration, recurring unresolved findings, uniform/templated evidence"
+    tool: "n/a (deterministic, statistical)"
+    enforcement: advisory
+    description: "Swarm-role backlog's Integrity Auditor (2026-07-20): retrospective-only -- reads already-complete criteria across the whole project, can't correct what's already built, only flags for human review. Deterministic-first, same posture as every other statistical-drift check in this catalog; the genuinely ambiguous tail (an LLM judging the flagged pattern) is not built in this pass. Runs at wave boundaries, not per-criterion -- the value is seeing patterns across many completed criteria no single-criterion CTRL check can see by design."
+    ssdf_practice: ["PW.1.1"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\

@@ -19,6 +19,8 @@ from pcp.llm import client as llm
 from pcp.llm.client import _claude_bin, _log_usage
 from pcp.pcp_status import write_pcp_md
 from pcp import decision_log
+from pcp import integrity_audit
+from pcp import librarian
 from pcp import telemetry
 from pcp import qa
 from pcp import evidence
@@ -537,6 +539,21 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     # advisory) — inert unless .pcp/ui_kit_recipes.yaml exists.
     _run_wave_ui_kit_check(pcp_dir, wave_modules, wave_number)
 
+    # 13. Integrity Auditor (CTRL-030, advisory) — retrospective statistical-
+    # drift signals across ALL completed criteria so far: fast completions
+    # vs. declared logic_tier, per-module placeholder-flag concentration,
+    # findings recurring across many criteria without resolving, uniform/
+    # templated evidence. Reads only; can't correct what's already built —
+    # flags for human review, same posture escalations.yaml already has.
+    # Runs at the wave boundary, not per-criterion — the value is seeing
+    # patterns across many completed criteria no single-criterion CTRL
+    # check can see by design.
+    integrity_findings = integrity_audit.analyze(pcp_dir)
+    _wave_record(pcp_dir, wave_number, "integrity-audit", "CTRL-030", integrity_findings,
+                 files=[], result="pass")
+    for f in integrity_findings:
+        console.print(f"[yellow]Integrity Auditor (advisory):[/yellow] {f}")
+
     return findings
 
 
@@ -847,6 +864,24 @@ def _build_agent_prompt(
         )
         prompt_parts += decision_lines
         prompt_parts.append("")
+
+    # Librarian retrieval (2026-07-20, swarm-role design): deterministic
+    # keyword-overlap scan over EXISTING definitions in the project, so this
+    # criterion's builder doesn't independently re-explore the codebase for
+    # a pattern another module already has. Rung-4-shaped (retrieval, not a
+    # conversational search agent) — pure query/response, never corrects or
+    # blocks. Bounded count/chars, zero LLM cost, same Token Discipline
+    # posture as the decision-log injection above.
+    if os.environ.get("PCP_BUILD_INJECT_LIBRARIAN", "1") != "0":
+        librarian_lines = librarian.format_for_prompt(pcp_dir.parent, criterion)
+        if librarian_lines:
+            prompt_parts.append(
+                "## Possibly-related existing code in this project (keyword match on "
+                "this criterion's own description — not verified relevance, check before "
+                "reusing):"
+            )
+            prompt_parts += librarian_lines
+            prompt_parts.append("")
 
     # Rung-specific implementation guidance (2026-07-18): the tier is already
     # declared — point the agent at the guide's process + search-first list
@@ -1815,6 +1850,65 @@ def _run_scope_check(pcp_dir: Path, mod: dict, criterion: dict, changed_files: l
     return findings
 
 
+_LAZY_MARKER_PATTERN = re.compile(
+    r"\b(TODO|FIXME|XXX|HACK)\b|"
+    r"\bnot\s+(?:yet\s+)?implement(?:ed)?\b|\bplaceholder\b|\bcoming\s+soon\b",
+    re.IGNORECASE,
+)
+# def foo(...):\n    pass  (or ... / bare docstring only) -- a stub body,
+# not necessarily wrong (abstract methods do this legitimately) but worth
+# a glance when it shows up in a criterion's own newly-changed lines.
+_STUB_BODY_PATTERN = re.compile(
+    r"^\s*def\s+\w+\([^)]*\)[^\n:]*:\s*\n\s*(pass|\.\.\.)\s*$", re.MULTILINE,
+)
+_LAZY_MARKER_MAX_CHARS = 20_000  # skip pathologically large generated/vendored files
+
+
+def _run_lazy_marker_check(pcp_dir: Path, project_root: Path, changed_files: list[str], ctx: dict) -> None:
+    """Generic lazy-marker scan (lazy-agent backlog item 3, 2026-07-20).
+    PCP previously only checked for placeholder text narrowly, inside
+    build_vs_buy/design_justification's own free-text fields (CTRL-017/015).
+    This is the general form: a deterministic scan of ALL changed code for
+    TODO/FIXME/placeholder-style markers and stub function bodies -- a cheap,
+    non-semantic signal that a criterion may have been marked complete over
+    unfinished work.
+
+    Advisory only, never blocks -- these markers are not proof of laziness
+    (a TODO can be a legitimate forward-looking note, a stub can be a real
+    abstract method); this surfaces the count/location for a human to judge,
+    same posture as _run_design_consistency_check."""
+    findings = []
+    for f in changed_files:
+        if _is_test_file(f):
+            continue
+        path = project_root / f
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if len(content) > _LAZY_MARKER_MAX_CHARS:
+            continue
+        markers = _LAZY_MARKER_PATTERN.findall(content)
+        stub_bodies = _STUB_BODY_PATTERN.findall(content)
+        if markers:
+            findings.append(f"{f}: {len(markers)} lazy-marker hit(s) ({', '.join(sorted(set(m.upper() for m in markers if m))[:5])})")
+        if stub_bodies:
+            findings.append(f"{f}: {len(stub_bodies)} stub function body/bodies (pass/... only)")
+
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "lazy-marker",
+        "\n".join(findings) if findings else "no lazy markers found in changed files",
+    )
+    _qa_record(
+        pcp_dir, ctx, "lazy-marker", findings, control_id="CTRL-029", tool="regex",
+        evidence_path=evidence_path,
+    )
+    if findings:
+        console.print(f"[yellow]Lazy-marker scan (advisory):[/yellow] {findings[0]}")
+
+
 # Mechanism-signature libraries per rung, for the POSITIVE tier check
 # (CTRL-019). Import-name based, so the same caveat as CTRL-016 applies —
 # package names differ from import names — but these are the import names
@@ -2414,7 +2508,7 @@ def _build_one_criterion(
                         session_id=agent_session_id_actual,
                     )
 
-        # Running gates -- all twelve checks below are mutually independent
+        # Running gates -- all thirteen checks below are mutually independent
         # (each reads disk/git/subprocess/an LLM call and writes only its own
         # evidence file + a lock-guarded _qa_record/_log_usage call), so they
         # run concurrently rather than one after another. Until 2026-07-18
@@ -2450,6 +2544,7 @@ def _build_one_criterion(
             "design_justification": lambda: _run_design_justification_check(pcp_dir, mod, c, ctx),
             "bvb_justification": lambda: _run_build_vs_buy_justification_check(pcp_dir, mod, c, ctx),
             "customization": lambda: _run_customization_check(pcp_dir, mod, c, ctx),
+            "lazy_marker": lambda: _run_lazy_marker_check(pcp_dir, project_root, changed_files, ctx),
         }
         with ThreadPoolExecutor(max_workers=len(gate_calls)) as pool:
             futures = {name: pool.submit(fn) for name, fn in gate_calls.items()}
