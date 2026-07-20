@@ -235,7 +235,7 @@ def test_no_activity_yields_empty_timeline(tmp_path):
 
 # ── write_module_docs, rendered files ──
 
-def test_write_module_docs_creates_all_four_files(tmp_path):
+def test_write_module_docs_creates_all_six_files(tmp_path):
     repo = _init_repo(tmp_path / "repo")
     pcp_dir = repo / ".pcp"
     pcp_dir.mkdir()
@@ -247,12 +247,116 @@ def test_write_module_docs_creates_all_four_files(tmp_path):
     assert (out_dir / "brd.md").exists()
     assert (out_dir / "built.md").exists()
     assert (out_dir / "changelog.md").exists()
+    assert (out_dir / "ui_ux.md").exists()
+    assert (out_dir / "diff.md").exists()
 
     vision = (out_dir / "vision.md").read_text()
     assert "does something useful for widgets" in vision
     built = (out_dir / "built.md").read_text()
     assert "A001" in built
     assert "1/2 criteria complete" in built
+
+
+# ── ui_ux.md ──
+
+def test_ui_ux_empty_for_non_ui_module(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    mod_dir = _write_module(pcp_dir, "widgets", criteria=[
+        {"id": "A001", "description": "API returns correct percentage", "check": "manual", "status": "complete"},
+    ])
+    _commit_all(repo)
+
+    out_dir = write_module_docs(pcp_dir, mod_dir)
+    ui_ux = (out_dir / "ui_ux.md").read_text()
+    assert "No UI-facing criteria" in ui_ux
+
+
+def test_ui_ux_flags_missing_design_justification(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    mod_dir = _write_module(pcp_dir, "widgets", criteria=[
+        {"id": "A001", "description": "Dashboard renders coverage", "check": "manual", "status": "complete"},
+    ])
+    _commit_all(repo)
+
+    out_dir = write_module_docs(pcp_dir, mod_dir)
+    ui_ux = (out_dir / "ui_ux.md").read_text()
+    assert "no `design_justification` declared" in ui_ux
+    assert "A001" in ui_ux
+
+
+def test_ui_ux_rolls_up_organisms_and_archetypes(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    mod_dir = _write_module(pcp_dir, "widgets", criteria=[
+        {"id": "A001", "description": "Dashboard renders coverage", "check": "manual", "status": "complete",
+         "screen_archetypes": ["dashboard"], "ui_organisms": ["kpi-tile", "chart-panel"],
+         "nav_depth": 2,
+         "design_justification": {"checklist_passed": ["both-themes"], "jtbd_framing": "when a user checks status, this shows it",
+                                   "customizable": True}},
+    ])
+    _commit_all(repo)
+
+    out_dir = write_module_docs(pcp_dir, mod_dir)
+    ui_ux = (out_dir / "ui_ux.md").read_text()
+    assert "dashboard" in ui_ux
+    assert "kpi-tile, chart-panel" in ui_ux
+    assert "when a user checks status" in ui_ux
+
+
+# ── diff.md ──
+
+def test_diff_lists_pending_criteria(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    mod_dir = _write_module(pcp_dir, "widgets")  # A001 complete, A002 pending
+    _commit_all(repo)
+
+    out_dir = write_module_docs(pcp_dir, mod_dir)
+    diff = (out_dir / "diff.md").read_text()
+    assert "A002" in diff
+    assert "second thing" in diff
+    assert "A001" not in diff.split("Pending Acceptance Criteria")[1]
+
+
+def test_diff_flags_unaddressed_active_brd_item(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    mod_dir = _write_module(pcp_dir, "widgets", description="handles widget rendering", criteria=[
+        {"id": "A001", "description": "unrelated backend plumbing", "check": "manual", "status": "complete"},
+    ])
+    (pcp_dir / "brd_items.yaml").write_text(yaml.dump({"items": [
+        {"id": "BRD-001", "status": "active", "description": "widgets must render within 200ms"},
+    ]}))
+    _commit_all(repo)
+
+    out_dir = write_module_docs(pcp_dir, mod_dir)
+    diff = (out_dir / "diff.md").read_text()
+    assert "BRD-001" in diff
+    assert "no completed criterion keyword-matches" in diff
+
+
+def test_diff_finds_likely_match_via_keyword_overlap(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    mod_dir = _write_module(pcp_dir, "widgets", description="handles widget rendering", criteria=[
+        {"id": "A001", "description": "widgets render within performance budget", "check": "manual", "status": "complete"},
+    ])
+    (pcp_dir / "brd_items.yaml").write_text(yaml.dump({"items": [
+        {"id": "BRD-001", "status": "active", "description": "widgets must render within 200ms"},
+    ]}))
+    _commit_all(repo)
+
+    out_dir = write_module_docs(pcp_dir, mod_dir)
+    diff = (out_dir / "diff.md").read_text()
+    assert "likely addressed by: A001" in diff
 
 
 def test_changelog_drift_signal_wording_present(tmp_path):
