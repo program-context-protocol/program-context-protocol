@@ -1,4 +1,12 @@
-"""pcp context — surface .pcp/ context to any LLM at session start."""
+"""pcp context — surface .pcp/ context to any LLM.
+
+Not wired to fire automatically at session start on its own -- `--inject`
+writes/updates a marked block in CLAUDE.md, which Claude Code already reads
+every session, but nothing calls this command for you. Wire a SessionStart
+hook yourself (snippet in .pcp/RECOMMENDED_PERMISSIONS.md) if you want the
+block kept fresh automatically; same manual-opt-in posture as the
+PreToolUse spec guard -- PCP doesn't edit .claude/settings.json itself.
+"""
 
 import json
 import sys

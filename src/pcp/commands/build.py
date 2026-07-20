@@ -420,6 +420,34 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
         _wave_record(pcp_dir, wave_number, "validate-strategy", "CTRL-008", [f"call failed: {e}"],
                      files=wave_mod_names, result="error")
 
+    # 3.5. Per-module spec alignment (Two Validation Passes, Pass 1) — does
+    # each module in this wave still align with the objective/decomposition?
+    # Distinct from step 3's validate-strategy (Pass 2: do modules
+    # collectively cover the objective) -- this checks each module's own
+    # spec individually. Advisory: false-positive rate not measured yet.
+    module_align_findings: list[str] = []
+    try:
+        from pcp.commands.validate_module import run_validate_module
+        for mod in wave_modules:
+            mod_name = mod["name"]
+            result = run_validate_module(pcp_dir, mod_name)
+            if result is None:
+                continue
+            mod_evidence_path = evidence.store(
+                pcp_dir, "_wave", f"wave_{wave_number}", wave_number, f"validate-module-{mod_name}",
+                json.dumps(result, indent=2, default=str),
+            )
+            if not result.get("aligned", True):
+                console.print(
+                    f"[yellow]Wave validate-module (advisory): '{mod_name}' alignment "
+                    f"{result.get('alignment_score', 0):.0%} — full result: {mod_evidence_path}[/yellow]"
+                )
+        _wave_record(pcp_dir, wave_number, "validate-module", "CTRL-024", [], files=wave_mod_names, result="pass")
+    except Exception as e:
+        console.print(f"[yellow]Warning: wave validate-module check failed: {e}[/yellow]")
+        _wave_record(pcp_dir, wave_number, "validate-module", "CTRL-024", [f"call failed: {e}"],
+                     files=wave_mod_names, result="error")
+
     # 4. Wave-level architect-review — diff since the wave started, not just the last criterion.
     try:
         from pcp.commands.architect_review import (

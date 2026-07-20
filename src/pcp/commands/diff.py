@@ -57,27 +57,20 @@ def _extract_coverage_score(current_state_path: Path) -> str:
     return f"{float(m.group(1)):.0%}" if m else "unknown"
 
 
-@click.command()
-@click.option("--path", "project_path", type=click.Path(), default=None)
-def diff(project_path: str | None):
-    """Compute .pcp/diff.md — target state vs current state gap."""
-    try:
-        pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
-    except NoPCPDir as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(2)
+def run_diff(pcp_dir: Path) -> dict | None:
+    """Core diff.md computation, reusable outside the CLI command.
 
-    project_root = pcp_dir.parent
+    Returns {"path": diff_md, "pending": [...], "regressions": [...]}, or
+    None if the prerequisites (target_state.md, current_state.md) aren't
+    there yet -- silent by design so a caller like `pcp scan` can call this
+    on every run without it being an error before a project has a
+    target_state.md written.
+    """
     target_state_path = pcp_dir / "target_state.md"
     current_state_path = pcp_dir / "current_state.md"
 
-    if not target_state_path.exists():
-        console.print("[yellow]No target_state.md found. Create it to track the ideal end state.[/yellow]")
-        sys.exit(0)
-
-    if not current_state_path.exists():
-        console.print("[yellow]No current_state.md found. Run `pcp scan` first.[/yellow]")
-        sys.exit(2)
+    if not target_state_path.exists() or not current_state_path.exists():
+        return None
 
     pending = _extract_pending(current_state_path)
     complete = _extract_complete(current_state_path)
@@ -129,8 +122,32 @@ def diff(project_path: str | None):
         lines.append("All acceptance criteria met. Advance SDLC phase via `pcp deploy-check`.")
 
     diff_md.write_text("\n".join(lines) + "\n")
+    return {"path": diff_md, "pending": pending, "regressions": regressions}
 
-    reg_note = f", [red]{len(regressions)} regression(s)[/red]" if regressions else ""
+
+@click.command()
+@click.option("--path", "project_path", type=click.Path(), default=None)
+def diff(project_path: str | None):
+    """Compute .pcp/diff.md — target state vs current state gap."""
+    try:
+        pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
+    except NoPCPDir as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(2)
+
+    project_root = pcp_dir.parent
+
+    if not (pcp_dir / "target_state.md").exists():
+        console.print("[yellow]No target_state.md found. Create it to track the ideal end state.[/yellow]")
+        sys.exit(0)
+
+    if not (pcp_dir / "current_state.md").exists():
+        console.print("[yellow]No current_state.md found. Run `pcp scan` first.[/yellow]")
+        sys.exit(2)
+
+    result = run_diff(pcp_dir)
+
+    reg_note = f", [red]{len(result['regressions'])} regression(s)[/red]" if result["regressions"] else ""
     console.print(
-        f"[dim]{len(pending)} pending gap(s){reg_note}[/dim]  →  {diff_md.relative_to(project_root)}"
+        f"[dim]{len(result['pending'])} pending gap(s){reg_note}[/dim]  →  {result['path'].relative_to(project_root)}"
     )

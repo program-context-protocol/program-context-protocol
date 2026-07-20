@@ -357,6 +357,15 @@ controls:
     enforcement: advisory
     description: "PCP Design lifecycle, stage 4 addendum, from a 2026-07-18 research pass on the intent-to-UI articulation gap: a checklist-anchored VLM judge measures ~94% human-correlation vs. ~21% for a bare freeform review, so this deliberately judges a fixed checklist rather than asking 'does this look good.' Only fires on a UI-facing criterion that declares a url; compares against the criterion's own reference_image when one is declared. Advisory only -- an LLM visual judgment should never hard-block a build until its own false-positive rate is measured on real projects, same posture every other judge-model gate in this catalog started at."
     ssdf_practice: ["PW.7.1"]
+
+  - id: CTRL-024
+    name: "Module spec alignment (Two Validation Passes, Pass 1)"
+    layer: wave-merge
+    mechanism: "validate_module.py run_validate_module(), called per-module in build.py _run_wave_merge"
+    tool: "judge model (JUDGE_MODEL)"
+    enforcement: advisory
+    description: "Closes an orphan found 2026-07-20: `pcp validate-module` existed as a fully-built standalone command but was never actually called from anywhere in the enforcement lifecycle -- only `validate-strategy` (Pass 2: modules vs objective) was wired into the wave-merge gate; Pass 1 (does each module's own spec still align with the objective/decomposition) had no automatic trigger at all. Advisory, same warn-first rollout posture as every other judge-model gate in this catalog -- false-positive rate on real projects not measured yet."
+    ssdf_practice: ["PW.1.1"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\
@@ -459,7 +468,14 @@ Kaggle and papers-with-code under the task's name; sklearn before anything exoti
 Process: corpus inventory (contents, freshness, owner) -> try grep/BM25
 (rank_bm25, free) BEFORE embeddings -> hybrid only if BM25 measurably fails ->
 retrieval-score threshold with an explicit "no answer" refusal (refusal beats
-hallucination) -> cite the source in the output.
+hallucination) -> cite the source in the output -> decompose the synthesized
+answer into individual claims and check each against the retrieved context
+(entailed / contradicted / unsupported) before returning it -- retrieval-score
+threshold only proves retrieval worked, not that the synthesis stayed
+faithful to what was retrieved. Where the corpus is structured (exact field
+names, not free text), this is a cheap deterministic string/value match, not
+an LLM judge call; reserve an LLM claim-check for synthesis that actually
+combines/derives from multiple fields.
 Search first: semantic-router; a vector DB only when BM25 fails on real queries.
 
 ### Rung 5 — cached reuse
@@ -961,6 +977,26 @@ PCP's own worktree/branch-reset code (`pcp build`'s parallel module builds,
 and any PCP-provided demo/setup scripts) uses the non-destructive
 `git checkout -B <branch> <start-point>` form, never `git branch -D` --
 a standing deny rule on `-D` will not conflict with anything PCP itself does.
+
+## Optional: keep CLAUDE.md's PCP context block fresh via a SessionStart hook
+
+`pcp context --inject` writes a marked block into CLAUDE.md (objective,
+architecture, current state, pending gaps) -- Claude Code reads CLAUDE.md
+every session regardless, but nothing calls `pcp context --inject` for you.
+If you want that block to stay current automatically instead of running it
+by hand, add a `SessionStart` hook:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "pcp context --inject --path \\"$CLAUDE_PROJECT_DIR\\""}]}
+    ]
+  }
+}
+```
+
+Same posture as everything else in this file: advisory, not applied by PCP itself.
 """
 
 

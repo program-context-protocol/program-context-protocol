@@ -48,6 +48,37 @@ def _build_prompt(objective: str, decomposition: str | None, module_name: str, s
     return "\n".join(parts)
 
 
+def run_validate_module(pcp_dir: Path, module_name: str) -> dict | None:
+    """Core module-vs-decomposition alignment check, reusable outside the CLI
+    command (e.g. build.py's wave-merge gate). Returns the LLM judge's result
+    dict, or None if the module is missing/deprecated/objective.md absent --
+    callers decide what "no result" means for their own control flow, same
+    posture as run_validate_strategy."""
+    modules_dir = get_modules_dir(pcp_dir)
+    spec_path = modules_dir / module_name / "spec.yaml"
+    if not spec_path.exists():
+        return None
+
+    validate_file(spec_path, "module_spec")  # schema errors surfaced by the CLI wrapper, not fatal here
+
+    spec = load_yaml(spec_path)
+    if spec.get("deprecated"):
+        return None
+
+    objective_path = get_objective(pcp_dir)
+    if not objective_path.exists():
+        return None
+
+    objective = objective_path.read_text()
+    decomp_path = get_decomposition(pcp_dir)
+    decomposition = decomp_path.read_text() if decomp_path.exists() else None
+
+    return llm.call_json(
+        SYSTEM_PROMPT, _build_prompt(objective, decomposition, module_name, spec),
+        model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command="validate-module",
+    )
+
+
 @click.command()
 @click.argument("module_name")
 @click.option("--json", "output_json", is_flag=True, help="Output raw JSON.")
@@ -84,18 +115,11 @@ def validate_module(module_name: str, output_json: bool, project_path: str | Non
         console.print("[red]Error:[/red] .pcp/objective.md not found.")
         sys.exit(2)
 
-    objective = objective_path.read_text()
-    decomp_path = get_decomposition(pcp_dir)
-    decomposition = decomp_path.read_text() if decomp_path.exists() else None
-
     if not output_json:
         console.print(f"[dim]Validating module '{module_name}'...[/dim]")
 
     try:
-        result = llm.call_json(
-            SYSTEM_PROMPT, _build_prompt(objective, decomposition, module_name, spec),
-            model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command="validate-module",
-        )
+        result = run_validate_module(pcp_dir, module_name)
     except RuntimeError as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(2)

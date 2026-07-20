@@ -46,6 +46,26 @@ fi
 pcp check --commit-msg-file "$1"
 """
 
+POST_COMMIT_HOOK = """\
+#!/bin/sh
+# PCP post-commit state refresh
+# Installed by: pcp install-hook / pcp init
+#
+# Regenerates current_state.md + diff.md after every commit -- not just
+# when a human remembers to run `pcp scan` manually, and not just for
+# commits made inside `pcp build`'s own loop (which already calls scan
+# directly). Closes the gap where a commit made outside that loop (a human
+# editing code directly, or `pcp pm`) left drift state stale until the next
+# unrelated `pcp scan` invocation.
+#
+# Best-effort and silent: a post-commit hook runs after the commit object
+# already exists, so it can never block or undo the commit -- failures here
+# are logged, never fatal. No-ops cleanly if `pcp` isn't on PATH yet or the
+# project has no modules scaffolded (pcp scan already handles both cases).
+command -v pcp >/dev/null 2>&1 && pcp scan --quiet >/dev/null 2>&1
+exit 0
+"""
+
 PRE_COMMIT_FRAMEWORK_CONFIG = """\
 repos:
   - repo: local
@@ -94,12 +114,24 @@ def install_git_hook(project_root: Path, force: bool = False) -> tuple[bool, str
 
     if hook_path.exists() and not force:
         if "pcp check --commit-msg-file" in hook_path.read_text():
-            return True, f"already installed at {hook_path}"
-        return False, f"a different commit-msg hook already exists at {hook_path} -- run `pcp install-hook --force` to overwrite, or `--pre-commit-framework` to append"
+            commit_msg_result = True, f"already installed at {hook_path}"
+        else:
+            return False, f"a different commit-msg hook already exists at {hook_path} -- run `pcp install-hook --force` to overwrite, or `--pre-commit-framework` to append"
+    else:
+        hook_path.write_text(COMMIT_MSG_HOOK)
+        hook_path.chmod(0o755)
+        commit_msg_result = True, f"installed {hook_path}"
 
-    hook_path.write_text(COMMIT_MSG_HOOK)
-    hook_path.chmod(0o755)
-    return True, f"installed {hook_path}"
+    post_commit_path = hooks_dir / "post-commit"
+    if post_commit_path.exists() and not force:
+        if "pcp scan" not in post_commit_path.read_text():
+            # Don't clobber a human's own post-commit hook -- just skip ours.
+            return commit_msg_result
+    else:
+        post_commit_path.write_text(POST_COMMIT_HOOK)
+        post_commit_path.chmod(0o755)
+
+    return commit_msg_result
 
 
 @click.command()
@@ -151,6 +183,15 @@ def install_hook(project_path: str | None, pre_commit_framework: bool, force: bo
     hook_path.chmod(0o755)
     console.print(f"[green]installed[/green] {hook_path}")
     console.print("[dim]pcp check will run before every commit finalizes.[/dim]")
+
+    post_commit_path = hooks_dir / "post-commit"
+    if post_commit_path.exists() and not force and "pcp scan" not in post_commit_path.read_text():
+        console.print(f"[yellow]A different post-commit hook already exists at {post_commit_path} — skipped (use --force to overwrite).[/yellow]")
+    else:
+        post_commit_path.write_text(POST_COMMIT_HOOK)
+        post_commit_path.chmod(0o755)
+        console.print(f"[green]installed[/green] {post_commit_path}")
+        console.print("[dim]current_state.md + diff.md refresh after every commit.[/dim]")
 
     _install_cron_scripts()
 
