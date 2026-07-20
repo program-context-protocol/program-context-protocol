@@ -34,6 +34,7 @@ from pcp.commands.design_audit import design_audit
 from pcp.commands.docs import docs
 from pcp.commands.prune import prune
 from pcp.commands.escalations_cmd import escalations_cmd
+from pcp.commands.pressure_test_cmd import pressure_test_cmd
 
 
 @click.group()
@@ -78,3 +79,4 @@ cli.add_command(design_audit)
 cli.add_command(docs)
 cli.add_command(prune)
 cli.add_command(escalations_cmd)
+cli.add_command(pressure_test_cmd)

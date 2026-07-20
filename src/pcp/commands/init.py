@@ -438,6 +438,15 @@ controls:
     enforcement: advisory
     description: "Swarm-role backlog's genuinely new lifecycle point: PCP's existing architect-review (CTRL-005) is post-hoc only -- it reviews the diff after code exists. This runs BEFORE, for high-risk criteria only (logic_tier >= 5, or build_vs_buy of reuse_whole/fork_adapt). Advisory prompt-injection in this pass, not the block_findings channel the backlog originally sketched -- PCP's attempt loop has no separate plan-then-code step, so routing this into block_findings would mean skipping a whole attempt with zero code written, a real behavior change to the 3-attempt contract. Upgrade path is the same L1-report-first rollout every other check in this catalog followed."
     ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-033
+    name: "ci_rules.yaml contract completeness"
+    layer: wave-merge
+    mechanism: "build.py _run_wave_contract_completeness_check() -- every hard_block rule in ci_rules.yaml missing an ABC-style contract block (preconditions/invariants/recovery) is flagged"
+    tool: "n/a (deterministic)"
+    enforcement: advisory
+    description: "Agent Behavioral Contracts reference pattern (arXiv:2602.22302, 2026-07-20 research pass -- see docs/research-rigidity-vs-reliability-2026-07.md). ci_rules.yaml's rules gained an optional `contract` block (preconditions/invariants/recovery -- Governance is already the existing `severity` field, not duplicated). This is the presence check, same posture CTRL-019 already uses for logic_tier: a hard_block rule with no contract just relies on the flat severity gate, exactly as it always did -- advisory, never blocks, project-wide (one ci_rules.yaml, not per-module)."
+    ssdf_practice: ["PW.1.1"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\

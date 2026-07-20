@@ -44,6 +44,28 @@
           "scope": {
             "type": "array",
             "items": { "type": "string" }
+          },
+          "contract": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Optional -- Agent Behavioral Contracts reference pattern (arXiv:2602.22302), borrowed 2026-07-20 (see docs/research-rigidity-vs-reliability-2026-07.md). ABC's (P,I,G,R) shape mapped onto this schema: Governance is already `severity` above, not duplicated here. `recovery` is the one field with real behavior -- see check.py/build.py's ci_rules consumers for how it's used.",
+            "properties": {
+              "preconditions": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Conditions that must hold for this rule to even apply -- documentation only in this version, not evaluated."
+              },
+              "invariants": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Properties that must hold throughout execution, not just at the point checked -- documentation only in this version, not evaluated."
+              },
+              "recovery": {
+                "type": "string",
+                "enum": ["retry", "escalate", "quarantine", "block"],
+                "description": "What should happen when this rule fires, beyond the flat severity gate. 'escalate' additionally logs an escalation entry immediately when the rule fires (build.py), rather than waiting for 3rd-attempt exhaustion. 'retry'/'quarantine'/'block' are declared for completeness and future use; only 'escalate' changes behavior in this version -- see build.py's _apply_rule_recovery for the honest current scope."
+              }
+            }
           }
         },
         "allOf": [

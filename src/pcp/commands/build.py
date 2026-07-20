@@ -543,6 +543,10 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     # advisory) — inert unless a module declares module_logic_breakdown.
     _run_wave_logic_breakdown_check(pcp_dir, wave_modules, wave_number)
 
+    # 13.5. ci_rules.yaml contract completeness (CTRL-033, advisory,
+    # project-wide, not per-module).
+    _run_wave_contract_completeness_check(pcp_dir, wave_number)
+
     # 14. Integrity Auditor (CTRL-030, advisory) — retrospective statistical-
     # drift signals across ALL completed criteria so far: fast completions
     # vs. declared logic_tier, per-module placeholder-flag concentration,
@@ -1038,6 +1042,26 @@ def _qa_record(
         )
 
 
+def _apply_rule_recovery(pcp_dir: Path, ctx: dict, rule: dict, violation_msg: str) -> None:
+    """ABC contract-shape reference pattern (arXiv:2602.22302, see
+    docs/research-rigidity-vs-reliability-2026-07.md) -- Governance is
+    already `severity` (hard_block/advisory), not duplicated here.
+    `recovery` is the one contract field with real behavior in this
+    version: 'escalate' immediately logs an escalation entry the moment
+    this rule fires, instead of only escalating after a criterion
+    exhausts all 3 build attempts. 'retry'/'quarantine'/'block' are
+    declared in the schema for completeness but don't change behavior yet
+    -- same honest-scope posture as every other partially-built check in
+    this catalog (e.g. CTRL-016's build_fresh carve-out)."""
+    if rule.get("contract", {}).get("recovery") != "escalate":
+        return
+    from pcp import escalations
+    escalations.record(
+        pcp_dir, ctx["module"], ctx["criterion_id"], route="human",
+        findings=[f"Immediate escalation (contract.recovery=escalate) on rule [{rule.get('id')}]: {violation_msg}"],
+    )
+
+
 def _run_layer1_check(pcp_dir: Path, project_root: Path, changed_files: list[str], ctx: dict) -> list[str]:
     """Run AST check logic and return violations. Deterministic — no LLM/tokens."""
     ci_rules_path = pcp_dir / "ci_rules.yaml"
@@ -1061,6 +1085,7 @@ def _run_layer1_check(pcp_dir: Path, project_root: Path, changed_files: list[str
                     if r.get("message"):
                         msg += f" → Fix: {r['message']}"
                     violations.append(msg)
+                    _apply_rule_recovery(pcp_dir, ctx, r, msg)
         for r in protected_rules:
             if r.get("severity") == "hard_block":
                 v = run_protected_path_rule(r, changed_files)
@@ -1069,6 +1094,7 @@ def _run_layer1_check(pcp_dir: Path, project_root: Path, changed_files: list[str
                     if r.get("message"):
                         msg += f" → Fix: {r['message']}"
                     violations.append(msg)
+                    _apply_rule_recovery(pcp_dir, ctx, r, msg)
         if file_rules:
             module_names = get_module_names(pcp_dir)
             for r in file_rules:
@@ -1079,6 +1105,7 @@ def _run_layer1_check(pcp_dir: Path, project_root: Path, changed_files: list[str
                         if r.get("message"):
                             msg += f" → Fix: {r['message']}"
                         violations.append(msg)
+                        _apply_rule_recovery(pcp_dir, ctx, r, msg)
     except Exception:
         violations.append("Invalid ci_rules.yaml schema")
 
@@ -1851,6 +1878,35 @@ def _run_scope_check(pcp_dir: Path, mod: dict, criterion: dict, changed_files: l
     if findings and mode == "warn":
         console.print(f"[yellow]Scope guard (advisory):[/yellow] {findings[0]}")
         return []
+    return findings
+
+
+def _run_wave_contract_completeness_check(pcp_dir: Path, wave_number: int) -> list[str]:
+    """CTRL-033, ADVISORY, deterministic, project-wide (not per-module --
+    ci_rules.yaml is one file). ABC contract-shape reference pattern
+    (arXiv:2602.22302, see docs/research-rigidity-vs-reliability-2026-07.md
+    and _apply_rule_recovery's own docstring): a hard_block rule with no
+    `contract` block at all has no declared recovery plan beyond the flat
+    binary severity gate -- same "declared-but-not-enforced-yet" posture
+    CTRL-019 already uses for logic_tier presence. Advisory, never blocks;
+    a rule without a contract block behaves exactly as it always has."""
+    ci_rules_path = pcp_dir / "ci_rules.yaml"
+    if not ci_rules_path.exists():
+        return []
+    try:
+        data = load_yaml(ci_rules_path)
+    except Exception:
+        return []
+    findings = [
+        f"Rule [{r.get('id')}] '{r.get('name')}' is hard_block with no declared contract "
+        "(preconditions/invariants/recovery) -- relies on the flat severity gate only"
+        for r in data.get("rules", []) or []
+        if r.get("severity") == "hard_block" and not r.get("contract")
+    ]
+    _wave_record(pcp_dir, wave_number, "contract-completeness", "CTRL-033", findings,
+                 files=["ci_rules.yaml"], result="pass")
+    for f in findings:
+        console.print(f"[yellow]Contract completeness (advisory):[/yellow] {f}")
     return findings
 
 
