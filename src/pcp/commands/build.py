@@ -522,6 +522,13 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     for f in route_findings:
         console.print(f"[yellow]{f}[/yellow]")
 
+    # 10. Navigation depth outliers (CTRL-025, advisory) and 11. top-menu-bar
+    # convention (CTRL-027, advisory, desktop_app archetype only) — neither
+    # blocks, same "report first, measure false-positive rate" posture as
+    # tier-presence/rung-necessity above.
+    _run_wave_nav_depth_check(pcp_dir, wave_modules, wave_number)
+    _run_wave_menu_bar_check(pcp_dir, wave_modules, wave_number)
+
     return findings
 
 
@@ -1576,6 +1583,67 @@ def _run_design_justification_check(pcp_dir: Path, mod: dict, criterion: dict, c
     return kept
 
 
+_CUSTOMIZATION_SIGNAL_KEYWORDS = (
+    "setting", "settings", "preference", "preferences", "config", "configure",
+    "configuration", "customiz", "personaliz", "toggle", "user_config", "userconfig",
+)
+
+
+def _run_customization_check(pcp_dir: Path, mod: dict, criterion: dict, ctx: dict) -> None:
+    """CTRL-026 -- deterministic structural check for design_justification.
+    customizable, same posture as CTRL-017's build_vs_buy placeholder check:
+    a declared customizable=true should show SOME settings-shaped signal in
+    the criterion's own target file, or the declaration reads the same way
+    an empty design_justification does -- a claim with nothing behind it.
+    Deterministic keyword scan, not a semantic judge call: whether a feature
+    is "really" customizable in a way that matters to a user is exactly the
+    kind of judgment call CTRL-015's LLM check already makes on the whole
+    design_justification block; this only catches the cheap, structural
+    failure mode (true declared, zero corroborating signal anywhere).
+
+    Advisory only -- never returned into block_findings, same posture as
+    _run_design_consistency_check. Re-reads acceptance.yaml fresh since
+    design_justification is written by the coding agent during this attempt."""
+    if not _is_ui_facing_criterion(criterion):
+        return
+
+    acc_data = load_yaml(mod["acc_path"])
+    fresh = next((c for c in acc_data.get("criteria", []) if c["id"] == criterion["id"]), None)
+    dj = (fresh or {}).get("design_justification") or {}
+    if not dj.get("customizable"):
+        _qa_record(pcp_dir, ctx, "customization", [], control_id="CTRL-026", tool=None)
+        return
+
+    findings = []
+    notes = (dj.get("customization_notes") or "").strip()
+    if not notes or len(notes.split()) < 3:
+        findings.append(
+            f"{criterion['id']} declares customizable=true but customization_notes is "
+            f"empty or trivially short ({notes!r}) -- what's actually configurable?"
+        )
+
+    target = criterion.get("target")
+    target_path = (pcp_dir.parent / target) if target else None
+    if target_path and target_path.is_file():
+        content = target_path.read_text(errors="replace").lower()
+        if not any(k in content for k in _CUSTOMIZATION_SIGNAL_KEYWORDS):
+            findings.append(
+                f"{criterion['id']} declares customizable=true but {target} shows no "
+                "settings/preference/config-shaped signal -- the declaration may be aspirational, not built yet"
+            )
+
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "customization",
+        "\n".join(findings) if findings else f"customizable=true, notes={notes!r}",
+    )
+    _qa_record(
+        pcp_dir, ctx, "customization", findings, control_id="CTRL-026", tool="keyword-scan",
+        evidence_path=evidence_path,
+    )
+    if findings:
+        console.print(f"[yellow]Customization check (advisory):[/yellow] {findings[0]}")
+
+
 _BVB_PLACEHOLDER_PHRASES = frozenset({
     "not specified", "not specified by generator", "todo", "tbd", "n/a", "na",
     "placeholder", "reason", "why this decision", "why this decision, one sentence",
@@ -1795,6 +1863,104 @@ def _run_wave_tier_presence_check(pcp_dir: Path, wave_modules: list[dict], wave_
 
     _wave_record(pcp_dir, wave_number, "tier-presence", "CTRL-019", findings,
                  files=checked_files, result="pass")
+    for f in findings:
+        console.print(f"[yellow]{f}[/yellow]")
+    return findings
+
+
+def _nav_depth_threshold() -> int:
+    return int(os.environ.get("PCP_NAV_DEPTH_THRESHOLD", "3"))
+
+
+def _run_wave_nav_depth_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
+    """CTRL-025, ADVISORY. nav_depth is self-declared (like logic_tier/
+    build_vs_buy), not computed from a real routing graph -- per-framework
+    route parsing (React Router, Next.js file routes, Vue Router, ...) is a
+    bigger build than a single audit field earns on its own. This is the
+    audit half: flags UI-facing completed criteria missing the field
+    entirely (same "declared-but-absent is itself a finding" posture as
+    design_justification), and ones declaring a value past
+    PCP_NAV_DEPTH_THRESHOLD (default 3, the classic UX heuristic)."""
+    findings: list[str] = []
+    checked: list[str] = []
+
+    for mod in wave_modules:
+        acc_path = pcp_dir / "strategy" / "modules" / mod["name"] / "acceptance.yaml"
+        if not acc_path.exists():
+            continue
+        acc = load_yaml(acc_path)
+        for c in acc.get("criteria", []):
+            if c.get("status") != "complete" or not _is_ui_facing_criterion(c):
+                continue
+            checked.append(f"{mod['name']}/{c['id']}")
+            depth = c.get("nav_depth")
+            if depth is None:
+                findings.append(
+                    f"Nav depth (advisory): '{mod['name']}/{c['id']}' has no nav_depth declared — "
+                    "how many clicks from the app entry point does this feature take to reach?"
+                )
+            elif depth > _nav_depth_threshold():
+                findings.append(
+                    f"Nav depth (advisory): '{mod['name']}/{c['id']}' declares nav_depth={depth}, "
+                    f"past the {_nav_depth_threshold()}-click threshold — consider surfacing it closer to entry"
+                )
+
+    _wave_record(pcp_dir, wave_number, "nav-depth", "CTRL-025", findings, files=checked, result="pass")
+    for f in findings:
+        console.print(f"[yellow]{f}[/yellow]")
+    return findings
+
+
+def _run_wave_menu_bar_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
+    """CTRL-027, ADVISORY, desktop_app archetype only. Stays completely
+    inert -- never even records a telemetry entry -- unless a human has
+    explicitly set ui_archetype: desktop_app in .pcp/design_conventions.yaml
+    (default web_app). A File/Edit/View/Help-style top menu bar is a
+    desktop-app convention, not a universal one; running this
+    unconditionally on every project would false-positive on every
+    dashboard/SaaS-shaped product PCP builds."""
+    conventions_path = pcp_dir / "design_conventions.yaml"
+    if not conventions_path.exists():
+        return []
+    try:
+        conventions = load_yaml(conventions_path) or {}
+    except Exception:
+        return []
+    if conventions.get("ui_archetype") != "desktop_app":
+        return []
+    required = (conventions.get("top_menu_bar") or {}).get("required_menus") or ["File", "Edit", "View", "Help"]
+
+    project_root = pcp_dir.parent
+    found_labels: set[str] = set()
+    checked: list[str] = []
+    for mod in wave_modules:
+        acc_path = pcp_dir / "strategy" / "modules" / mod["name"] / "acceptance.yaml"
+        if not acc_path.exists():
+            continue
+        acc = load_yaml(acc_path)
+        for c in acc.get("criteria", []):
+            if c.get("status") != "complete" or not _is_ui_facing_criterion(c):
+                continue
+            target = c.get("target")
+            if not target:
+                continue
+            full_path = project_root / target
+            if not full_path.is_file():
+                continue
+            checked.append(target)
+            content = full_path.read_text(errors="replace")
+            for label in required:
+                if label in content:
+                    found_labels.add(label)
+
+    missing = [m for m in required if m not in found_labels]
+    findings = []
+    if missing and checked:
+        findings.append(
+            f"Top menu bar (advisory): ui_archetype=desktop_app declares required menus "
+            f"{required}, but {', '.join(missing)} not found in any scanned UI-facing target file"
+        )
+    _wave_record(pcp_dir, wave_number, "menu-bar", "CTRL-027", findings, files=checked, result="pass")
     for f in findings:
         console.print(f"[yellow]{f}[/yellow]")
     return findings
@@ -2181,6 +2347,7 @@ def _build_one_criterion(
             "visual_quality": lambda: _run_visual_quality_check(pcp_dir, project_root, c, ctx),
             "design_justification": lambda: _run_design_justification_check(pcp_dir, mod, c, ctx),
             "bvb_justification": lambda: _run_build_vs_buy_justification_check(pcp_dir, mod, c, ctx),
+            "customization": lambda: _run_customization_check(pcp_dir, mod, c, ctx),
         }
         with ThreadPoolExecutor(max_workers=len(gate_calls)) as pool:
             futures = {name: pool.submit(fn) for name, fn in gate_calls.items()}

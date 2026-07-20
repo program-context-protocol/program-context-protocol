@@ -42,6 +42,11 @@
             "type": "string",
             "description": "Path to a local screenshot/mockup/Figma export image file, relative to project root, that a PM can point a UI-facing criterion at instead of describing the screen in prose alone. Consumed by build.py's _run_visual_quality_check as a second image the VLM judge compares the rendered screenshot against (layout/structure similarity, not pixel-perfect match). A remote URL is not fetched -- must be a file already present in the repo. Optional -- absence just means that check runs without a reference."
           },
+          "nav_depth": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of clicks/taps from the app's primary entry point (login/home) to reach this feature, self-declared like logic_tier/build_vs_buy -- not computed via real routing-graph analysis (that needs per-framework route parsing, a bigger build than this field earns on its own). Audited by pcp design-audit against PCP_NAV_DEPTH_THRESHOLD (default 3, the classic UX heuristic); missing on a UI-facing criterion is itself a finding, same posture as design_justification's absence."
+          },
           "status": {
             "type": "string",
             "enum": ["pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"]
@@ -77,7 +82,15 @@
                 "items": { "type": "string" }
               },
               "deviations_from_system": { "type": "string" },
-              "jtbd_framing": { "type": "string" }
+              "jtbd_framing": { "type": "string" },
+              "customizable": {
+                "type": "boolean",
+                "description": "Does this feature expose real user-configurable settings/preferences affecting its own behavior, or is it fixed? Structurally checked (not just presence) by build.py's CTRL-026 -- a customizable=true declaration with no settings-shaped signal anywhere in the target file is flagged advisory, same posture as design_justification's own substance check."
+              },
+              "customization_notes": {
+                "type": "string",
+                "description": "What's actually configurable, one sentence. Required in spirit (not schema) whenever customizable=true -- an empty/placeholder note there is exactly what CTRL-026 flags."
+              }
             }
           }
         }

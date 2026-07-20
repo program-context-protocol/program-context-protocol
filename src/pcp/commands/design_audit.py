@@ -62,12 +62,20 @@ def _classify_rung(criterion: dict) -> int:
     return 3
 
 
+def _nav_depth_threshold() -> int:
+    import os
+    return int(os.environ.get("PCP_NAV_DEPTH_THRESHOLD", "3"))
+
+
 def build_design_audit(pcp_dir: Path) -> dict:
     """Pure aggregation, no LLM -- safe to call at any point."""
     modules_dir = get_modules_dir(pcp_dir)
     modules = []
     rung_counts = {r: 0 for r in RUNG_LABEL}
     total_ui_criteria = 0
+    nav_depths: list[int] = []
+    nav_depth_missing = 0
+    customizable_count = 0
 
     if modules_dir.exists():
         for mod_path in sorted(p for p in modules_dir.iterdir() if p.is_dir()):
@@ -80,20 +88,55 @@ def build_design_audit(pcp_dir: Path) -> dict:
                 rung_counts[rung] += 1
                 total_ui_criteria += 1
                 dj = c.get("design_justification") or {}
+                nav_depth = c.get("nav_depth")
+                if nav_depth is None:
+                    nav_depth_missing += 1
+                else:
+                    nav_depths.append(nav_depth)
+                customizable = bool(dj.get("customizable"))
+                if customizable:
+                    customizable_count += 1
                 ui_criteria.append({
                     "id": c.get("id"),
                     "description": c.get("description"),
                     "rung": rung,
                     "jtbd_framing": dj.get("jtbd_framing", ""),
                     "deviations_from_system": dj.get("deviations_from_system", ""),
+                    "nav_depth": nav_depth,
+                    "customizable": customizable,
+                    "customization_notes": dj.get("customization_notes", ""),
                 })
             if ui_criteria:
                 modules.append({"module": mod_path.name, "criteria": ui_criteria})
+
+    threshold = _nav_depth_threshold()
+    within_threshold = sum(1 for d in nav_depths if d <= threshold)
+    nav_depth_summary = {
+        "declared": len(nav_depths),
+        "missing": nav_depth_missing,
+        "max": max(nav_depths) if nav_depths else None,
+        "avg": round(sum(nav_depths) / len(nav_depths), 1) if nav_depths else None,
+        "within_threshold_pct": round(within_threshold / len(nav_depths), 2) if nav_depths else None,
+        "threshold": threshold,
+    }
+    customization_summary = {
+        "customizable_count": customizable_count,
+        "total_ui_criteria": total_ui_criteria,
+        "customizable_pct": round(customizable_count / total_ui_criteria, 2) if total_ui_criteria else None,
+    }
+
+    ui_archetype = None
+    conventions_path = pcp_dir / "design_conventions.yaml"
+    if conventions_path.exists():
+        ui_archetype = (_load_yaml(conventions_path) or {}).get("ui_archetype")
 
     return {
         "modules": modules,
         "rung_counts": rung_counts,
         "total_ui_criteria": total_ui_criteria,
+        "nav_depth": nav_depth_summary,
+        "customization": customization_summary,
+        "ui_archetype": ui_archetype,
     }
 
 
@@ -117,6 +160,40 @@ def _render_markdown(data: dict, timestamp: str) -> str:
         lines.append(f"| {rung} | {label} | {data['rung_counts'].get(rung, 0)} |")
     lines.append("")
 
+    nd = data["nav_depth"]
+    lines += ["## Navigation Depth (clicks from entry point)", ""]
+    if nd["declared"]:
+        lines.append(
+            f"Declared on {nd['declared']} UI-facing criteria ({nd['missing']} missing) — "
+            f"max {nd['max']}, avg {nd['avg']}, {nd['within_threshold_pct']:.0%} within the "
+            f"{nd['threshold']}-click threshold. Self-declared, not computed from a real routing "
+            "graph — see CTRL-025."
+        )
+    else:
+        lines.append(f"_No criteria declare nav_depth yet ({nd['missing']} missing)._")
+    lines.append("")
+
+    cz = data["customization"]
+    lines += ["## Feature Customization", ""]
+    if cz["total_ui_criteria"]:
+        lines.append(
+            f"{cz['customizable_count']}/{cz['total_ui_criteria']} UI-facing criteria "
+            f"({cz['customizable_pct']:.0%}) declare `customizable: true` — see CTRL-026 for the "
+            "structural check on those declarations."
+        )
+    else:
+        lines.append("_No UI-facing criteria yet._")
+    lines.append("")
+
+    lines += ["## Top Menu Bar Convention", ""]
+    if data["ui_archetype"] == "desktop_app":
+        lines.append("`ui_archetype: desktop_app` — CTRL-027 checks for File/Edit/View/Help-style "
+                      "menus; see provenance.md / telemetry for the latest result.")
+    else:
+        lines.append(f"`ui_archetype: {data['ui_archetype'] or 'web_app (default)'}` — "
+                      "menu-bar convention check inert (desktop_app only).")
+    lines.append("")
+
     if not data["modules"]:
         lines.append("_No UI-facing criteria found yet._")
         return "\n".join(lines)
@@ -124,11 +201,16 @@ def _render_markdown(data: dict, timestamp: str) -> str:
     for m in data["modules"]:
         lines.append(f"## Module: `{m['module']}`")
         lines.append("")
-        lines.append("| Criterion | Rung | JTBD Framing |")
-        lines.append("|---|---|---|")
+        lines.append("| Criterion | Rung | JTBD Framing | Nav Depth | Customizable |")
+        lines.append("|---|---|---|---|---|")
         for c in m["criteria"]:
             flag = " ⚠" if c["rung"] == 1 else ""
-            lines.append(f"| {c['id']}: {c['description']}{flag} | {c['rung']} ({RUNG_LABEL[c['rung']]}) | {c['jtbd_framing'] or '—'} |")
+            nav_depth_cell = c["nav_depth"] if c["nav_depth"] is not None else "—"
+            customizable_cell = "✓" if c["customizable"] else "—"
+            lines.append(
+                f"| {c['id']}: {c['description']}{flag} | {c['rung']} ({RUNG_LABEL[c['rung']]}) | "
+                f"{c['jtbd_framing'] or '—'} | {nav_depth_cell} | {customizable_cell} |"
+            )
         lines.append("")
 
     return "\n".join(lines)

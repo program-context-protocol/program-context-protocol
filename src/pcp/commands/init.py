@@ -366,6 +366,33 @@ controls:
     enforcement: advisory
     description: "Closes an orphan found 2026-07-20: `pcp validate-module` existed as a fully-built standalone command but was never actually called from anywhere in the enforcement lifecycle -- only `validate-strategy` (Pass 2: modules vs objective) was wired into the wave-merge gate; Pass 1 (does each module's own spec still align with the objective/decomposition) had no automatic trigger at all. Advisory, same warn-first rollout posture as every other judge-model gate in this catalog -- false-positive rate on real projects not measured yet."
     ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-025
+    name: "Navigation depth (click-depth outliers)"
+    layer: wave-merge
+    mechanism: "build.py _run_nav_depth_check(), self-declared nav_depth field audited against PCP_NAV_DEPTH_THRESHOLD"
+    tool: "n/a (deterministic)"
+    enforcement: advisory
+    description: "How many clicks/taps from the app's primary entry point to reach a feature -- self-declared per criterion like logic_tier/build_vs_buy, not computed via real routing-graph analysis (a bigger, per-framework build this field doesn't earn on its own). Flags criteria missing the field entirely and criteria exceeding the 3-click threshold (default, PCP_NAV_DEPTH_THRESHOLD). Advisory -- a declared value is still a claim, not a measurement."
+    ssdf_practice: ["PW.7.1"]
+
+  - id: CTRL-026
+    name: "Feature customization structural check"
+    layer: build-loop
+    mechanism: "build.py _run_customization_check(), design_justification.customizable + customization_notes"
+    tool: "n/a (deterministic)"
+    enforcement: advisory
+    description: "A criterion declaring design_justification.customizable=true should show SOME settings-shaped signal in its own target file (setting/preference/config keyword) -- a bare true with no such signal reads the same way a lazily-filled design_justification does. Deterministic keyword scan, not a semantic judge call -- cheap, same Token Discipline posture as CTRL-017's build_vs_buy placeholder check."
+    ssdf_practice: ["PW.7.1"]
+
+  - id: CTRL-027
+    name: "Top menu bar convention (desktop_app archetype only)"
+    layer: wave-merge
+    mechanism: "build.py _run_menu_bar_check(), .pcp/design_conventions.yaml ui_archetype + top_menu_bar.required_menus"
+    tool: "n/a (deterministic)"
+    enforcement: advisory
+    description: "File/Edit/View/Help-style top menu bar is a desktop-app convention, not a universal one -- this check stays completely inert (never even runs) unless a human explicitly sets ui_archetype: desktop_app in .pcp/design_conventions.yaml (default web_app). When active, deterministic substring scan of UI-facing criteria target files for each required menu label; missing ones flagged advisory."
+    ssdf_practice: ["PW.7.1"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\
@@ -877,6 +904,25 @@ deny contains msg if {
 }
 """
 
+DESIGN_CONVENTIONS_TEMPLATE = """\
+version: "1.0"
+
+# UI archetype -- what KIND of product this is, for conventions that only
+# apply to some archetypes (a File/Edit/View menu bar is a desktop-app
+# convention; a SaaS dashboard or mobile-style portal has no reason to have
+# one). Default web_app: the menu-bar check below stays inert until a human
+# deliberately opts a project into a different archetype.
+#
+# One of: web_app | desktop_app | mobile | cli
+ui_archetype: web_app
+
+# Only enforced (deterministic substring scan, no LLM) when ui_archetype is
+# desktop_app -- CTRL-027 in build.py's wave-merge. Advisory, warn-first,
+# same rollout posture as every other check in this catalog.
+top_menu_bar:
+  required_menus: ["File", "Edit", "View", "Help"]
+"""
+
 POLICY_TIER_DISTRIBUTION_TEMPLATE = """\
 package pcp.tier_distribution
 
@@ -1046,6 +1092,7 @@ def init(project_path: str, module_name: str | None, force: bool):
         pcp / "policies" / "tier_distribution.rego": POLICY_TIER_DISTRIBUTION_TEMPLATE,
         pcp / "logic_tier_guide.md": LOGIC_TIER_GUIDE_TEMPLATE,
         pcp / "context_map.yaml": CONTEXT_MAP_TEMPLATE,
+        pcp / "design_conventions.yaml": DESIGN_CONVENTIONS_TEMPLATE,
     }
 
     if module_name:
