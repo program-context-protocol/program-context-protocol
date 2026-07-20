@@ -535,6 +535,66 @@ def test_pm_preserves_existing_module_level_build_vs_buy_on_modify(temp_project)
     assert spec["build_vs_buy"]["rationale"] == "Auth0 fits cleanly"
 
 
+def test_pm_preserves_existing_module_logic_breakdown_on_modify(temp_project):
+    """Same preservation rule as module-level build_vs_buy: the prompt tells
+    the LLM to OMIT module_logic_breakdown for a small, same-shape addition,
+    so an omitted key must mean 'unchanged', not 'delete the prior breakdown'."""
+    pcp_dir = temp_project / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Objective\nAuth service.")
+    (pcp_dir / "strategy").mkdir()
+    (pcp_dir / "strategy" / "decomposition.md").write_text("# Decomp")
+
+    mod_dir = pcp_dir / "strategy" / "modules" / "auth"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "spec.yaml").write_text(yaml.dump({
+        "version": "2.0", "module": "auth", "description": "Handles authentication.",
+        "objective_coverage": ["Auth"],
+        "module_logic_breakdown": ["session token issuance", "password hashing and verification"],
+        "dependencies": [], "constraints": [],
+        "build_vs_buy": {"decision": "reuse_whole", "rationale": "Auth0 fits cleanly", "candidates_considered": []},
+    }))
+    (mod_dir / "acceptance.yaml").write_text(yaml.dump({"version": "2.0", "module": "auth", "criteria": []}))
+
+    mock_pm_response = {
+        "capabilities_enumerated": ["minor UI copy tweak"],
+        "overall_explanation": "Tweak login button text.",
+        "modules": [
+            {
+                "module_action": "modify",
+                "module_name": "auth",
+                "module_explanation": "Tweak login button text.",
+                "spec_changes": {
+                    "version": "2.0", "module": "auth", "description": "Handles authentication and login copy.",
+                    "objective_coverage": ["Auth"], "dependencies": [], "constraints": [],
+                    "build_vs_buy": {"decision": "reuse_whole", "rationale": "Auth0 fits cleanly", "candidates_considered": []},
+                    # deliberately omits module_logic_breakdown -- small same-shape addition
+                },
+                "acceptance_changes": {
+                    "version": "2.0", "module": "auth", "criteria": [
+                        {"id": "A001", "description": "Login button says Sign In.", "check": "manual", "status": "pending",
+                         "logic_tier": 1, "build_vs_buy": {"decision": "build_fresh", "rationale": "trivial copy"}},
+                    ],
+                },
+            }
+        ],
+    }
+    mock_val_response = {
+        "coverage_gaps": [], "contradictions": [], "overlaps": [],
+        "missing_modules": [], "coverage_score": 1.0,
+    }
+
+    with patch("pcp.llm.client.call_json") as mock_call_json, \
+            patch("pcp.commands.scan.scan"):
+        mock_call_json.side_effect = [mock_pm_response, mock_val_response]
+        runner = CliRunner()
+        result = runner.invoke(cli, ["pm", "Tweak login copy", "--path", str(temp_project)], input="y\n")
+
+    assert result.exit_code == 0
+    spec = yaml.safe_load((mod_dir / "spec.yaml").read_text())
+    assert spec["module_logic_breakdown"] == ["session token issuance", "password hashing and verification"]
+
+
 def test_pm_spans_multiple_modules_without_truncation(temp_project):
     """The real root-cause fix, 2026-07-20: pm's output used to be a single
     module_action/module_name -- a feature intent spanning 2+ modules got

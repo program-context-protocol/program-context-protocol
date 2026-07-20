@@ -30,6 +30,11 @@
       "type": "array",
       "items": { "type": "string" }
     },
+    "module_logic_breakdown": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Decompose-first, one level deeper than objective_coverage (GUIDE, arXiv:2502.21068, already applied program-wide via capabilities_enumerated): this module's internal components/sub-flows/edge-cases, declared BEFORE its acceptance criteria are generated so criteria derive from a real breakdown rather than a high-level restatement of the description. Optional, living artifact -- allowed to evolve once real implementation constraints surface, same posture design_system.md already has."
+    },
     "deprecated": {
       "type": "boolean"
     },

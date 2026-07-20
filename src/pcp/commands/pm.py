@@ -11,7 +11,10 @@ from rich.console import Console
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir, get_modules_dir
 from pcp.llm import client as llm
 from pcp.pcp_status import write_pcp_md
-from pcp.commands.kickoff import _normalize_acceptance, _normalize_spec, check_capability_coverage
+from pcp.commands.kickoff import (
+    _normalize_acceptance, _normalize_spec, check_capability_coverage,
+    check_module_logic_breakdown_coverage,
+)
 from pcp.commands.validate_strategy import (
     _build_user_prompt as build_val_prompt,
     SYSTEM_PROMPT as VAL_SYSTEM_PROMPT,
@@ -37,6 +40,8 @@ You are given the current program objective, strategy decomposition, and list of
 
 DECOMPOSE FIRST, THEN MAP (GUIDE pattern, arXiv:2502.21068 -- the one academically validated fix for LLMs silently dropping requirements during one-shot generation): before deciding which module(s) this intent touches, populate `capabilities_enumerated` with EVERY distinct capability/requirement this intent implies, however small. Only after that list is complete, decide which module(s) each capability belongs to.
 
+DECOMPOSE FIRST applies one layer deeper too: if this intent adds real internal complexity to a module (not just one more criterion of the same shape), update that module's `spec_changes.module_logic_breakdown` with the new internal components/sub-flows/edge-cases before writing its new criteria -- derive the criteria from the updated breakdown. Skip this field entirely for a small, same-shape addition that doesn't change the module's actual internal decomposition.
+
 A real feature intent routinely spans MORE THAN ONE existing or new module (e.g. "add payments" may touch billing, notifications, and auth) -- do not force everything into a single module just because the schema used to only allow one. `modules` is a LIST: include one entry per module this intent actually touches, whether that's one module or several. Analyze which module (or modules) are responsible, and for each, generate the updated or new spec and acceptance criteria for that module only.
 
 Ensure that new acceptance criteria IDs do not conflict with existing ones within their own module (e.g. if a module already has A001, its new ones start at A002).
@@ -57,6 +62,7 @@ Output schema:
         "module": "module-name",
         "description": "Description of the module including the new features (minimum 10 words).",
         "objective_coverage": ["Explain how this module covers objective.md objectives"],
+        "module_logic_breakdown": ["Only if this intent adds real internal complexity -- this module's updated internal components/sub-flows/edge-cases. Omit the key entirely for a small, same-shape addition."],
         "dependencies": ["dependency-module-name"],
         "constraints": [],
         "build_vs_buy": {
@@ -150,6 +156,13 @@ def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
             pass
     if "build_vs_buy" not in spec_changes and existing_spec.get("build_vs_buy"):
         spec_changes["build_vs_buy"] = existing_spec["build_vs_buy"]
+
+    # Same preservation rule for module_logic_breakdown -- the prompt tells
+    # the LLM to OMIT this key for a small, same-shape addition (deliberately,
+    # to avoid forcing a re-declaration on every trivial pm call), so an
+    # omitted key must mean "unchanged", not "delete the prior breakdown".
+    if "module_logic_breakdown" not in spec_changes and existing_spec.get("module_logic_breakdown"):
+        spec_changes["module_logic_breakdown"] = existing_spec["module_logic_breakdown"]
 
     coercion_warnings = _normalize_spec(spec_changes, mod_name)
     spec_path.write_text(yaml.dump(spec_changes, default_flow_style=False))
@@ -299,6 +312,20 @@ def pm(intent: str, project_path: str | None):
     if capability_warnings:
         console.print(f"[yellow]⚠  {len(capability_warnings)} enumerated capability(ies) may not be covered by any module:[/yellow]")
         for w in capability_warnings:
+            console.print(f"   {w}")
+
+    # Same check, one layer deeper -- any module whose spec now declares
+    # module_logic_breakdown gets it cross-checked against its OWN criteria.
+    all_acceptances = {}
+    for acc_path in sorted((pcp_dir / "strategy" / "modules").glob("*/acceptance.yaml")):
+        try:
+            all_acceptances[acc_path.parent.name] = yaml.safe_load(acc_path.read_text()) or {}
+        except Exception:
+            pass
+    breakdown_warnings = check_module_logic_breakdown_coverage(all_specs, all_acceptances)
+    if breakdown_warnings:
+        console.print(f"[yellow]⚠  {len(breakdown_warnings)} logic-breakdown item(s) may not be covered by their own module's criteria:[/yellow]")
+        for w in breakdown_warnings:
             console.print(f"   {w}")
 
     # Run validate-strategy automatically -- pm previously had ZERO strategy

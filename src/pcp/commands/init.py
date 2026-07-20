@@ -420,6 +420,24 @@ controls:
     enforcement: advisory
     description: "Swarm-role backlog's Integrity Auditor (2026-07-20): retrospective-only -- reads already-complete criteria across the whole project, can't correct what's already built, only flags for human review. Deterministic-first, same posture as every other statistical-drift check in this catalog; the genuinely ambiguous tail (an LLM judging the flagged pattern) is not built in this pass. Runs at wave boundaries, not per-criterion -- the value is seeing patterns across many completed criteria no single-criterion CTRL check can see by design."
     ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-031
+    name: "module_logic_breakdown built-code verification"
+    layer: wave-merge
+    mechanism: "build.py _run_wave_logic_breakdown_check() -- keyword-overlap between a module's declared spec.module_logic_breakdown and the combined description+target-file content of its OWN completed criteria"
+    tool: "n/a (deterministic keyword scan)"
+    enforcement: advisory
+    description: "Lazy-agent backlog item 9's verification half: kickoff/pm already keyword-check a declared breakdown item against a module's own criteria descriptions BEFORE build (check_module_logic_breakdown_coverage); this re-checks AFTER build, against completed criteria's actual target-file content -- does code exist that plausibly reflects each declared internal component, not just that a criterion was worded to mention it. Deterministic, not the CTRL-015-style LLM judge the backlog item originally sketched -- the semantic half (does the code genuinely FULFILL the component) stays deferred. Inert unless a module declares module_logic_breakdown."
+    ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-032
+    name: "Architect pre-flight (pre-implementation sanity check)"
+    layer: build-loop
+    mechanism: "build.py _run_architect_preflight() -- one judge-model call reviewing a HIGH-RISK criterion's declared logic_tier/build_vs_buy/module context BEFORE any code is written, injected as advisory context into attempt 1's own prompt"
+    tool: "judge model (JUDGE_MODEL)"
+    enforcement: advisory
+    description: "Swarm-role backlog's genuinely new lifecycle point: PCP's existing architect-review (CTRL-005) is post-hoc only -- it reviews the diff after code exists. This runs BEFORE, for high-risk criteria only (logic_tier >= 5, or build_vs_buy of reuse_whole/fork_adapt). Advisory prompt-injection in this pass, not the block_findings channel the backlog originally sketched -- PCP's attempt loop has no separate plan-then-code step, so routing this into block_findings would mean skipping a whole attempt with zero code written, a real behavior change to the 3-attempt contract. Upgrade path is the same L1-report-first rollout every other check in this catalog followed."
+    ssdf_practice: ["PW.1.1"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\

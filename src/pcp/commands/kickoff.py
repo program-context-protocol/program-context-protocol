@@ -28,6 +28,8 @@ Your task is to take a product vision document (in plain English) and decompose 
 
 DECOMPOSE FIRST, THEN MAP (GUIDE pattern, arXiv:2502.21068 -- the one academically validated fix for LLMs silently dropping requirements during one-shot generation): before deciding on modules, populate `capabilities_enumerated` with EVERY distinct capability/requirement/feature the vision document implies, however small -- one item per discrete thing a user or the business needs, not per module. Only after that list is complete, assign each capability to a module in `modules`. Every entry in `capabilities_enumerated` must be covered by at least one module's `objective_coverage` -- a capability with no covering module is exactly the failure mode this field exists to catch.
 
+DECOMPOSE FIRST applies one layer deeper too: within EACH module, before writing that module's acceptance criteria, populate its `module_logic_breakdown` with the module's own internal components/sub-flows/edge-cases -- however small. Derive the module's criteria FROM this breakdown rather than restating the module description at a high level; a module whose criteria don't visibly trace back to a declared breakdown item is exactly "technically a module but not really a module" -- vision-level features discussed without real internal decomposition.
+
 Decompose the vision into modules. Each module must cover a distinct set of features/requirements.
 The strategy decomposition must detail how these modules cover the objective.
 Also generate acceptance criteria for each module (e.g. A001, A002) with clear descriptions.
@@ -77,6 +79,7 @@ Output schema:
         "module": "module-name",
         "description": "Short description of what the module does (at least 10 words).",
         "objective_coverage": ["What part of objective.md is covered"],
+        "module_logic_breakdown": ["This module's internal components/sub-flows/edge-cases -- populate this BEFORE writing this module's acceptance criteria, per the DECOMPOSE FIRST instruction, one layer deeper than capabilities_enumerated. Derive criteria FROM this list rather than restating the description."],
         "dependencies": [],
         "constraints": [],
         "build_vs_buy": {
@@ -246,25 +249,119 @@ def _normalize_spec(spec: dict, module_name: str) -> list[str]:
     return warnings
 
 
+def _keyword_miss_check(items: list[str], coverage_text: str, label: str, against: str) -> list[str]:
+    """Deterministic, no LLM: does each item in `items` keyword-overlap
+    somewhere in `coverage_text`? A miss doesn't prove a real gap (keyword
+    overlap is a blunt instrument), but it's a free, zero-cost second
+    opinion worth surfacing -- specifically because noticing an OMISSION is
+    a harder task for a fast/cheap judge model than confirming a presence
+    is correct. Shared shape behind check_capability_coverage (program-level)
+    and check_module_logic_breakdown_coverage (module-level, one layer
+    deeper) -- same check, same reasoning, different granularity."""
+    warnings = []
+    coverage_text = coverage_text.lower()
+    for item in items:
+        item_words = set(re.findall(r"[a-zA-Z]{5,}", item.lower()))
+        if item_words and not any(w in coverage_text for w in item_words):
+            warnings.append(f"{label} '{item}' does not keyword-match {against} — possible gap")
+    return warnings
+
+
+_COMPLETENESS_LENSES = ("data-model", "edge-case", "integration-dependency")
+
+_COMPLETENESS_SYSTEM_PROMPT = """\
+You are reviewing a module's own declared internal breakdown for completeness, one lens at a time. \
+Given the module's description and its current module_logic_breakdown list, from the {lens} lens ONLY, \
+list any genuinely missing internal components/sub-flows/edge-cases this lens would catch that aren't \
+already on the list (don't repeat items that are already there in substance, even if worded differently). \
+Output ONLY valid JSON: {{"new_items": ["..."]}}. Empty list if nothing missing from this lens."""
+
+
+def _is_genuinely_new(item: str, existing: list[str]) -> bool:
+    """Deterministic dedup, no LLM: an item whose own distinctive words
+    already mostly appear somewhere in the existing list reads as a
+    reworded duplicate, not a genuinely new finding."""
+    item_words = set(re.findall(r"[a-zA-Z]{5,}", item.lower()))
+    if not item_words:
+        return False
+    existing_text = " ".join(existing).lower()
+    overlap = sum(1 for w in item_words if w in existing_text)
+    return overlap < max(1, len(item_words) // 2)
+
+
+def loop_until_dry_breakdown(
+    pcp_dir: Path, module_name: str, description: str, breakdown: list[str], max_rounds: int = 6,
+) -> list[str]:
+    """Lazy-agent backlog item 10: multi-lens completeness pass over a
+    module's own module_logic_breakdown, looping until 2 CONSECUTIVE rounds
+    add nothing genuinely new (loop-until-dry) rather than a fixed-N-loop
+    count -- a fixed count misses the tail on a genuinely complex module
+    and overspends on a simple one. Each round cycles through a DIFFERENT
+    lens (data-model / edge-case / integration-dependency) rather than
+    re-asking the same question, which risks diminishing or fabricated
+    returns on repetition. Feeds module_logic_breakdown -- doesn't replace
+    CTRL-031's built-code verification step.
+
+    Opt-in only (see PCP_KICKOFF_DEEP_BREAKDOWN in kickoff()) -- a real
+    LLM-call loop, not something every kickoff should pay for by default
+    (Token Discipline). Returns the ENRICHED breakdown (original + new)."""
+    enriched = list(breakdown)
+    consecutive_dry = 0
+    round_num = 0
+    while consecutive_dry < 2 and round_num < max_rounds:
+        lens = _COMPLETENESS_LENSES[round_num % len(_COMPLETENESS_LENSES)]
+        round_num += 1
+        prompt = (
+            f"Module: {module_name}\nDescription: {description}\n"
+            f"Current module_logic_breakdown: {json.dumps(enriched)}"
+        )
+        try:
+            res = llm.call_json(
+                _COMPLETENESS_SYSTEM_PROMPT.format(lens=lens), prompt,
+                model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command="kickoff-completeness",
+            )
+        except Exception:
+            break
+        candidates = res.get("new_items", []) if isinstance(res, dict) else []
+        genuinely_new = [c for c in candidates if _is_genuinely_new(c, enriched)]
+        if genuinely_new:
+            enriched.extend(genuinely_new)
+            consecutive_dry = 0
+        else:
+            consecutive_dry += 1
+    return enriched
+
+
 def check_capability_coverage(capabilities: list[str], module_specs: dict) -> list[str]:
     """Deterministic, no LLM: keyword-overlap check between each enumerated
     capability (see DECOMPOSE FIRST in SYSTEM_PROMPT) and the combined
     objective_coverage text of all modules -- a cheap complementary signal
-    alongside validate-strategy's LLM-judged coverage_score, specifically
-    because noticing an OMISSION is a harder task for a fast/cheap judge
-    model than confirming a presence is correct. A miss here doesn't prove
-    a real gap (keyword overlap is a blunt instrument), but it's a free,
-    zero-cost second opinion worth surfacing. Shared by kickoff.py and
-    pm.py -- same check, same reasoning, whether this is a fresh strategy
-    or an incremental intent."""
-    warnings = []
+    alongside validate-strategy's LLM-judged coverage_score. Shared by
+    kickoff.py and pm.py -- same check, same reasoning, whether this is a
+    fresh strategy or an incremental intent."""
     combined_coverage = " ".join(
         " ".join(spec.get("objective_coverage", []) or []) for spec in module_specs.values()
-    ).lower()
-    for cap in capabilities:
-        cap_words = set(re.findall(r"[a-zA-Z]{5,}", cap.lower()))
-        if cap_words and not any(w in combined_coverage for w in cap_words):
-            warnings.append(f"Capability '{cap}' does not keyword-match any module's objective_coverage — possible gap")
+    )
+    return _keyword_miss_check(capabilities, combined_coverage, "Capability", "any module's objective_coverage")
+
+
+def check_module_logic_breakdown_coverage(module_specs: dict, module_acceptances: dict) -> list[str]:
+    """One layer deeper than check_capability_coverage: does each module's
+    own declared module_logic_breakdown (internal components/sub-flows/
+    edge-cases, see the module_spec schema field) keyword-match at least
+    one of THAT module's own criteria descriptions? Only checks modules
+    that actually declared a breakdown -- the field is optional, absence is
+    not itself a finding (see CLAUDE.md's PCP Design lifecycle for the same
+    "declared, then audited" posture design_justification already has)."""
+    warnings = []
+    for mod_name, spec in module_specs.items():
+        breakdown = spec.get("module_logic_breakdown") or []
+        if not breakdown:
+            continue
+        acc = module_acceptances.get(mod_name) or {}
+        own_criteria_text = " ".join(c.get("description", "") for c in acc.get("criteria", []) or [])
+        for f in _keyword_miss_check(breakdown, own_criteria_text, "Logic-breakdown item", "this module's own criteria"):
+            warnings.append(f"{mod_name}: {f}")
     return warnings
 
 
@@ -414,6 +511,19 @@ def kickoff(vision_file: str, project_path: str, force: bool):
         m["acceptance"]["version"] = "2.0"
         coercion_warnings += _normalize_spec(m["spec"], m["name"])
         coercion_warnings += _normalize_acceptance(m["acceptance"], m["name"])
+
+        # Opt-in multi-lens completeness pass (lazy-agent backlog item 10) --
+        # real extra LLM calls, so this stays behind an explicit flag rather
+        # than running on every kickoff (Token Discipline).
+        if os.environ.get("PCP_KICKOFF_DEEP_BREAKDOWN") == "1" and m["spec"].get("module_logic_breakdown"):
+            enriched = loop_until_dry_breakdown(
+                pcp_dir, m["name"], m["spec"].get("description", ""), m["spec"]["module_logic_breakdown"],
+            )
+            added = len(enriched) - len(m["spec"]["module_logic_breakdown"])
+            if added:
+                console.print(f"[dim]Completeness pass: +{added} logic-breakdown item(s) for '{m['name']}'[/dim]")
+            m["spec"]["module_logic_breakdown"] = enriched
+
         _write_file(mod_dir / "spec.yaml", yaml.dump(m["spec"], default_flow_style=False))
         _write_file(mod_dir / "acceptance.yaml", yaml.dump(m["acceptance"], default_flow_style=False))
 
@@ -452,6 +562,15 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     if capability_warnings:
         console.print(f"[yellow]⚠  {len(capability_warnings)} enumerated capability(ies) may not be covered by any module:[/yellow]")
         for w in capability_warnings:
+            console.print(f"   {w}")
+
+    # Same check, one layer deeper (module_logic_breakdown vs. each
+    # module's OWN criteria) -- see check_module_logic_breakdown_coverage.
+    acceptances = {m["name"]: m["acceptance"] for m in result.get("modules", [])}
+    breakdown_warnings = check_module_logic_breakdown_coverage(modules, acceptances)
+    if breakdown_warnings:
+        console.print(f"[yellow]⚠  {len(breakdown_warnings)} logic-breakdown item(s) may not be covered by their own module's criteria:[/yellow]")
+        for w in breakdown_warnings:
             console.print(f"   {w}")
 
     # Run validate-strategy automatically

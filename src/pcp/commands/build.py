@@ -539,7 +539,11 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     # advisory) — inert unless .pcp/ui_kit_recipes.yaml exists.
     _run_wave_ui_kit_check(pcp_dir, wave_modules, wave_number)
 
-    # 13. Integrity Auditor (CTRL-030, advisory) — retrospective statistical-
+    # 13. module_logic_breakdown built-code verification (CTRL-031,
+    # advisory) — inert unless a module declares module_logic_breakdown.
+    _run_wave_logic_breakdown_check(pcp_dir, wave_modules, wave_number)
+
+    # 14. Integrity Auditor (CTRL-030, advisory) — retrospective statistical-
     # drift signals across ALL completed criteria so far: fast completions
     # vs. declared logic_tier, per-module placeholder-flag concentration,
     # findings recurring across many criteria without resolving, uniform/
@@ -1850,6 +1854,55 @@ def _run_scope_check(pcp_dir: Path, mod: dict, criterion: dict, changed_files: l
     return findings
 
 
+def _run_wave_logic_breakdown_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
+    """CTRL-031, ADVISORY, deterministic-only in this pass. module_logic_
+    breakdown backlog item 9's verification half: kickoff/pm already
+    keyword-check a declared breakdown item against this module's OWN
+    criteria descriptions BEFORE build (check_module_logic_breakdown_
+    coverage) -- this re-checks AFTER build, against completed criteria's
+    actual target-file content: "does code exist that plausibly reflects
+    each declared component," not just "did a criterion get worded to
+    mention it." Deterministic keyword scan, not the CTRL-015-style LLM
+    judge the backlog item originally sketched -- same rung-1-first posture
+    every other check in this catalog started with; the semantic half
+    (does the code genuinely FULFILL the component, not just mention it)
+    stays deferred."""
+    from pcp.commands.kickoff import _keyword_miss_check
+
+    findings: list[str] = []
+    for mod in wave_modules:
+        spec_path = pcp_dir / "strategy" / "modules" / mod["name"] / "spec.yaml"
+        acc_path = pcp_dir / "strategy" / "modules" / mod["name"] / "acceptance.yaml"
+        if not spec_path.exists() or not acc_path.exists():
+            continue
+        spec = load_yaml(spec_path)
+        breakdown = spec.get("module_logic_breakdown") or []
+        if not breakdown:
+            continue
+        acc = load_yaml(acc_path)
+        built_text_parts = []
+        for c in acc.get("criteria", []):
+            if c.get("status") != "complete":
+                continue
+            built_text_parts.append(c.get("description", ""))
+            target = c.get("target")
+            target_path = (pcp_dir.parent / target) if target else None
+            if target_path and target_path.is_file():
+                built_text_parts.append(target_path.read_text(errors="replace"))
+        built_text = " ".join(built_text_parts)
+        for f in _keyword_miss_check(
+            breakdown, built_text, "Logic-breakdown item",
+            "any completed criterion's description or target file",
+        ):
+            findings.append(f"{mod['name']}: {f}")
+
+    _wave_record(pcp_dir, wave_number, "logic-breakdown", "CTRL-031", findings,
+                 files=[m["name"] for m in wave_modules], result="pass")
+    for f in findings:
+        console.print(f"[yellow]Logic-breakdown check (advisory):[/yellow] {f}")
+    return findings
+
+
 _LAZY_MARKER_PATTERN = re.compile(
     r"\b(TODO|FIXME|XXX|HACK)\b|"
     r"\bnot\s+(?:yet\s+)?implement(?:ed)?\b|\bplaceholder\b|\bcoming\s+soon\b",
@@ -2322,6 +2375,77 @@ def _complexity_route(pcp_dir: Path, mod: dict, c: dict) -> tuple[bool, dict]:
                    "module_retry_ratio": round(retries / max(len(module_builds), 1), 2) if module_builds else 0.0}
 
 
+_ARCHITECT_PREFLIGHT_SYSTEM_PROMPT = """\
+You are a software architect doing a PRE-IMPLEMENTATION sanity check — no code exists yet for this criterion. \
+Review the PLANNED approach (its description, declared logic_tier, declared build_vs_buy decision, and the \
+module it belongs to) for genuine red flags before any code is written: a declared logic_tier that contradicts \
+the description's own language (e.g. rung 1 "deterministic" but the description asks for judgment/summarization), \
+a declared build_vs_buy that conflicts with what the module's dependencies/constraints already establish, or a \
+plan that looks structurally unsound given the architecture doc. Do NOT invent hypothetical implementation \
+mistakes that haven't happened yet — only flag concerns groundable in the declared fields themselves. \
+Output ONLY valid JSON: {"findings": [{"concern": "...", "suggestion": "..."}]}. Empty list if nothing to flag."""
+
+
+def _run_architect_preflight(pcp_dir: Path, mod: dict, criterion: dict) -> list[str]:
+    """Architect pre-flight (swarm-role backlog, 2026-07-20): PCP's existing
+    architect-review (_run_architect_review) is POST-HOC only -- it reviews
+    the diff after code is written. This is the genuinely new lifecycle
+    point the backlog named: a pre-implementation consult, before any code
+    exists, for HIGH-RISK criteria only (logic_tier >= 5, or a criterion-
+    level build_vs_buy of reuse_whole/fork_adapt -- a real external-
+    dependency commitment worth a second look before it's acted on).
+
+    Advisory in this pass, NOT the block_findings channel the backlog
+    sketched -- PCP's attempt loop has no separate "submit a plan, then
+    code" step (one agent session does both), so wiring this into
+    block_findings would mean skipping a whole attempt with no code
+    written, a real behavior change to a heavily-relied-on 3-attempt
+    contract. Same L1-report-first rollout discipline as every other new
+    check in this catalog: advisory now, upgrade to blocking only after a
+    measured false-positive rate earns it. Returns lines to inject into the
+    criterion's own attempt-1 prompt (empty if not high-risk or nothing to flag)."""
+    tier = criterion.get("logic_tier")
+    bvb_decision = (criterion.get("build_vs_buy") or {}).get("decision")
+    high_risk = (isinstance(tier, int) and tier >= 5) or bvb_decision in ("reuse_whole", "fork_adapt")
+    if not high_risk:
+        return []
+
+    spec_summary = {
+        "module": mod["name"], "description": mod.get("spec", {}).get("description", ""),
+        "dependencies": mod.get("spec", {}).get("dependencies", []),
+        "constraints": mod.get("spec", {}).get("constraints", []),
+    }
+    user_prompt = (
+        f"Criterion: [{criterion.get('id')}] {criterion.get('description', '')}\n"
+        f"Declared logic_tier: {tier}\n"
+        f"Declared build_vs_buy: {criterion.get('build_vs_buy')}\n"
+        f"Module context: {json.dumps(spec_summary, default=str)}"
+    )
+    try:
+        res = llm.call_json(
+            _ARCHITECT_PREFLIGHT_SYSTEM_PROMPT, user_prompt,
+            model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command="architect-preflight",
+        )
+    except Exception as e:
+        console.print(f"[yellow]Warning: Architect pre-flight call failed: {e}[/yellow]")
+        return []
+
+    findings = res.get("findings", []) if isinstance(res, dict) else []
+    ctx = {"module": mod["name"], "submodule": None, "criterion_id": criterion.get("id"), "attempt": 0, "files": []}
+    rendered = [f"{f.get('concern', '')} — {f.get('suggestion', '')}" for f in findings if f.get("concern")]
+    evidence_path = evidence.store(
+        pcp_dir, ctx["module"], ctx["criterion_id"], 0, "architect-preflight",
+        "\n".join(rendered) if rendered else "no pre-flight concerns",
+    )
+    _qa_record(
+        pcp_dir, ctx, "architect-preflight", rendered, control_id="CTRL-032", tool="judge-model",
+        result="pass", evidence_path=evidence_path,
+    )
+    if rendered:
+        console.print(f"[yellow]Architect pre-flight (advisory):[/yellow] {rendered[0]}")
+    return rendered
+
+
 def _build_one_criterion(
     pcp_dir: Path, project_root: Path, mod: dict, c: dict,
     build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
@@ -2360,6 +2484,12 @@ def _build_one_criterion(
         console.print(f"[dim]Complexity routing: starting on {llm.ESCALATION_MODEL} (signal {route_signal['score']}).[/dim]")
         build_model = llm.ESCALATION_MODEL
 
+    # Architect pre-flight (swarm-role backlog): one Haiku call, high-risk
+    # criteria only, BEFORE any code exists. See _run_architect_preflight's
+    # own docstring for why this stays advisory (prompt injection) rather
+    # than the block_findings channel in this pass.
+    preflight_lines = _run_architect_preflight(pcp_dir, mod, c)
+
     for attempt in range(1, 4):
         console.print(f"\n[dim]Attempt {attempt}/3 — {mod['name']}/{c['id']}...[/dim]")
 
@@ -2388,6 +2518,12 @@ def _build_one_criterion(
         # raw failure trajectory (summarize-don't-replay, arXiv:2604.16529).
         if attempt == 1:
             agent_prompt = _build_agent_prompt(pcp_dir, mod["name"], c, mod["spec"])
+            if preflight_lines:
+                agent_prompt += "\n".join([
+                    "",
+                    "## Architect pre-flight concerns (advisory, raised before you started — address or explicitly reason past them):",
+                    *[f"- {line}" for line in preflight_lines],
+                ])
             session_flag = ["--session-id", agent_session_id]
         elif attempt == 2:
             agent_prompt = _build_retry_prompt(feedback)
