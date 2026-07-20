@@ -2509,6 +2509,12 @@ def build(module_name: str | None, project_path: str | None):
         except Exception as e:
             console.print(f"[dim]Module docs refresh skipped: {e}[/dim]")
 
+        try:
+            from pcp.commands.design_audit import write_design_audit
+            write_design_audit(pcp_dir)
+        except Exception as e:
+            console.print(f"[dim]Design audit refresh skipped: {e}[/dim]")
+
         _refresh_state(pcp_dir, modules_dir)
 
         if num_waves > 1:
