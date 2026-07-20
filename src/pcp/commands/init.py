@@ -393,6 +393,15 @@ controls:
     enforcement: advisory
     description: "File/Edit/View/Help-style top menu bar is a desktop-app convention, not a universal one -- this check stays completely inert (never even runs) unless a human explicitly sets ui_archetype: desktop_app in .pcp/design_conventions.yaml (default web_app). When active, deterministic substring scan of UI-facing criteria target files for each required menu label; missing ones flagged advisory."
     ssdf_practice: ["PW.7.1"]
+
+  - id: CTRL-028
+    name: "UI kit recipe completeness + import verification"
+    layer: wave-merge
+    mechanism: "build.py _run_wave_ui_kit_check(), .pcp/ui_kit_recipes.yaml organism->component mapping + screen_archetypes->required-organisms recipe"
+    tool: "n/a (deterministic)"
+    enforcement: advisory
+    description: "Build-vs-buy for PCP's UI building blocks: PCP does not build or maintain component code -- shadcn/ui (MIT, vendored per-project, official MCP server for search/retrieval) already solves that. PCP owns the thin layer on top: which organisms an archetype needs (recipe completeness -- a criterion declaring screen_archetypes=[dashboard] should show chart-panel/data-table/kpi-tile among its ui_organisms), and whether a declared organism shows real evidence of use (import-path substring match against the criterion's own target file, same mechanism CTRL-019 already uses for logic_tier). Advisory -- a real import can legitimately not match the hint (re-export, alias), so this is a review signal, not proof of non-use. Stays inert (no telemetry record) unless .pcp/ui_kit_recipes.yaml exists."
+    ssdf_practice: ["PW.7.1"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\
@@ -904,6 +913,111 @@ deny contains msg if {
 }
 """
 
+UI_KIT_RECIPES_TEMPLATE = """\
+version: "1.0"
+
+# PCP's UI building-blocks layer, added 2026-07-20. PCP does NOT build or
+# maintain UI component code -- that's a solved problem (shadcn/ui on Base
+# UI primitives: MIT, copy-paste-vendored per project via `npx shadcn add
+# <name>`, official MCP server for search/retrieval, already the dominant
+# stack among AI UI-generation tools). Verified current as of 2026-07-20 --
+# re-check ui.shadcn.com/docs/components before trusting these names if
+# this file is old; shadcn's own catalog evolves (toast -> sonner already
+# happened once).
+#
+# What PCP owns instead: which organisms an archetype needs (the recipe),
+# where to look for evidence they were actually used (import_path_hint,
+# consumed by build.py's CTRL-028), and how organisms combine into a screen
+# (the rules below). See CLAUDE.md's "UI Building Blocks" section for the
+# full rationale -- this is the build-vs-buy decision recorded there.
+kit: shadcn
+
+# organism -> where its evidence is expected to live. import_path_hint is a
+# SUBSTRING match against a criterion's target file, not an exact resolver
+# (no tsconfig-paths parsing) -- a real re-export/alias can legitimately
+# not match, so CTRL-028 treats a miss as advisory, not proof of non-use.
+# component: null means shadcn has no single installable primitive for
+# this organism -- it's a documented HAND-ASSEMBLED pattern (shadcn's own
+# docs say so explicitly for data-table and form), composed from the
+# primitives listed in the comment. import_path_hint still anchors on the
+# closest real primitive so the check has *something* concrete to look for.
+organisms:
+  primary-nav:
+    component: "sidebar"
+    import_path_hint: "components/ui/sidebar"
+    position: "top bar or left rail"
+  data-table:
+    component: null   # composed: `table` primitive + TanStack Table, per shadcn's own docs -- not a single install
+    import_path_hint: "components/ui/table"
+    position: "main content, below filters"
+  filter-bar:
+    component: null   # composed: input + select, no single shadcn primitive
+    import_path_hint: "components/ui/input"
+    position: "top of content, above the table"
+  modal:
+    component: "dialog"
+    import_path_hint: "components/ui/dialog"
+    position: "centered overlay"
+  toast:
+    component: "sonner"   # NOT "toast" -- shadcn deprecated its own toast component in favor of sonner
+    import_path_hint: "components/ui/sonner"
+    position: "top-right or bottom-center, transient"
+  status-badge:
+    component: "badge"
+    import_path_hint: "components/ui/badge"
+    position: "inline, next to the item it describes"
+  kpi-tile:
+    component: "card"
+    import_path_hint: "components/ui/card"
+    position: "top row of a dashboard"
+  chart-panel:
+    component: "chart"
+    import_path_hint: "components/ui/chart"
+    position: "main content area"
+  form-field-group:
+    component: null   # composed: field/label primitives + react-hook-form, per shadcn's own docs -- not a single install
+    import_path_hint: "components/ui/field"
+    position: "main content, vertical stack"
+  search-box:
+    component: "input"
+    import_path_hint: "components/ui/input"
+    position: "top-left or top-center of content"
+  empty-state:
+    component: "empty"
+    import_path_hint: "components/ui/empty"
+    position: "fills the content area it replaces"
+  comment-thread:
+    component: null   # composed: card + avatar + textarea, genuinely custom -- no anchor primitive close enough to check
+    import_path_hint: null
+    position: "right rail or bottom panel"
+
+# screen_archetype -> required ui_organisms (the recipe CTRL-028 checks
+# completeness against). canvas_editor deliberately has none -- it triggers
+# /priorart per the existing global Prior-Art Check rule instead of a
+# prescribed recipe (a diagram/canvas editor is its own mature-tool
+# decision, not a shadcn-organism composition).
+archetypes:
+  dashboard: ["kpi-tile", "chart-panel", "data-table"]
+  data_entry_form: ["form-field-group"]
+  list_table: ["data-table", "filter-bar", "empty-state"]
+  detail_view: ["kpi-tile"]
+  search_filter: ["search-box", "filter-bar", "empty-state"]
+  settings: ["form-field-group"]
+  chat: ["comment-thread"]
+  canvas_editor: []
+  wizard: ["form-field-group"]
+  auth: ["form-field-group"]
+
+# Composition rules -- documented here for the build agent to read; not yet
+# separately enforced by their own CTRL (recipe-completeness + import-
+# verification above are what CTRL-028 actually checks). Promote a rule to
+# its own deterministic check if/when one proves worth enforcing on its own.
+rules:
+  max_primary_actions_per_screen: 1
+  require_empty_state_for: ["data-table", "chat"]
+  require_confirmation_for_destructive_actions: true
+"""
+
 DESIGN_CONVENTIONS_TEMPLATE = """\
 version: "1.0"
 
@@ -1093,6 +1207,7 @@ def init(project_path: str, module_name: str | None, force: bool):
         pcp / "logic_tier_guide.md": LOGIC_TIER_GUIDE_TEMPLATE,
         pcp / "context_map.yaml": CONTEXT_MAP_TEMPLATE,
         pcp / "design_conventions.yaml": DESIGN_CONVENTIONS_TEMPLATE,
+        pcp / "ui_kit_recipes.yaml": UI_KIT_RECIPES_TEMPLATE,
     }
 
     if module_name:

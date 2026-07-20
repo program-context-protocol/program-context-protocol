@@ -47,6 +47,20 @@
             "minimum": 0,
             "description": "Number of clicks/taps from the app's primary entry point (login/home) to reach this feature, self-declared like logic_tier/build_vs_buy -- not computed via real routing-graph analysis (that needs per-framework route parsing, a bigger build than this field earns on its own). Audited by pcp design-audit against PCP_NAV_DEPTH_THRESHOLD (default 3, the classic UX heuristic); missing on a UI-facing criterion is itself a finding, same posture as design_justification's absence."
           },
+          "screen_archetypes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["dashboard", "data_entry_form", "list_table", "detail_view", "search_filter",
+                       "settings", "chat", "canvas_editor", "wizard", "auth", "other"]
+            },
+            "description": "Which screen archetype(s) this criterion's UI belongs to -- a LIST, not a single value, because most real screens are composite (a detail page is often detail_view + list_table + chat all at once; see CLAUDE.md's UI Building Blocks section on why a single-enum forced the wrong shape). 'other' is the honest escape hatch for a genuine non-fit -- forcing a bad-fit archetype to satisfy a schema is worse than declaring it doesn't cleanly match one. Each archetype maps to a recipe (required ui_organisms) in .pcp/ui_kit_recipes.yaml."
+          },
+          "ui_organisms": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Which organism-level building blocks (data-table, primary-nav, modal, ...) this screen actually uses, self-declared by the build agent -- like logic_tier/build_vs_buy, not detected. Checked against .pcp/ui_kit_recipes.yaml's organism->component mapping by build.py's CTRL-028: a declared organism should show a matching import in the criterion's own target file, or the declaration is unverified. Also checked against the criterion's screen_archetypes recipe (are the archetype's required organisms present)."
+          },
           "status": {
             "type": "string",
             "enum": ["pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"]

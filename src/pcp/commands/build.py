@@ -529,6 +529,10 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     _run_wave_nav_depth_check(pcp_dir, wave_modules, wave_number)
     _run_wave_menu_bar_check(pcp_dir, wave_modules, wave_number)
 
+    # 12. UI kit recipe completeness + import verification (CTRL-028,
+    # advisory) — inert unless .pcp/ui_kit_recipes.yaml exists.
+    _run_wave_ui_kit_check(pcp_dir, wave_modules, wave_number)
+
     return findings
 
 
@@ -865,20 +869,33 @@ def _build_agent_prompt(
             "not pixel-perfect)."
             if reference_image else ""
         )
+        recipes_path = pcp_dir / "ui_kit_recipes.yaml"
+        ui_kit_line = (
+            " If `.pcp/ui_kit_recipes.yaml` exists, read it: it maps this screen's "
+            "archetype(s) to the organisms (data-table, primary-nav, modal, ...) it needs, "
+            "and each organism to a real shadcn/ui component to vendor (use the shadcn MCP "
+            "server if available, or `npx shadcn add <component>` directly) rather than "
+            "hand-rolling markup — PCP doesn't maintain UI component code itself, shadcn "
+            "already does. Declare `screen_archetypes` and `ui_organisms` on this criterion "
+            "in acceptance.yaml matching what you actually built; the wave-merge gate "
+            "checks these against the recipe and against real imports in your target file."
+            if recipes_path.exists() else ""
+        )
         prompt_parts.append(
             "This criterion renders user-facing UI. Read `.pcp/design_system.md` first "
             "and apply its established tokens/conventions rather than deciding a look "
             "fresh — if it's still the empty scaffold, this is the first UI screen: "
             "establish the system now (see the `pcp-ui-design` skill) and write it there "
             "so later screens stay consistent instead of each looking like a different "
-            f"vanilla template.{reference_line} Before finishing, add a `design_justification` "
-            "block to this criterion in acceptance.yaml: `checklist_passed` (which "
-            "design-system conventions this screen actually followed), `jtbd_framing` "
-            "(one sentence, 'when a user is X, this lets them Y' — not a restatement of "
-            "the description), and `deviations_from_system` if this screen needed a new "
-            "pattern the system didn't have yet. If a `webapp-testing` skill is available, "
-            "use it to actually load the running page and verify it renders/behaves as "
-            "intended before finishing — don't just trust that the code compiles."
+            f"vanilla template.{reference_line}{ui_kit_line} Before finishing, add a "
+            "`design_justification` block to this criterion in acceptance.yaml: "
+            "`checklist_passed` (which design-system conventions this screen actually "
+            "followed), `jtbd_framing` (one sentence, 'when a user is X, this lets them "
+            "Y' — not a restatement of the description), and `deviations_from_system` if "
+            "this screen needed a new pattern the system didn't have yet. If a "
+            "`webapp-testing` skill is available, use it to actually load the running "
+            "page and verify it renders/behaves as intended before finishing — don't "
+            "just trust that the code compiles."
         )
         prompt_parts.append("")
 
@@ -1961,6 +1978,87 @@ def _run_wave_menu_bar_check(pcp_dir: Path, wave_modules: list[dict], wave_numbe
             f"{required}, but {', '.join(missing)} not found in any scanned UI-facing target file"
         )
     _wave_record(pcp_dir, wave_number, "menu-bar", "CTRL-027", findings, files=checked, result="pass")
+    for f in findings:
+        console.print(f"[yellow]{f}[/yellow]")
+    return findings
+
+
+def _run_wave_ui_kit_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
+    """CTRL-028, ADVISORY. Stays completely inert (no telemetry record at
+    all) unless .pcp/ui_kit_recipes.yaml exists -- same posture as CTRL-027's
+    ui_archetype gate. Two checks, both deterministic substring matches, no
+    LLM:
+
+    1. Recipe completeness: a criterion declaring screen_archetypes should
+       show, among its own ui_organisms, the organisms that archetype's
+       recipe requires. Catches "declared dashboard, didn't include a
+       chart-panel or data-table" -- a criterion claiming an archetype
+       without actually building what that archetype needs.
+
+    2. Import verification: a declared ui_organism should have a matching
+       import in the criterion's own target file, per the recipe's
+       organism -> import_path_hint mapping. This is the whole point of
+       vendoring real component code (shadcn/ui) instead of prose guidance
+       -- usage becomes checkable the same way CTRL-019 already checks
+       logic_tier mechanism presence via import scanning, not a claim taken
+       on faith.
+
+    Both findings are advisory -- an organism can legitimately come from a
+    different import path (a re-exported wrapper, a renamed local alias),
+    so this is a signal for review, not proof of non-use."""
+    recipes_path = pcp_dir / "ui_kit_recipes.yaml"
+    if not recipes_path.exists():
+        return []
+    try:
+        recipes = load_yaml(recipes_path) or {}
+    except Exception:
+        return []
+    organism_map = recipes.get("organisms") or {}
+    archetype_map = recipes.get("archetypes") or {}
+
+    project_root = pcp_dir.parent
+    findings: list[str] = []
+    checked: list[str] = []
+
+    for mod in wave_modules:
+        acc_path = pcp_dir / "strategy" / "modules" / mod["name"] / "acceptance.yaml"
+        if not acc_path.exists():
+            continue
+        acc = load_yaml(acc_path)
+        for c in acc.get("criteria", []):
+            if c.get("status") != "complete" or not _is_ui_facing_criterion(c):
+                continue
+            declared_organisms = set(c.get("ui_organisms") or [])
+            archetypes = c.get("screen_archetypes") or []
+
+            for archetype in archetypes:
+                required = set(archetype_map.get(archetype) or [])
+                missing_for_archetype = required - declared_organisms
+                if missing_for_archetype:
+                    findings.append(
+                        f"UI kit (advisory): '{mod['name']}/{c['id']}' declares screen_archetypes="
+                        f"[{archetype}] but its ui_organisms is missing {sorted(missing_for_archetype)} "
+                        "from that archetype's recipe"
+                    )
+
+            target = c.get("target")
+            if not target or not declared_organisms:
+                continue
+            full_path = project_root / target
+            if not full_path.is_file():
+                continue
+            checked.append(target)
+            content = full_path.read_text(errors="replace")
+            for organism in declared_organisms:
+                hint = (organism_map.get(organism) or {}).get("import_path_hint")
+                if hint and hint not in content:
+                    findings.append(
+                        f"UI kit (advisory): '{mod['name']}/{c['id']}' declares ui_organisms "
+                        f"including '{organism}' but {target} shows no import matching "
+                        f"'{hint}' -- declaration may be unverified"
+                    )
+
+    _wave_record(pcp_dir, wave_number, "ui-kit", "CTRL-028", findings, files=checked, result="pass")
     for f in findings:
         console.print(f"[yellow]{f}[/yellow]")
     return findings
