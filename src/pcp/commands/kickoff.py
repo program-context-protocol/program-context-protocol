@@ -26,6 +26,8 @@ SYSTEM_PROMPT = """\
 You are an expert product manager and software architect.
 Your task is to take a product vision document (in plain English) and decompose it into a structured set of program modules and SDLC phases using the PCP (Program Context Protocol) design system.
 
+DECOMPOSE FIRST, THEN MAP (GUIDE pattern, arXiv:2502.21068 -- the one academically validated fix for LLMs silently dropping requirements during one-shot generation): before deciding on modules, populate `capabilities_enumerated` with EVERY distinct capability/requirement/feature the vision document implies, however small -- one item per discrete thing a user or the business needs, not per module. Only after that list is complete, assign each capability to a module in `modules`. Every entry in `capabilities_enumerated` must be covered by at least one module's `objective_coverage` -- a capability with no covering module is exactly the failure mode this field exists to catch.
+
 Decompose the vision into modules. Each module must cover a distinct set of features/requirements.
 The strategy decomposition must detail how these modules cover the objective.
 Also generate acceptance criteria for each module (e.g. A001, A002) with clear descriptions.
@@ -34,6 +36,7 @@ You must output ONLY valid JSON — no prose, no markdown, no code fences.
 
 Output schema:
 {
+  "capabilities_enumerated": ["Every distinct capability/requirement the vision implies, one per discrete thing a user or the business needs -- populate this BEFORE deciding modules, per the DECOMPOSE FIRST instruction above."],
   "objective": "# Program Objective\\n\\n## Why This Exists\\n[Explain why]\\n\\n## What Success Looks Like\\n1. [Outcome 1]\\n\\n## Out of Scope\\n- [Out of scope items]",
   "target_state": "# Target State\\n\\n[Ideal end state]",
   "architecture": "# Architecture\\n\\n## Tech Stack\\n| Layer | Choice | Why |\\n|---|---|---|\\n| Backend | Python/FastAPI | ... |\\n\\n## Key Constraints\\n- [Constraint]",
@@ -230,6 +233,28 @@ def _normalize_spec(spec: dict, module_name: str) -> list[str]:
     return warnings
 
 
+def check_capability_coverage(capabilities: list[str], module_specs: dict) -> list[str]:
+    """Deterministic, no LLM: keyword-overlap check between each enumerated
+    capability (see DECOMPOSE FIRST in SYSTEM_PROMPT) and the combined
+    objective_coverage text of all modules -- a cheap complementary signal
+    alongside validate-strategy's LLM-judged coverage_score, specifically
+    because noticing an OMISSION is a harder task for a fast/cheap judge
+    model than confirming a presence is correct. A miss here doesn't prove
+    a real gap (keyword overlap is a blunt instrument), but it's a free,
+    zero-cost second opinion worth surfacing. Shared by kickoff.py and
+    pm.py -- same check, same reasoning, whether this is a fresh strategy
+    or an incremental intent."""
+    warnings = []
+    combined_coverage = " ".join(
+        " ".join(spec.get("objective_coverage", []) or []) for spec in module_specs.values()
+    ).lower()
+    for cap in capabilities:
+        cap_words = set(re.findall(r"[a-zA-Z]{5,}", cap.lower()))
+        if cap_words and not any(w in combined_coverage for w in cap_words):
+            warnings.append(f"Capability '{cap}' does not keyword-match any module's objective_coverage — possible gap")
+    return warnings
+
+
 def _normalize_ci_rules(ci_rules: dict) -> list[str]:
     """Coerces ci_rules.yaml's check/severity/id values outside the schema's
     closed enums to a safe default in place, same posture as
@@ -406,11 +431,20 @@ def kickoff(vision_file: str, project_path: str, force: bool):
             for e in errors:
                 console.print(f"   {e}")
 
+    # Deterministic, zero-cost capability coverage cross-check (see
+    # DECOMPOSE FIRST in SYSTEM_PROMPT) -- runs before the LLM-judged
+    # validate-strategy call, not instead of it.
+    modules = {m["name"]: m["spec"] for m in result.get("modules", [])}
+    capability_warnings = check_capability_coverage(result.get("capabilities_enumerated", []), modules)
+    if capability_warnings:
+        console.print(f"[yellow]⚠  {len(capability_warnings)} enumerated capability(ies) may not be covered by any module:[/yellow]")
+        for w in capability_warnings:
+            console.print(f"   {w}")
+
     # Run validate-strategy automatically
     console.print("\n[bold]Running validate-strategy...[/bold]")
     objective = result["objective"]
     decomposition = result["decomposition"]
-    modules = {m["name"]: m["spec"] for m in result.get("modules", [])}
 
     val_user_prompt = build_val_prompt(objective, decomposition, modules)
     try:

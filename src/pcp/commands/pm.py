@@ -11,7 +11,12 @@ from rich.console import Console
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir, get_modules_dir
 from pcp.llm import client as llm
 from pcp.pcp_status import write_pcp_md
-from pcp.commands.kickoff import _normalize_acceptance, _normalize_spec
+from pcp.commands.kickoff import _normalize_acceptance, _normalize_spec, check_capability_coverage
+from pcp.commands.validate_strategy import (
+    _build_user_prompt as build_val_prompt,
+    SYSTEM_PROMPT as VAL_SYSTEM_PROMPT,
+    _render_results as render_val_results,
+)
 
 console = Console()
 
@@ -29,50 +34,60 @@ You are an expert product manager.
 Your task is to take a feature intent expressed in natural language and translate it into modifications for the project's PCP module specifications and acceptance criteria.
 
 You are given the current program objective, strategy decomposition, and list of existing modules with their specs.
-Analyze which module (or if a new module needs to be created) is responsible for this feature, and generate the updated or new spec and acceptance criteria.
-Ensure that new acceptance criteria IDs do not conflict with existing ones (e.g. if the module already has A001, start new ones at A002).
+
+DECOMPOSE FIRST, THEN MAP (GUIDE pattern, arXiv:2502.21068 -- the one academically validated fix for LLMs silently dropping requirements during one-shot generation): before deciding which module(s) this intent touches, populate `capabilities_enumerated` with EVERY distinct capability/requirement this intent implies, however small. Only after that list is complete, decide which module(s) each capability belongs to.
+
+A real feature intent routinely spans MORE THAN ONE existing or new module (e.g. "add payments" may touch billing, notifications, and auth) -- do not force everything into a single module just because the schema used to only allow one. `modules` is a LIST: include one entry per module this intent actually touches, whether that's one module or several. Analyze which module (or modules) are responsible, and for each, generate the updated or new spec and acceptance criteria for that module only.
+
+Ensure that new acceptance criteria IDs do not conflict with existing ones within their own module (e.g. if a module already has A001, its new ones start at A002).
 
 You must output ONLY valid JSON — no prose, no markdown, no code fences.
 
 Output schema:
 {
-  "module_action": "modify | create",
-  "module_name": "module-name",
-  "explanation": "A plain-English summary of what will be built and why, detailing how this intent satisfies the request.",
-  "spec_changes": {
-    "version": "2.0",
-    "module": "module-name",
-    "description": "Description of the module including the new features (minimum 10 words).",
-    "objective_coverage": ["Explain how this module covers objective.md objectives"],
-    "dependencies": ["dependency-module-name"],
-    "constraints": [],
-    "build_vs_buy": {
-      "decision": "not_applicable",
-      "rationale": "Pure business-logic module -- no whole-module tool-adoption choice; see per-criterion build_vs_buy instead.",
-      "candidates_considered": []
-    }
-  },
-  "acceptance_changes": {
-    "version": "2.0",
-    "module": "module-name",
-    "criteria": [
-      {
-        "id": "A002",
-        "description": "Clear description of the new exit criterion",
-        "check": "manual | ast_pattern | test_passes | file_exists",
-        "status": "pending",
-        "logic_tier": 6,
+  "capabilities_enumerated": ["Every distinct capability/requirement this intent implies, one per discrete thing -- populate BEFORE deciding modules."],
+  "overall_explanation": "A plain-English summary of what will be built and why, across all modules this intent touches.",
+  "modules": [
+    {
+      "module_action": "modify | create",
+      "module_name": "module-name",
+      "module_explanation": "What this specific module handles for this intent.",
+      "spec_changes": {
+        "version": "2.0",
+        "module": "module-name",
+        "description": "Description of the module including the new features (minimum 10 words).",
+        "objective_coverage": ["Explain how this module covers objective.md objectives"],
+        "dependencies": ["dependency-module-name"],
+        "constraints": [],
         "build_vs_buy": {
-          "decision": "build_fresh",
-          "rationale": "Why this decision, one sentence.",
+          "decision": "not_applicable",
+          "rationale": "Pure business-logic module -- no whole-module tool-adoption choice; see per-criterion build_vs_buy instead.",
           "candidates_considered": []
         }
+      },
+      "acceptance_changes": {
+        "version": "2.0",
+        "module": "module-name",
+        "criteria": [
+          {
+            "id": "A002",
+            "description": "Clear description of the new exit criterion",
+            "check": "manual | ast_pattern | test_passes | file_exists",
+            "status": "pending",
+            "logic_tier": 6,
+            "build_vs_buy": {
+              "decision": "build_fresh",
+              "rationale": "Why this decision, one sentence.",
+              "candidates_considered": []
+            }
+          }
+        ]
       }
-    ]
-  }
+    }
+  ]
 }
 
-Every NEW criterion MUST declare logic_tier (1-6, the cheapest rung that correctly makes this decision: 1=deterministic, 2=optimization/solver, 3=statistical/ML, 4=RAG, 5=cached reuse, 6=deep-think LLM -- default to the cheapest rung that genuinely fits, do not default everything to 6) and build_vs_buy: {decision, rationale, candidates_considered} where decision is exactly one of: reuse_whole, reuse_partial (vendor one file/function, not the whole repo), reimplement_from_reference (study a solved approach and write original code, no code copied), fork_adapt, build_fresh. If this feature touches an infrastructure-shaped module (portal, auth, integrations, orchestration engine), spec_changes ALSO needs a real module-level build_vs_buy decision instead of 'not_applicable'.
+Every NEW criterion MUST declare logic_tier (1-6, the cheapest rung that correctly makes this decision: 1=deterministic, 2=optimization/solver, 3=statistical/ML, 4=RAG, 5=cached reuse, 6=deep-think LLM -- default to the cheapest rung that genuinely fits, do not default everything to 6) and build_vs_buy: {decision, rationale, candidates_considered} where decision is exactly one of: reuse_whole, reuse_partial (vendor one file/function, not the whole repo), reimplement_from_reference (study a solved approach and write original code, no code copied), fork_adapt, build_fresh. If a module this intent touches is infrastructure-shaped (portal, auth, integrations, orchestration engine), its spec_changes ALSO needs a real module-level build_vs_buy decision instead of 'not_applicable'.
 """
 
 
@@ -102,6 +117,65 @@ def _load_project_context(pcp_dir: Path) -> str:
             )
 
     return "\n".join(parts)
+
+
+def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
+    """Applies one module's spec_changes/acceptance_changes to disk -- same
+    coercion/merge logic the old single-module pm always had, now callable
+    per-entry in the modules list. Returns coercion warnings."""
+    mod_name = mod_result.get("module_name", "").strip().lower()
+    mod_dir = pcp_dir / "strategy" / "modules" / mod_name
+    mod_dir.mkdir(parents=True, exist_ok=True)
+
+    spec_path = mod_dir / "spec.yaml"
+    acc_path = mod_dir / "acceptance.yaml"
+
+    # Force version 2.0 regardless of what the LLM returned -- same reasoning
+    # as kickoff.py: a spec pm touches must always get logic_tier/build_vs_buy
+    # enforcement, never silently stay on (or revert to) the ungated 1.0 shape.
+    spec_changes = mod_result["spec_changes"]
+    spec_changes["version"] = "2.0"
+
+    # On modify, a real prior module-level build_vs_buy decision must not be
+    # silently discarded just because this pm call's response omitted it --
+    # only coerce to a flagged placeholder if one never existed.
+    existing_spec = {}
+    if spec_path.exists():
+        try:
+            existing_spec = yaml.safe_load(spec_path.read_text()) or {}
+        except Exception:
+            pass
+    if "build_vs_buy" not in spec_changes and existing_spec.get("build_vs_buy"):
+        spec_changes["build_vs_buy"] = existing_spec["build_vs_buy"]
+
+    coercion_warnings = _normalize_spec(spec_changes, mod_name)
+    spec_path.write_text(yaml.dump(spec_changes, default_flow_style=False))
+
+    # Save/Merge acceptance.yaml
+    existing_criteria = []
+    if acc_path.exists():
+        try:
+            acc_data = yaml.safe_load(acc_path.read_text()) or {}
+            existing_criteria = acc_data.get("criteria", [])
+        except Exception:
+            pass
+
+    criteria_map = {c["id"]: c for c in existing_criteria}
+    for new_c in mod_result["acceptance_changes"].get("criteria", []):
+        criteria_map[new_c["id"]] = new_c
+
+    merged_acceptance = {
+        "version": "2.0",
+        "module": mod_name,
+        "criteria": sorted(list(criteria_map.values()), key=lambda x: x["id"])
+    }
+    # Coerces the WHOLE merged list, not just the new criteria -- retroactively
+    # upgrades any pre-existing criterion (e.g. from an old 1.0-era module)
+    # that's missing logic_tier/build_vs_buy the first time pm touches it.
+    coercion_warnings += _normalize_acceptance(merged_acceptance, mod_name)
+    acc_path.write_text(yaml.dump(merged_acceptance, default_flow_style=False))
+
+    return coercion_warnings
 
 
 @click.command()
@@ -147,84 +221,37 @@ def pm(intent: str, project_path: str | None):
         console.print(f"[red]LLM returned invalid JSON:[/red] {e}")
         sys.exit(2)
 
-    action = result.get("module_action", "modify")
-    mod_name = result.get("module_name", "").strip().lower()
-    explanation = result.get("explanation", "")
-
-    if not mod_name:
-        console.print("[red]Error: LLM did not generate a module name.[/red]")
+    modules_result = result.get("modules") or []
+    if not modules_result:
+        console.print("[red]Error: LLM did not identify any module for this intent.[/red]")
         sys.exit(2)
 
-    console.print(f"\n[bold]Planned Action:[/bold] {action.upper()} module [cyan]'{mod_name}'[/cyan]")
-    console.print(f"[dim]{explanation}[/dim]\n")
+    console.print(f"\n[bold]Intent spans {len(modules_result)} module(s).[/bold]")
+    console.print(f"[dim]{result.get('overall_explanation', '')}[/dim]\n")
 
-    # Display proposed changes
-    console.print("[bold]Proposed spec.yaml changes:[/bold]")
-    console.print(yaml.dump(result["spec_changes"], default_flow_style=False))
-    console.print("[bold]Proposed acceptance.yaml criteria to add:[/bold]")
-    for c in result["acceptance_changes"].get("criteria", []):
-        console.print(f"  - [{c['id']}] {c['description']} (check: {c.get('check', 'manual')})")
+    for mr in modules_result:
+        mod_name = (mr.get("module_name") or "").strip().lower()
+        if not mod_name:
+            console.print("[red]Error: a module entry is missing module_name.[/red]")
+            sys.exit(2)
+        console.print(f"[bold]{mr.get('module_action', 'modify').upper()} module[/bold] [cyan]'{mod_name}'[/cyan]")
+        console.print(f"[dim]{mr.get('module_explanation', '')}[/dim]")
+        console.print("[bold]Proposed spec.yaml changes:[/bold]")
+        console.print(yaml.dump(mr["spec_changes"], default_flow_style=False))
+        console.print("[bold]Proposed acceptance.yaml criteria to add:[/bold]")
+        for c in mr["acceptance_changes"].get("criteria", []):
+            console.print(f"  - [{c['id']}] {c['description']} (check: {c.get('check', 'manual')})")
+        console.print("")
 
-    if not click.confirm("\nApprove these changes and queue them for build?"):
+    if not click.confirm(f"Approve these changes across {len(modules_result)} module(s) and queue them for build?"):
         console.print("[yellow]Changes aborted.[/yellow]")
         sys.exit(0)
 
-    mod_dir = pcp_dir / "strategy" / "modules" / mod_name
-    mod_dir.mkdir(parents=True, exist_ok=True)
+    coercion_warnings: list[str] = []
+    for mr in modules_result:
+        coercion_warnings += _write_one_module(pcp_dir, mr)
 
-    spec_path = mod_dir / "spec.yaml"
-    acc_path = mod_dir / "acceptance.yaml"
-
-    # Force version 2.0 regardless of what the LLM returned -- same reasoning
-    # as kickoff.py: a spec pm touches must always get logic_tier/build_vs_buy
-    # enforcement, never silently stay on (or revert to) the ungated 1.0 shape.
-    spec_changes = result["spec_changes"]
-    spec_changes["version"] = "2.0"
-
-    # On modify, a real prior module-level build_vs_buy decision must not be
-    # silently discarded just because this pm call's response omitted it --
-    # only coerce to a flagged placeholder if one never existed.
-    existing_spec = {}
-    if spec_path.exists():
-        try:
-            existing_spec = yaml.safe_load(spec_path.read_text()) or {}
-        except Exception:
-            pass
-    if "build_vs_buy" not in spec_changes and existing_spec.get("build_vs_buy"):
-        spec_changes["build_vs_buy"] = existing_spec["build_vs_buy"]
-
-    coercion_warnings = _normalize_spec(spec_changes, mod_name)
-    spec_path.write_text(yaml.dump(spec_changes, default_flow_style=False))
-
-    # Save/Merge acceptance.yaml
-    existing_criteria = []
-    if acc_path.exists():
-        try:
-            acc_data = yaml.safe_load(acc_path.read_text()) or {}
-            existing_criteria = acc_data.get("criteria", [])
-        except Exception:
-            pass
-
-    # Create mapping of existing by ID
-    criteria_map = {c["id"]: c for c in existing_criteria}
-
-    # Add/Merge new ones
-    for new_c in result["acceptance_changes"].get("criteria", []):
-        criteria_map[new_c["id"]] = new_c
-
-    merged_acceptance = {
-        "version": "2.0",
-        "module": mod_name,
-        "criteria": sorted(list(criteria_map.values()), key=lambda x: x["id"])
-    }
-    # Coerces the WHOLE merged list, not just the new criteria -- retroactively
-    # upgrades any pre-existing criterion (e.g. from an old 1.0-era module)
-    # that's missing logic_tier/build_vs_buy the first time pm touches it.
-    coercion_warnings += _normalize_acceptance(merged_acceptance, mod_name)
-
-    acc_path.write_text(yaml.dump(merged_acceptance, default_flow_style=False))
-
-    console.print(f"[green]✓[/green] Module '{mod_name}' spec and acceptance criteria updated.")
+    console.print(f"[green]✓[/green] {len(modules_result)} module(s) updated.")
     if coercion_warnings:
         console.print(f"[yellow]⚠  {len(coercion_warnings)} field(s) didn't match the schema, coerced to a safe default:[/yellow]")
         for w in coercion_warnings:
@@ -251,5 +278,43 @@ def pm(intent: str, project_path: str | None):
         total = sum(len(m["criteria"]) for m in modules_results)
         complete = sum(1 for m in modules_results for c in m["criteria"] if c["status"] == "complete")
         write_pcp_md(pcp_dir, modules_results, timestamp, total, complete)
+
+    # Deterministic, zero-cost capability coverage cross-check (see
+    # DECOMPOSE FIRST in SYSTEM_PROMPT) -- runs before the LLM-judged
+    # validate-strategy call, not instead of it.
+    objective = (pcp_dir / "objective.md").read_text() if (pcp_dir / "objective.md").exists() else ""
+    decomposition_path = pcp_dir / "strategy" / "decomposition.md"
+    decomposition = decomposition_path.read_text() if decomposition_path.exists() else ""
+    all_specs = {}
+    for spec_path in sorted((pcp_dir / "strategy" / "modules").glob("*/spec.yaml")):
+        try:
+            all_specs[spec_path.parent.name] = yaml.safe_load(spec_path.read_text()) or {}
+        except Exception:
+            pass
+
+    capability_warnings = check_capability_coverage(result.get("capabilities_enumerated", []), all_specs)
+    if capability_warnings:
+        console.print(f"[yellow]⚠  {len(capability_warnings)} enumerated capability(ies) may not be covered by any module:[/yellow]")
+        for w in capability_warnings:
+            console.print(f"   {w}")
+
+    # Run validate-strategy automatically -- pm previously had ZERO strategy
+    # verification at all (unlike kickoff, which always called this), the
+    # real root cause of "pm sometimes misses components" -- a module gets
+    # modified/added in isolation with nothing checking whether the project
+    # still covers the objective afterward.
+    if objective:
+        console.print("\n[bold]Running validate-strategy...[/bold]")
+        val_user_prompt = build_val_prompt(objective, decomposition, all_specs)
+        try:
+            val_result = llm.call_json(
+                VAL_SYSTEM_PROMPT, val_user_prompt,
+                model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command="pm-validate",
+            )
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not run validate-strategy automatically: {e}[/yellow]")
+            val_result = None
+        if val_result:
+            render_val_results(pcp_dir, val_result, output_json=False)
 
     console.print("[green]✓[/green] Project state refreshed. Run [cyan]pcp build[/cyan] to begin development.")

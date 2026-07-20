@@ -372,41 +372,52 @@ def test_pm_command(temp_project):
     (mod_dir / "acceptance.yaml").write_text(yaml.dump(existing_acc))
 
     mock_pm_response = {
-        "module_action": "modify",
-        "module_name": "add",
-        "explanation": "Adding support for multiple arguments.",
-        "spec_changes": {
-            "version": "1.0",
-            "module": "add",
-            "description": "Performs addition of multiple numbers.",
-            "objective_coverage": ["Addition"],
-            "dependencies": [],
-            "constraints": []
-        },
-        "acceptance_changes": {
-            "version": "1.0",
-            "module": "add",
-            "criteria": [
-                {
-                    "id": "A002",
-                    "description": "Supports adding list of numbers.",
-                    "check": "manual",
-                    "status": "pending"
+        "capabilities_enumerated": ["support multiple arguments in add"],
+        "overall_explanation": "Adding support for multiple arguments.",
+        "modules": [
+            {
+                "module_action": "modify",
+                "module_name": "add",
+                "module_explanation": "Adding support for multiple arguments.",
+                "spec_changes": {
+                    "version": "1.0",
+                    "module": "add",
+                    "description": "Performs addition of multiple numbers.",
+                    "objective_coverage": ["Addition"],
+                    "dependencies": [],
+                    "constraints": []
+                },
+                "acceptance_changes": {
+                    "version": "1.0",
+                    "module": "add",
+                    "criteria": [
+                        {
+                            "id": "A002",
+                            "description": "Supports adding list of numbers.",
+                            "check": "manual",
+                            "status": "pending"
+                        }
+                    ]
                 }
-            ]
-        }
+            }
+        ],
+    }
+    mock_val_response = {
+        "coverage_gaps": [], "contradictions": [], "overlaps": [],
+        "missing_modules": [], "coverage_score": 1.0,
     }
 
     with patch("pcp.llm.client.call_json") as mock_call_json, \
             patch("pcp.commands.scan.scan") as mock_scan:
-        mock_call_json.return_value = mock_pm_response
+        mock_call_json.side_effect = [mock_pm_response, mock_val_response]
 
         runner = CliRunner()
         result = runner.invoke(cli, ["pm", "Support multiple arguments in add module", "--path", str(temp_project)], input="y\n")
 
         assert result.exit_code == 0
-        assert "Planned Action: MODIFY module 'add'" in result.output
-        assert "Module 'add' spec and acceptance criteria updated." in result.output
+        assert "Intent spans 1 module(s)." in result.output
+        assert "MODIFY module" in result.output and "'add'" in result.output
+        assert "1 module(s) updated." in result.output
 
         # Verify spec updated
         spec = yaml.safe_load((mod_dir / "spec.yaml").read_text())
@@ -454,25 +465,35 @@ def test_pm_preserves_existing_module_level_build_vs_buy_on_modify(temp_project)
     }))
 
     mock_pm_response = {
-        "module_action": "modify",
-        "module_name": "auth",
-        "explanation": "Add password reset flow.",
-        "spec_changes": {
-            "version": "2.0", "module": "auth", "description": "Handles authentication and password reset.",
-            "objective_coverage": ["Auth"], "dependencies": [], "constraints": [],
-            # deliberately omits build_vs_buy -- simulates an LLM response that dropped it
-        },
-        "acceptance_changes": {
-            "version": "2.0", "module": "auth", "criteria": [
-                {"id": "A001", "description": "Password reset works.", "check": "manual", "status": "pending",
-                 "logic_tier": 1, "build_vs_buy": {"decision": "build_fresh", "rationale": "trivial flow"}},
-            ],
-        },
+        "capabilities_enumerated": ["password reset flow"],
+        "overall_explanation": "Add password reset flow.",
+        "modules": [
+            {
+                "module_action": "modify",
+                "module_name": "auth",
+                "module_explanation": "Add password reset flow.",
+                "spec_changes": {
+                    "version": "2.0", "module": "auth", "description": "Handles authentication and password reset.",
+                    "objective_coverage": ["Auth"], "dependencies": [], "constraints": [],
+                    # deliberately omits build_vs_buy -- simulates an LLM response that dropped it
+                },
+                "acceptance_changes": {
+                    "version": "2.0", "module": "auth", "criteria": [
+                        {"id": "A001", "description": "Password reset works.", "check": "manual", "status": "pending",
+                         "logic_tier": 1, "build_vs_buy": {"decision": "build_fresh", "rationale": "trivial flow"}},
+                    ],
+                },
+            }
+        ],
+    }
+    mock_val_response = {
+        "coverage_gaps": [], "contradictions": [], "overlaps": [],
+        "missing_modules": [], "coverage_score": 1.0,
     }
 
     with patch("pcp.llm.client.call_json") as mock_call_json, \
             patch("pcp.commands.scan.scan"):
-        mock_call_json.return_value = mock_pm_response
+        mock_call_json.side_effect = [mock_pm_response, mock_val_response]
         runner = CliRunner()
         result = runner.invoke(cli, ["pm", "Add password reset", "--path", str(temp_project)], input="y\n")
 
@@ -480,6 +501,135 @@ def test_pm_preserves_existing_module_level_build_vs_buy_on_modify(temp_project)
     spec = yaml.safe_load((mod_dir / "spec.yaml").read_text())
     assert spec["build_vs_buy"]["decision"] == "reuse_whole"
     assert spec["build_vs_buy"]["rationale"] == "Auth0 fits cleanly"
+
+
+def test_pm_spans_multiple_modules_without_truncation(temp_project):
+    """The real root-cause fix, 2026-07-20: pm's output used to be a single
+    module_action/module_name -- a feature intent spanning 2+ modules got
+    silently truncated to whichever one the LLM picked. modules is now a
+    list; this confirms an intent touching two modules writes both."""
+    pcp_dir = temp_project / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Objective\nCommerce platform.")
+    (pcp_dir / "strategy").mkdir()
+    (pcp_dir / "strategy" / "decomposition.md").write_text("# Decomp")
+
+    mock_pm_response = {
+        "capabilities_enumerated": ["charge card on checkout", "email receipt after payment"],
+        "overall_explanation": "Add payments end to end.",
+        "modules": [
+            {
+                "module_action": "create",
+                "module_name": "billing",
+                "module_explanation": "Handles the actual charge.",
+                "spec_changes": {
+                    "version": "2.0", "module": "billing", "description": "Charges a card via the payment processor.",
+                    "objective_coverage": ["Commerce checkout"], "dependencies": [], "constraints": [],
+                },
+                "acceptance_changes": {
+                    "version": "2.0", "module": "billing", "criteria": [
+                        {"id": "A001", "description": "Card is charged on checkout.", "check": "manual", "status": "pending",
+                         "logic_tier": 1, "build_vs_buy": {"decision": "reuse_whole", "rationale": "Stripe"}},
+                    ],
+                },
+            },
+            {
+                "module_action": "create",
+                "module_name": "notifications",
+                "module_explanation": "Sends the receipt.",
+                "spec_changes": {
+                    "version": "2.0", "module": "notifications", "description": "Sends transactional email receipts.",
+                    "objective_coverage": ["Commerce checkout"], "dependencies": ["billing"], "constraints": [],
+                },
+                "acceptance_changes": {
+                    "version": "2.0", "module": "notifications", "criteria": [
+                        {"id": "A001", "description": "Email receipt sent after payment.", "check": "manual", "status": "pending",
+                         "logic_tier": 1, "build_vs_buy": {"decision": "reuse_whole", "rationale": "SendGrid"}},
+                    ],
+                },
+            },
+        ],
+    }
+    mock_val_response = {
+        "coverage_gaps": [], "contradictions": [], "overlaps": [],
+        "missing_modules": [], "coverage_score": 1.0,
+    }
+
+    with patch("pcp.llm.client.call_json") as mock_call_json, \
+            patch("pcp.commands.scan.scan"):
+        mock_call_json.side_effect = [mock_pm_response, mock_val_response]
+        runner = CliRunner()
+        result = runner.invoke(cli, ["pm", "Add payment processing with email receipts", "--path", str(temp_project)], input="y\n")
+
+    assert result.exit_code == 0
+    assert "Intent spans 2 module(s)." in result.output
+    billing_acc = yaml.safe_load((pcp_dir / "strategy" / "modules" / "billing" / "acceptance.yaml").read_text())
+    notif_acc = yaml.safe_load((pcp_dir / "strategy" / "modules" / "notifications" / "acceptance.yaml").read_text())
+    assert billing_acc["criteria"][0]["description"] == "Card is charged on checkout."
+    assert notif_acc["criteria"][0]["description"] == "Email receipt sent after payment."
+
+
+def test_pm_runs_validate_strategy_and_flags_capability_gap(temp_project):
+    """The other real root-cause fix: pm previously had ZERO strategy
+    verification at all (unlike kickoff, which always ran validate-strategy).
+    Confirms both the deterministic capability cross-check and the
+    LLM-judged validate-strategy call actually fire."""
+    pcp_dir = temp_project / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Objective\nCommerce platform.")
+    (pcp_dir / "strategy").mkdir()
+    (pcp_dir / "strategy" / "decomposition.md").write_text("# Decomp")
+
+    mock_pm_response = {
+        "capabilities_enumerated": ["completely unrelated inventory sync capability"],
+        "overall_explanation": "Add billing.",
+        "modules": [
+            {
+                "module_action": "create",
+                "module_name": "billing",
+                "module_explanation": "Handles charges.",
+                "spec_changes": {
+                    "version": "2.0", "module": "billing", "description": "Charges a card via the payment processor.",
+                    "objective_coverage": ["Commerce checkout"], "dependencies": [], "constraints": [],
+                },
+                "acceptance_changes": {
+                    "version": "2.0", "module": "billing", "criteria": [
+                        {"id": "A001", "description": "Card is charged.", "check": "manual", "status": "pending",
+                         "logic_tier": 1, "build_vs_buy": {"decision": "reuse_whole", "rationale": "Stripe"}},
+                    ],
+                },
+            },
+        ],
+    }
+    mock_val_response = {
+        "coverage_gaps": [{"area": "inventory sync not covered"}], "contradictions": [], "overlaps": [],
+        "missing_modules": [], "coverage_score": 0.5,
+    }
+
+    with patch("pcp.llm.client.call_json") as mock_call_json, \
+            patch("pcp.commands.scan.scan"):
+        mock_call_json.side_effect = [mock_pm_response, mock_val_response]
+        runner = CliRunner()
+        result = runner.invoke(cli, ["pm", "Add payment processing", "--path", str(temp_project)], input="y\n")
+
+    assert result.exit_code == 0
+    # Deterministic capability cross-check fired (keyword overlap miss).
+    assert "may not be covered by any module" in result.output
+    assert "inventory sync" in result.output
+    # LLM-judged validate-strategy actually ran, not skipped.
+    assert mock_call_json.call_count == 2
+    assert "Running validate-strategy" in result.output
+
+
+def test_pm_system_prompt_has_decompose_first_and_multi_module_shape():
+    """Sanity check the actual prompt text, not just behavior -- the
+    DECOMPOSE FIRST instruction and the modules-list shape are what make
+    the fix real rather than incidental to the mocked test data above."""
+    from pcp.commands.pm import SYSTEM_PROMPT
+    assert "DECOMPOSE FIRST" in SYSTEM_PROMPT
+    assert "capabilities_enumerated" in SYSTEM_PROMPT
+    assert '"modules": [' in SYSTEM_PROMPT
+    assert "more than one existing or new module" in SYSTEM_PROMPT.lower()
 
 
 def test_build_command(temp_project):
