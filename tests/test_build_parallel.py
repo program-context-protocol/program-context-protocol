@@ -278,3 +278,70 @@ def test_single_module_wave_never_uses_worktrees(parallel_project, tmp_path):
     assert (repo / "A001.txt").exists()
     worktree_list = _git(["worktree", "list"], repo).stdout
     assert "repo-add" not in worktree_list
+
+
+def test_module_filter_nudges_when_other_modules_pending(parallel_project):
+    """--module against a project with other pending modules should print
+    the self-reporting nudge with the correct other-module count, so a
+    human/orchestrator sees the wave-parallelism headroom they're trading
+    away instead of discovering it later."""
+    repo, pcp_dir, timing_log = parallel_project
+
+    with patch("pcp.commands.build._run_test_suite_check", return_value=[]), \
+         patch("pcp.commands.build._run_lint_check", return_value=[]), \
+         patch("pcp.commands.build._run_sast_check", return_value=[]), \
+         patch("pcp.commands.build._run_layer1_check", return_value=[]), \
+         patch("pcp.commands.build._run_architect_review", return_value=[]), \
+         patch("pcp.commands.build._run_gate_check", return_value=[]):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["build", "--module", "add", "--path", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    assert "1 other module(s) also have pending criteria" in result.output
+    assert "pcp build` with no `--module` filter" in result.output
+
+
+def test_no_module_filter_never_nudges(parallel_project):
+    """A plain `pcp build` (no --module) already builds every pending
+    module in its wave -- there is nothing being traded away, so the
+    nudge must not fire."""
+    repo, pcp_dir, timing_log = parallel_project
+
+    with patch("pcp.commands.build._run_test_suite_check", return_value=[]), \
+         patch("pcp.commands.build._run_lint_check", return_value=[]), \
+         patch("pcp.commands.build._run_sast_check", return_value=[]), \
+         patch("pcp.commands.build._run_layer1_check", return_value=[]), \
+         patch("pcp.commands.build._run_architect_review", return_value=[]), \
+         patch("pcp.commands.build._run_gate_check", return_value=[]), \
+         patch("pcp.commands.build.qa.run_test_suite", return_value={"tool": None, "passed": True, "output": ""}), \
+         patch("pcp.commands.validate_strategy.run_validate_strategy", return_value=None), \
+         patch("pcp.llm.client.call_json", return_value={"findings": []}):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["build", "--path", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    assert "other module(s) also have pending criteria" not in result.output
+
+
+def test_module_filter_no_nudge_when_it_is_the_only_pending_module(parallel_project):
+    """--module against a project where every OTHER module is already
+    complete has nothing to trade away either -- nudge must stay silent."""
+    repo, pcp_dir, timing_log = parallel_project
+    sub_acc_path = pcp_dir / "strategy" / "modules" / "sub" / "acceptance.yaml"
+    sub_acc = yaml.safe_load(sub_acc_path.read_text())
+    sub_acc["criteria"][0]["status"] = "complete"
+    sub_acc_path.write_text(yaml.dump(sub_acc))
+    _git(["add", "-A"], repo)
+    _git(["commit", "-q", "-m", "sub already done"], repo)
+
+    with patch("pcp.commands.build._run_test_suite_check", return_value=[]), \
+         patch("pcp.commands.build._run_lint_check", return_value=[]), \
+         patch("pcp.commands.build._run_sast_check", return_value=[]), \
+         patch("pcp.commands.build._run_layer1_check", return_value=[]), \
+         patch("pcp.commands.build._run_architect_review", return_value=[]), \
+         patch("pcp.commands.build._run_gate_check", return_value=[]):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["build", "--module", "add", "--path", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    assert "other module(s) also have pending criteria" not in result.output

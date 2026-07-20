@@ -104,11 +104,15 @@ def _max_parallel_modules() -> int:
     own git worktree + branch — mirrors the /pcp orchestrator skill's module-
     level parallelism (criteria stay sequential within a module; modules in
     the same wave have no dependency on each other by construction, so the
-    wave boundary is the only real gate). Kept conservative for unattended
-    CLI use, where a human isn't necessarily watching cost accrue in real
-    time the way an interactive orchestrator session is. Override with
-    PCP_BUILD_MAX_PARALLEL."""
-    return int(os.environ.get("PCP_BUILD_MAX_PARALLEL", "3"))
+    wave boundary is the only real gate). Default raised 3->5, 2026-07-20:
+    a real-world swarm-role/parallelism research pass found 5-7 concurrent
+    agents is the practical ceiling on a single machine before rate limits,
+    merge conflicts, and review bottleneck erase the parallelism gain --
+    3 was an arbitrary conservative guess, not measured against that ceiling.
+    Kept below the top of that range since this is still the unattended CLI
+    default, not an interactive session where a human is watching cost
+    accrue in real time. Override with PCP_BUILD_MAX_PARALLEL."""
+    return int(os.environ.get("PCP_BUILD_MAX_PARALLEL", "5"))
 
 
 class BudgetExceeded(Exception):
@@ -2646,6 +2650,23 @@ def build(module_name: str | None, project_path: str | None):
     if not modules_to_build:
         console.print("[green]All acceptance criteria are complete. Nothing to build![/green]")
         sys.exit(0)
+
+    # Self-reporting nudge, 2026-07-20 -- found dogfooding two real projects
+    # where every build was called --module X one at a time, leaving genuine
+    # wave-parallelism headroom (10+ independent modules in some waves)
+    # completely unused. --module is often the right call (reviewing one
+    # module's PR before starting the next), but a human/orchestrator should
+    # at least see what they're trading away, not discover it by re-reading
+    # the wave-parallelism docs later.
+    if module_name:
+        other_pending = gather_modules_to_build(pcp_dir, None)
+        other_count = len([m for m in other_pending if m["name"] != module_name])
+        if other_count:
+            console.print(
+                f"[yellow]Note:[/yellow] {other_count} other module(s) also have pending criteria. "
+                "`--module` builds this one alone -- run `pcp build` with no `--module` filter to let "
+                "the wave engine build independent modules concurrently instead."
+            )
 
     # Order modules into dependency waves. Modules within a wave have no
     # declared dependency on each other by construction — the wave boundary

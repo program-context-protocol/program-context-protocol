@@ -68,11 +68,14 @@ Output ONLY valid JSON, no prose, no code fences. Format:
         "check": "test_passes",
         "status": "pending",
         "logic_tier": 1,
-        "build_vs_buy": {"decision": "build_fresh", "rationale": "one-sentence rationale", "candidates_considered": []}
+        "build_vs_buy": {"decision": "build_fresh", "rationale": "one-sentence rationale", "candidates_considered": []},
+        "depends_on": []
       }
     ]
   }
 }
+
+Every criterion MUST also declare depends_on: a list of OTHER criterion ids in this module that must be built first. Default to an empty list -- most brownfield characterization/decoupling criteria are independent by nature (each targets a different file or coupling edge). Only list a real id when this criterion would break or be meaningless without that other one existing first.
 """
 
 
@@ -101,6 +104,7 @@ def _default_module_shape(cluster_name: str, files: list[str], deps: list[str]) 
                     "rationale": "Characterization tests are project-specific by definition -- nothing to reuse.",
                     "candidates_considered": [],
                 },
+                "depends_on": [],
             }
         ]
     }
@@ -116,6 +120,7 @@ def _default_module_shape(cluster_name: str, files: list[str], deps: list[str]) 
                 "rationale": "Decoupling work is project-specific by definition -- nothing to reuse.",
                 "candidates_considered": [],
             },
+            "depends_on": [],
         })
     return spec, acceptance
 

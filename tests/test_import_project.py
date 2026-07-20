@@ -43,7 +43,8 @@ def test_generate_module_llm_success_is_normalized_and_v2(tmp_path):
             "criteria": [
                 {"id": "BF_001", "description": "characterize widgets", "check": "test_passes",
                  "status": "pending", "logic_tier": 1,
-                 "build_vs_buy": {"decision": "build_fresh", "rationale": "r", "candidates_considered": []}},
+                 "build_vs_buy": {"decision": "build_fresh", "rationale": "r", "candidates_considered": []},
+                 "depends_on": []},
             ]
         },
     }

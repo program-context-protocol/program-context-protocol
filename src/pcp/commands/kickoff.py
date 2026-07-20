@@ -99,7 +99,8 @@ Output schema:
               "decision": "build_fresh",
               "rationale": "Why this decision, one sentence.",
               "candidates_considered": []
-            }
+            },
+            "depends_on": []
           }
         ]
       }
@@ -108,6 +109,7 @@ Output schema:
   "_comment_criteria_enums": "Every criterion's check MUST be exactly one of: ast_pattern, file_exists, test_passes, manual, dom_contains, url_responds, visual. Every criterion's status MUST be exactly one of: pending, complete, deferred, blocked-ci, blocked-secret, blocked-regression. Do not invent other values (e.g. 'automated' or 'done') even if they seem descriptive -- these are the only ones a validator will accept. When generating a strategy from a vision doc (not yet built), every criterion's status should be 'pending' unless the vision explicitly states something is already implemented.",
   "_comment_logic_tier": "Every criterion MUST declare logic_tier (1-6). Choose by classifying the CORRECTNESS ORACLE, not the task: correctness = 'satisfies rules I can write down completely' -> 1 (litmus: could you write unit tests asserting EXACT outputs for every input class right now?); correctness = 'best feasible option under known constraints' -> 2 (litmus: enumerable constraints + a writable objective function -- OR-Tools/CBC); correctness = 'matches historical outcomes' -> 3 (litmus: hundreds of labeled rows exist or are cheap to collect); correctness = 'faithful to what our documents actually say' -> 4 (answer already exists as text in a bounded corpus); 'same as last time for same question' -> 5 (an overlay on other rungs, rarely a destination); correctness = 'a reasonable human would accept it, and another might accept a different answer' -> 6, ONLY after 1-4 each failed for a stated reason. DECOMPOSE FIRST: a criterion is rarely one decision -- classify each decision point, declare the highest rung actually present. Judgment verbs (recommend/interpret/assess) in a description contradict a rung-1 declaration. Do not default everything to 6.",
   "_comment_build_vs_buy": "Every criterion MUST also declare build_vs_buy: {decision, rationale, candidates_considered}. decision is exactly one of: reuse_whole (take an existing package/repo as a dependency), reuse_partial (vendor one file/function/module out of a larger repo), reimplement_from_reference (study a solved approach -- possibly GPL/AGPL, possibly another language -- and write original code implementing the same logic, no code copied), fork_adapt (fork a whole repo, continuously modify), build_fresh (nothing comparable exists). Each infrastructure-shaped module (portal, auth, integrations, orchestration engine) ALSO gets a module-level build_vs_buy in its spec -- pure business-logic modules use 'not_applicable' there since the per-criterion decisions already cover it.",
+  "_comment_depends_on": "Every criterion MUST also declare depends_on: a list of OTHER criterion ids (within the same module) that must be built first. Default to an EMPTY list -- most criteria in a well-decomposed module are genuinely independent (different files, different concerns) and should build in parallel. Only list a real id when this criterion's implementation would break or be meaningless without that other one existing first (e.g. an 'edit' criterion needing the 'create' criterion's data model first). Declaring a false dependency costs real build parallelism for nothing; missing a true one risks a broken build order -- when genuinely unsure, prefer the empty list and let the two criteria's own file-level conflicts (if any) surface at merge time instead of guessing a dependency that may not exist.",
   "ci_rules": {
     "version": "1.0",
     "rules": [
@@ -221,6 +223,17 @@ def _normalize_acceptance(acceptance: dict, module_name: str) -> list[str]:
         bvb, bvb_warnings = _coerce_build_vs_buy(c.get("build_vs_buy"), module_name, c.get("id", "?"), VALID_BVB_DECISIONS)
         c["build_vs_buy"] = bvb
         warnings += bvb_warnings
+        # Safety-net only, matches logic_tier's own coercion posture -- a
+        # criterion that never got depends_on from the generator (missing
+        # key entirely) defaults to independent, since that's the common
+        # case for a well-decomposed module and the safer direction to err
+        # in (a false-independence guess costs nothing but a merge check;
+        # a false-dependency guess costs real, silently-lost parallelism).
+        # Never overrides a real value the generator actually supplied,
+        # even an empty list -- that's a deliberate declaration, not a gap.
+        if "depends_on" not in c:
+            warnings.append(f"{module_name}/{c.get('id', '?')}: depends_on missing, defaulted to [] (independent)")
+            c["depends_on"] = []
     return warnings
 
 

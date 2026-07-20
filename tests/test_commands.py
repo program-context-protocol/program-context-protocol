@@ -198,6 +198,7 @@ def test_normalize_acceptance_returns_no_warnings_when_already_valid():
         "id": "A001", "check": "manual", "status": "pending",
         "logic_tier": 1,
         "build_vs_buy": {"decision": "build_fresh", "rationale": "trivial, no dependency warranted"},
+        "depends_on": [],
     }]}
     warnings = _normalize_acceptance(acc, "add")
     assert warnings == []
@@ -212,6 +213,37 @@ def test_normalize_acceptance_coerces_missing_logic_tier_and_build_vs_buy():
     assert any("logic_tier" in w for w in warnings)
     assert any("build_vs_buy" in w for w in warnings)
     assert acc["criteria"][0]["logic_tier"] == 6
+
+
+def test_normalize_acceptance_defaults_missing_depends_on_to_independent():
+    """2026-07-20 parallelism fix: depends_on missing entirely (generator
+    never supplied it) defaults to [] (independent) -- the safe direction
+    to err in, since a false-independence guess costs a merge check while a
+    false-dependency guess costs real, silently-lost parallelism."""
+    from pcp.commands.kickoff import _normalize_acceptance
+
+    acc = {"criteria": [{
+        "id": "A001", "check": "manual", "status": "pending", "logic_tier": 1,
+        "build_vs_buy": {"decision": "build_fresh", "rationale": "trivial"},
+    }]}
+    warnings = _normalize_acceptance(acc, "add")
+    assert any("depends_on" in w for w in warnings)
+    assert acc["criteria"][0]["depends_on"] == []
+
+
+def test_normalize_acceptance_never_overrides_a_real_depends_on_value():
+    """A genuinely declared dependency (even referencing another criterion)
+    must never be silently replaced by the missing-key safety net."""
+    from pcp.commands.kickoff import _normalize_acceptance
+
+    acc = {"criteria": [{
+        "id": "A002", "check": "manual", "status": "pending", "logic_tier": 1,
+        "build_vs_buy": {"decision": "build_fresh", "rationale": "trivial"},
+        "depends_on": ["A001"],
+    }]}
+    warnings = _normalize_acceptance(acc, "add")
+    assert not any("depends_on" in w for w in warnings)
+    assert acc["criteria"][0]["depends_on"] == ["A001"]
     assert acc["criteria"][0]["build_vs_buy"]["decision"] == "build_fresh"
 
 
