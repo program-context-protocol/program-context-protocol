@@ -130,6 +130,8 @@ class _BuildBudget:
         self.session_count = 0
         self.run_cost_total = 0.0
         self.tripped = False
+        self.infra_signal_streak = 0
+        self.infra_anomaly_tripped = False
 
     def take_session(self) -> None:
         with self._lock:
@@ -141,6 +143,24 @@ class _BuildBudget:
     def add_cost(self, cost: float | None) -> None:
         with self._lock:
             self.run_cost_total += cost or 0
+
+    def record_test_timeout_signal(self, timed_out: bool) -> bool:
+        """Cross-criterion anomaly signal. A real 2026-07-21 incident
+        (ontology-foundry): a squatted DB port made the test-suite gate
+        "time out" identically across several criteria before a human
+        caught it -- per-criterion escalation (_record_escalation) only
+        fires after a criterion exhausts all 3 attempts and never compares
+        across criteria, so nothing flagged the repeating pattern itself.
+        Returns True the moment PCP_BUILD_INFRA_ANOMALY_THRESHOLD consecutive
+        timeout signals land, exactly once per run -- caller escalates loudly
+        right then. Any non-timeout result resets the streak."""
+        with self._lock:
+            self.infra_signal_streak = self.infra_signal_streak + 1 if timed_out else 0
+            threshold = int(os.environ.get("PCP_BUILD_INFRA_ANOMALY_THRESHOLD", "3"))
+            if not self.infra_anomaly_tripped and self.infra_signal_streak >= threshold:
+                self.infra_anomaly_tripped = True
+                return True
+            return False
 
 
 def _git_head(project_root: Path) -> str:
@@ -1149,6 +1169,8 @@ def _run_lint_check(pcp_dir: Path, project_root: Path, changed_files: list[str],
 def _run_sast_check(pcp_dir: Path, project_root: Path, changed_files: list[str], ctx: dict) -> list[str]:
     """SAST + secret-scan via semgrep, if installed. Scoped to changed files."""
     result = qa.run_sast(project_root, changed_files)
+    if result.get("skipped"):
+        console.print(f"[yellow]SAST tool issue (not a finding, not blocking):[/yellow] {result['skipped']}")
     violations: list[str] = []
     evidence_path = None
     if result["tool"]:
@@ -2742,6 +2764,27 @@ def _build_one_criterion(
             futures = {name: pool.submit(fn) for name, fn in gate_calls.items()}
             gate_results = {name: f.result() for name, f in futures.items()}
 
+        test_timed_out = any("timed out" in v.lower() for v in gate_results["tests"])
+        if budget.record_test_timeout_signal(test_timed_out):
+            console.print(
+                f"[red bold]Infra anomaly suspected:[/red bold] the test-suite gate has now "
+                f"\"timed out\" on {budget.infra_signal_streak} consecutive attempts. This usually "
+                "means the environment is broken (wrong/unreachable DB, a squatted port, a hung "
+                "service), not the agent's code -- see the 2026-07-21 ontology-foundry incident. "
+                "Verify the environment before trusting further gate results this run."
+            )
+            from pcp import escalations
+            with _STATE_LOCK:
+                escalations.record(
+                    pcp_dir, mod["name"], c["id"], route="infra-anomaly",
+                    findings=[
+                        f"{budget.infra_signal_streak} consecutive test-suite gate timeouts across "
+                        "criteria -- likely environment/infra issue, not per-criterion agent code "
+                        "quality. Check DB/service connectivity and for port conflicts before trusting "
+                        "further results this run.",
+                    ],
+                )
+
         block_findings = (
             gate_results["tests"] + gate_results["lint"] + gate_results["sast"]
             + gate_results["l1"] + gate_results["scope"] + gate_results["arch"] + gate_results["gate"]
@@ -2975,6 +3018,17 @@ def build(module_name: str | None, project_path: str | None):
     # sets it and is never blocked from editing spec files directly.
     os.environ["PCP_AGENT_SESSION"] = "1"
     check_agent_depth_or_exit()
+
+    timeout_sec, timeout_is_default = qa.test_timeout_info()
+    if timeout_is_default:
+        console.print(
+            f"[yellow]Note:[/yellow] PCP_QA_TEST_TIMEOUT_SEC not set -- test-suite gate uses the "
+            f"{timeout_sec}s default. A slow-but-passing suite and a hung dependency (wrong/unreachable "
+            "DB, a squatted port) both surface identically as \"timed out\" -- set it explicitly if this "
+            "project's real suite legitimately runs long."
+        )
+    else:
+        console.print(f"[dim]QA test-suite timeout: {timeout_sec}s (PCP_QA_TEST_TIMEOUT_SEC).[/dim]")
 
     budget = _BuildBudget(_max_build_sessions())
     # Model-selection strategy (see llm/client.py) -- Sonnet is the reviewed

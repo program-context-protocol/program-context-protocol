@@ -32,6 +32,16 @@ def _timeout_test() -> int:
     return int(os.environ.get("PCP_QA_TEST_TIMEOUT_SEC", "300"))
 
 
+def test_timeout_info() -> tuple[int, bool]:
+    """(effective timeout seconds, True if PCP_QA_TEST_TIMEOUT_SEC is unset
+    and the 300s default is silently in effect) -- lets a build run print
+    this loud instead of a wrong-environment failure (e.g. the DB the tests
+    hit isn't the one intended) surfacing as an indistinguishable "timed
+    out", same masking this module's own docstring above already documents
+    for the slow-suite case."""
+    return _timeout_test(), "PCP_QA_TEST_TIMEOUT_SEC" not in os.environ
+
+
 def _timeout_lint() -> int:
     return int(os.environ.get("PCP_QA_LINT_TIMEOUT_SEC", "60"))
 
@@ -197,4 +207,16 @@ def run_sast(project_root: Path, changed_files: list[str]) -> dict:
     except Exception as e:
         return {"tool": "semgrep", "passed": True, "findings": [], "skipped": str(e)}
     findings = [l for l in result.stdout.splitlines() if l.strip()]
+    if result.returncode != 0 and not findings:
+        # semgrep's --error flag exits non-zero for EITHER real findings OR a
+        # tool-level failure (network fetch for --config=auto, a scan error)
+        # -- indistinguishable by exit code alone. Real 2026-07-21 incident:
+        # this surfaced as "SAST found issues" with an empty evidence file,
+        # since nothing landed on stdout to write. Skip (don't block) rather
+        # than block on a phantom finding -- same posture as the timeout/
+        # exception branches above.
+        return {
+            "tool": "semgrep", "passed": True, "findings": [],
+            "skipped": (result.stderr or "semgrep exited non-zero with no findings on stdout")[-500:],
+        }
     return {"tool": "semgrep", "passed": result.returncode == 0, "findings": findings}
