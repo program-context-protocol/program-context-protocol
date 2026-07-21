@@ -1,74 +1,49 @@
-"""pcp report — surface bypass history and coverage trends."""
+"""pcp report — DEPRECATED (2026-07-21).
+
+Confirmed a genuine duplicate, not a distinct capability: this command had
+its own separate implementation reading bypass_log.yaml/current_state.md
+directly, never calling into provenance.py's build_provenance(). Every
+data point it showed already exists elsewhere -- the bypass ledger is a
+full section of `pcp provenance`'s output; the coverage percentage is
+already in current_state.md itself (which this command only re-read) and
+surfaced again in pcp.md/dashboard.html. Zero unique data, duplicate code
+instead of reuse -- exactly the catalog-bloat pattern PCP's own
+self-evaluation named. Kept as a command (not removed outright) so a
+script or muscle-memory invocation gets a clear redirect instead of a
+"command not found" error.
+"""
 
 import json
 import sys
 from pathlib import Path
 
 import click
-import yaml
 from rich.console import Console
-from rich.table import Table
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 
 console = Console()
 
-
-def _load_bypass_log(pcp_dir: Path) -> list[dict]:
-    log_path = pcp_dir / "bypass_log.yaml"
-    if not log_path.exists():
-        return []
-    data = yaml.safe_load(log_path.read_text()) or {}
-    return data.get("bypasses", [])
-
-
-def _load_coverage(pcp_dir: Path) -> str:
-    cs = pcp_dir / "current_state.md"
-    if not cs.exists():
-        return "unknown (run pcp scan)"
-    for line in cs.read_text().splitlines():
-        if "acceptance coverage:" in line:
-            return line.split(":", 1)[1].strip()
-    return "unknown"
+_DEPRECATION_MESSAGE = (
+    "`pcp report` is deprecated -- use `pcp provenance` (bypass ledger + SSDF crosswalk) "
+    "or `pcp dashboard` (Audit Trail tab) instead. Both already show everything this "
+    "command did, with more context."
+)
 
 
 @click.command()
 @click.option("--path", "project_path", type=click.Path(), default=None)
 @click.option("--json", "output_json", is_flag=True, help="Output raw JSON.")
 def report(project_path: str | None, output_json: bool):
-    """Show bypass history, coverage score, and gate outcomes."""
+    """DEPRECATED -- use `pcp provenance` or `pcp dashboard` instead."""
     try:
-        pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
+        find_pcp_dir(Path(project_path) if project_path else None)
     except NoPCPDir as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(2)
 
-    bypasses = _load_bypass_log(pcp_dir)
-    coverage = _load_coverage(pcp_dir)
-
     if output_json:
-        click.echo(json.dumps({
-            "coverage_score": coverage,
-            "bypass_count": len(bypasses),
-            "bypasses": bypasses,
-        }, indent=2))
+        click.echo(json.dumps({"deprecated": True, "use_instead": ["pcp provenance", "pcp dashboard"]}, indent=2))
         return
 
-    console.print(f"\n[bold]PCP Report[/bold]  [dim]{pcp_dir.parent}[/dim]\n")
-    console.print(f"  Acceptance coverage : [bold]{coverage}[/bold]")
-    console.print(f"  Bypass count        : [bold]{len(bypasses)}[/bold]\n")
-
-    if not bypasses:
-        console.print("[dim]No bypasses logged.[/dim]")
-        return
-
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Timestamp", style="dim")
-    table.add_column("Reason")
-    table.add_column("Rules bypassed")
-
-    for b in bypasses:
-        rules = ", ".join(b.get("rules_bypassed", []))
-        table.add_row(b.get("timestamp", ""), b.get("reason", ""), rules)
-
-    console.print(table)
+    console.print(f"[yellow]{_DEPRECATION_MESSAGE}[/yellow]")
