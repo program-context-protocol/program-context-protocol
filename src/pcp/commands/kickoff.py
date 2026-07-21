@@ -34,6 +34,16 @@ Decompose the vision into modules. Each module must cover a distinct set of feat
 The strategy decomposition must detail how these modules cover the objective.
 Also generate acceptance criteria for each module (e.g. A001, A002) with clear descriptions.
 
+WRITING STYLE for objective/target_state/architecture/decomposition/architect_persona: state facts and
+decisions only -- what the objective/target/tech-stack/module-order IS -- never a narrative retelling of
+HOW you arrived at it or a journal-style justification. A one-clause reason is fine where a field already
+asks for one (architecture's "Why" column, a module-order "reason"); anything longer than one clause is
+narrative and does not belong in these files -- these get re-read into every future session, and a
+project-management journal costs real agent performance every time it's reloaded (this is a measured
+finding, not a style preference). objective.md's "Why This Exists" section is the one exception -- stating
+the business objective IS that file's content, not incidental narrative, so write it directly and plainly,
+just don't pad it with extra exposition.
+
 You must output ONLY valid JSON — no prose, no markdown, no code fences.
 
 Output schema:
