@@ -86,6 +86,14 @@
               }
             }
           },
+          "install_only": {
+            "type": "boolean",
+            "description": "Set when priorart found a direct match and a human confirmed it (not an automated confidence heuristic) -- see CLAUDE.md's install-only fast path. build.py's _build_one_criterion skips the full TDD/architect-review/LLM-gate cycle for this criterion: interactive human approval (or --yes), run install_command, then a deterministic smoke test only (full test suite + Layer 1 ci_rules -- CTRL-034). Requires install_command. Declining the approval prompt, or a failed smoke test, falls through to the normal full build path -- this is never a silent skip."
+          },
+          "install_command": {
+            "type": "string",
+            "description": "Shell command that installs the direct-match dependency (e.g. 'pip install acroforge'). Required when install_only is true; ignored otherwise."
+          },
           "design_justification": {
             "type": "object",
             "description": "PCP Design lifecycle, stage 2 (Decide per-screen) -- only meaningful for UI-facing criteria. Not schema-required (whether a criterion is UI-facing isn't expressible as a JSON-schema condition on free-text description) -- absence on a real UI criterion is instead a finding surfaced by pcp design-audit, not a validation failure.",

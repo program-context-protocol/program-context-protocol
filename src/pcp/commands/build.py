@@ -26,6 +26,7 @@ from pcp import qa
 from pcp import evidence
 from pcp import spend
 from pcp import uat
+from pcp.install_approvals import log_install_approval
 from pcp.capture import find_transcript_for_session, run_capture
 
 console = Console()
@@ -2524,9 +2525,83 @@ def _run_architect_preflight(pcp_dir: Path, mod: dict, criterion: dict) -> list[
     return rendered
 
 
+def _run_install_only(
+    pcp_dir: Path, project_root: Path, mod: dict, *,
+    criterion: dict | None, install_command: str, candidate_desc: str, yes: bool,
+) -> tuple[bool, list[str]]:
+    """Fast path for a human-confirmed direct prior-art match — skip the full
+    TDD/architect-review/LLM-gate cycle entirely, just install + verify with
+    deterministic checks (full test suite + Layer 1 ci_rules — CTRL-034, no
+    LLM calls). criterion=None means module-level (whole module satisfied by
+    one dependency, see spec.yaml's install_only). This is never a silent
+    skip: declining the approval prompt, or a failed smoke test, both fall
+    through to the normal full build path unchanged — the caller decides
+    what "fall through" means at its own scope (retry the one criterion, or
+    resume the module's normal per-criterion loop)."""
+    scope_label = f"{mod['name']}/{criterion['id']}" if criterion else f"{mod['name']} (whole module)"
+    console.print(f"\n[bold]Install-only fast path — {scope_label}[/bold]")
+    console.print(f"[dim]Candidate:[/dim] {candidate_desc}")
+    console.print(f"[dim]Install command:[/dim] {install_command}")
+
+    criterion_id = criterion["id"] if criterion else None
+    if not yes:
+        if not click.confirm("Confirm this is a direct match and proceed with install-only?", default=False):
+            console.print("[yellow]Declined — falling through to full build.[/yellow]")
+            log_install_approval(
+                pcp_dir, module=mod["name"], criterion_id=criterion_id,
+                candidate=candidate_desc, install_command=install_command,
+                decision="reject", actor="human",
+            )
+            return False, ["human declined install-only approval"]
+        actor = "human"
+    else:
+        actor = "yes-flag"
+
+    log_install_approval(
+        pcp_dir, module=mod["name"], criterion_id=criterion_id,
+        candidate=candidate_desc, install_command=install_command,
+        decision="confirm", actor=actor,
+    )
+
+    start_ref = _git_head(project_root)
+    try:
+        result = subprocess.run(
+            install_command, shell=True, cwd=project_root,
+            capture_output=True, text=True, timeout=_build_agent_timeout_sec(),
+        )
+    except subprocess.TimeoutExpired:
+        return False, [f"install_command timed out after {_build_agent_timeout_sec()}s"]
+
+    changed_files = _get_changed_files_since(project_root, start_ref)
+    ctx = {
+        "module": mod["name"], "submodule": None,
+        "criterion_id": criterion_id or "MODULE",
+        "attempt": 1, "files": changed_files,
+    }
+
+    if result.returncode != 0:
+        errors = [f"install_command failed (exit {result.returncode}): {(result.stderr or '')[-1000:]}"]
+        _qa_record(pcp_dir, ctx, "install-only", errors, control_id="CTRL-034", tool="install", result="block")
+        console.print(f"[red]Install failed:[/red] {errors[0]}")
+        return False, errors
+
+    violations = _run_layer1_check(pcp_dir, project_root, changed_files, ctx)
+    violations += _run_test_suite_check(pcp_dir, project_root, ctx)
+
+    if violations:
+        console.print("[red]Install-only smoke test failed — falling through to full build.[/red]")
+        _qa_record(pcp_dir, ctx, "install-only", violations, control_id="CTRL-034", tool="install", result="block")
+        return False, violations
+
+    _qa_record(pcp_dir, ctx, "install-only", [], control_id="CTRL-034", tool="install", result="pass")
+    console.print(f"[green]✓ Install-only fast path passed — {scope_label}[/green]")
+    return True, []
+
+
 def _build_one_criterion(
     pcp_dir: Path, project_root: Path, mod: dict, c: dict,
     build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
+    yes: bool = False,
 ) -> tuple[bool, list[str]]:
     """Runs the up-to-3-attempt loop for ONE criterion. `project_root` is
     where the coding agent actually runs and where gates are evaluated —
@@ -2537,6 +2612,22 @@ def _build_one_criterion(
     sites) — never held across gate evaluation itself, since the LLM calls
     and test/lint/SAST subprocesses are exactly the work parallelism exists
     to overlap. Returns (success, last block_findings)."""
+    if c.get("install_only"):
+        install_command = c.get("install_command")
+        if not install_command:
+            console.print(f"[red]{mod['name']}/{c['id']} declares install_only but has no install_command — falling through to full build.[/red]")
+        else:
+            candidate_desc = (c.get("build_vs_buy") or {}).get("rationale") or install_command
+            ok, findings = _run_install_only(
+                pcp_dir, project_root, mod, criterion=c,
+                install_command=install_command, candidate_desc=candidate_desc, yes=yes,
+            )
+            if ok:
+                return True, []
+            # Falls through to the normal full build loop below — a
+            # declined approval or failed smoke test is a real signal
+            # this wasn't actually a direct match, not a reason to give up.
+
     feedback = None
     success = False
     block_findings: list[str] = []
@@ -2823,6 +2914,7 @@ def _mark_criterion_complete(mod: dict, criterion_id: str) -> None:
 def _build_module_worker(
     pcp_dir: Path, mod: dict, project_root: Path,
     build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
+    yes: bool = False,
 ) -> dict:
     """Runs all of one module's pending criteria inside `project_root` (its
     own worktree when building in parallel across modules). Stops at the
@@ -2836,10 +2928,30 @@ def _build_module_worker(
     separate branch below, not a rewrite of the default one."""
     console.print(f"\n[bold]Building Module:[/bold] [cyan]'{mod['name']}'[/cyan] ({len(mod['pending_criteria'])} pending criteria)")
 
+    # Whole-module direct-match fast path (spec.yaml's install_only) — one
+    # approval + one install + one smoke test covers every pending criterion
+    # in this module at once. A decline or failed smoke test falls straight
+    # through into the normal per-criterion loop below, unchanged.
+    if mod["spec"].get("install_only") and mod["pending_criteria"]:
+        install_command = mod["spec"].get("install_command")
+        if not install_command:
+            console.print(f"[red]{mod['name']} declares install_only but has no install_command — falling through to full build.[/red]")
+        else:
+            candidate_desc = (mod["spec"].get("build_vs_buy") or {}).get("rationale") or install_command
+            ok, _findings = _run_install_only(
+                pcp_dir, project_root, mod, criterion=None,
+                install_command=install_command, candidate_desc=candidate_desc, yes=yes,
+            )
+            if ok:
+                for c in mod["pending_criteria"]:
+                    _mark_criterion_complete(mod, c["id"])
+                console.print(f"\n[green]✓ Module '{mod['name']}' built successfully (install-only)![/green]")
+                return {"module": mod["name"], "success": True}
+
     if not _criteria_parallel_enabled(mod):
         for c in mod["pending_criteria"]:
             console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
-            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget)
+            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget, yes)
 
             if success:
                 console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
@@ -2867,7 +2979,7 @@ def _build_module_worker(
         if len(wave_criteria) == 1:
             c = wave_criteria[0]
             console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
-            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget)
+            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget, yes)
             if success:
                 console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
                 _mark_criterion_complete(mod, c["id"])
@@ -2887,7 +2999,7 @@ def _build_module_worker(
         with ThreadPoolExecutor(max_workers=len(wave_criteria)) as executor:
             futures = {
                 executor.submit(
-                    _build_one_criterion, pcp_dir, worktrees[c["id"]], mod, c, build_model, build_model_explicit, budget,
+                    _build_one_criterion, pcp_dir, worktrees[c["id"]], mod, c, build_model, build_model_explicit, budget, yes,
                 ): c["id"]
                 for c in wave_criteria
             }
@@ -2957,7 +3069,9 @@ def _refresh_state(pcp_dir: Path, modules_dir: Path) -> None:
               help="Build specific module only.")
 @click.option("--path", "project_path", type=click.Path(), default=None,
               help="Project root override.")
-def build(module_name: str | None, project_path: str | None):
+@click.option("--yes", "yes", is_flag=True,
+              help="Skip the interactive install-only approval prompt (CI/non-interactive use — opt-in, not default). Only affects criteria/modules declaring install_only; every other criterion builds exactly as before.")
+def build(module_name: str | None, project_path: str | None, yes: bool):
     """Run autonomous AI coding loops for pending acceptance criteria."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
@@ -3053,7 +3167,7 @@ def build(module_name: str | None, project_path: str | None):
             # Single module (or parallelism disabled) — run directly against
             # the main project root, no worktree machinery needed at all.
             for mod in wave_modules:
-                result = _build_module_worker(pcp_dir, mod, project_root, build_model, build_model_explicit, budget)
+                result = _build_module_worker(pcp_dir, mod, project_root, build_model, build_model_explicit, budget, yes)
                 if not result["success"]:
                     console.print("[bold red]Build execution stopped. Please resolve findings manually.[/bold red]")
                     sys.exit(1)
@@ -3068,7 +3182,7 @@ def build(module_name: str | None, project_path: str | None):
                 with ThreadPoolExecutor(max_workers=min(max_parallel, len(wave_modules))) as executor:
                     futures = {
                         executor.submit(
-                            _build_module_worker, pcp_dir, mod, worktrees[mod["name"]], build_model, build_model_explicit, budget,
+                            _build_module_worker, pcp_dir, mod, worktrees[mod["name"]], build_model, build_model_explicit, budget, yes,
                         ): mod["name"]
                         for mod in wave_modules
                     }

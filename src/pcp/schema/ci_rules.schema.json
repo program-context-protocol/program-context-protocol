@@ -19,6 +19,10 @@
         "transcript_days": { "type": "integer", "minimum": 1 }
       }
     },
+    "ships_externally": {
+      "type": "boolean",
+      "description": "Does this project ship/distribute to anyone outside the org, or run as a network service others connect to? Copyleft (GPL/AGPL/SSPL) obligations trigger on distribution/network-service-access, not on internal-only use -- see CLAUDE.md's Prior-Art license guardrail. false = pure internal tool: GPL is fine to vendor, AGPL/SSPL still flagged for manual review regardless (network-access clause is ambiguous even for 'internal' tools reachable over a network). Unset (or true) = the existing strict MIT/Apache-style-only default applies, unchanged -- conservative by default. Human-set -- never inferred."
+    },
     "rules": {
       "type": "array",
       "items": {

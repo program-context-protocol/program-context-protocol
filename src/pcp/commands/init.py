@@ -447,6 +447,15 @@ controls:
     enforcement: advisory
     description: "Agent Behavioral Contracts reference pattern (arXiv:2602.22302, 2026-07-20 research pass -- see docs/research-rigidity-vs-reliability-2026-07.md). ci_rules.yaml's rules gained an optional `contract` block (preconditions/invariants/recovery -- Governance is already the existing `severity` field, not duplicated). This is the presence check, same posture CTRL-019 already uses for logic_tier: a hard_block rule with no contract just relies on the flat severity gate, exactly as it always did -- advisory, never blocks, project-wide (one ci_rules.yaml, not per-module)."
     ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-034
+    name: "Install-only fast path (direct priorart match)"
+    layer: build-loop
+    mechanism: "build.py _run_install_only() -- criterion/module declares install_only+install_command; human approval (or --yes), then run install_command, then Layer 1 + full test suite as a deterministic smoke test. No LLM calls, no TDD/architect-review cycle."
+    tool: "n/a (deterministic)"
+    enforcement: hard_block
+    description: "When priorart already confirms an existing package is a direct match for a criterion (or whole module), running the full TDD/architect-review/LLM-gate cycle just to write a thin wrapper around an install is pure waste. This fast path skips the coding-agent session entirely -- but never skips verification: a human must confirm the match (install_approvals.yaml, hash-chained like bypass_log.yaml), and the install still has to pass a real smoke test (Layer 1 + full regression suite) before the criterion is marked complete. A decline or a failed smoke test falls through to the normal full build path, never a silent skip."
+    ssdf_practice: ["PW.4.1", "PW.7.2"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\

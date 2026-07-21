@@ -54,6 +54,14 @@
           "items": { "type": "string" }
         }
       }
+    },
+    "install_only": {
+      "type": "boolean",
+      "description": "Whole-module direct-match fast path -- the entire module's pending criteria are satisfied by installing one existing dependency, human-confirmed (not an automated heuristic). build.py's _build_module_worker skips the full per-criterion TDD/architect-review/LLM-gate loop entirely: one interactive approval (or --yes), run install_command once, then one deterministic smoke test (full test suite + Layer 1 -- CTRL-034) covering the whole module. All pending criteria are marked complete together on success. Requires install_command. Declining the approval, or a failed smoke test, falls through to the normal per-criterion build loop -- never a silent skip."
+    },
+    "install_command": {
+      "type": "string",
+      "description": "Shell command that installs the direct-match dependency for the whole module. Required when install_only is true; ignored otherwise."
     }
   },
   "allOf": [
