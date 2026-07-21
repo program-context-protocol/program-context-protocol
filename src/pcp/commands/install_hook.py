@@ -173,16 +173,24 @@ def install_hook(project_path: str | None, pre_commit_framework: bool, force: bo
     hooks_dir.mkdir(exist_ok=True)
     hook_path = hooks_dir / "commit-msg"
 
+    # Bug fixed 2026-07-21: this used to sys.exit(1) here whenever commit-msg
+    # already existed, which meant the post-commit check below could NEVER
+    # run in that case -- a project with a working commit-msg hook but a
+    # missing post-commit hook (e.g. this repo itself, predating the
+    # post-commit feature) could never get it installed via this command,
+    # only via `pcp init`'s own install_git_hook() call, which didn't have
+    # this bug. commit-msg's own outcome is now independent of post-commit's.
+    commit_msg_installed = False
     if hook_path.exists() and not force:
         console.print(f"[yellow]Hook already exists:[/yellow] {hook_path}")
         console.print("Use --force to overwrite (this replaces the whole file — merge manually "
                        "if you have other commit-msg hooks), or --pre-commit-framework to append.")
-        sys.exit(1)
-
-    hook_path.write_text(COMMIT_MSG_HOOK)
-    hook_path.chmod(0o755)
-    console.print(f"[green]installed[/green] {hook_path}")
-    console.print("[dim]pcp check will run before every commit finalizes.[/dim]")
+    else:
+        hook_path.write_text(COMMIT_MSG_HOOK)
+        hook_path.chmod(0o755)
+        console.print(f"[green]installed[/green] {hook_path}")
+        console.print("[dim]pcp check will run before every commit finalizes.[/dim]")
+        commit_msg_installed = True
 
     post_commit_path = hooks_dir / "post-commit"
     if post_commit_path.exists() and not force and "pcp scan" not in post_commit_path.read_text():
@@ -194,6 +202,12 @@ def install_hook(project_path: str | None, pre_commit_framework: bool, force: bo
         console.print("[dim]current_state.md + diff.md refresh after every commit.[/dim]")
 
     _install_cron_scripts()
+
+    # commit-msg is the primary hook this command exists for -- preserve the
+    # original exit-1-on-refusal contract for it specifically, even though
+    # post-commit (checked above, independently) may have installed fine.
+    if not commit_msg_installed:
+        sys.exit(1)
 
 
 def _install_cron_scripts():

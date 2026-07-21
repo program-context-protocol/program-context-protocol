@@ -50,6 +50,36 @@ def test_install_hook_refuses_overwrite_without_force(tmp_path):
     assert hook_path.read_text() == "#!/bin/sh\necho existing\n"
 
 
+def test_install_hook_installs_missing_post_commit_even_when_commit_msg_exists(tmp_path):
+    """Bug fixed 2026-07-21: the CLI command used to exit before ever
+    checking post-commit whenever commit-msg already existed -- a project
+    with a working commit-msg hook but no post-commit hook (exactly PCP's
+    own repo, predating the post-commit feature) could never get it
+    installed via this command without --force, only via `pcp init`'s
+    own install_git_hook() call, which never had this bug."""
+    _init_git_repo(tmp_path)
+    commit_msg_path = tmp_path / ".git" / "hooks" / "commit-msg"
+    commit_msg_path.parent.mkdir(exist_ok=True)
+    commit_msg_path.write_text("#!/bin/sh\npcp check --commit-msg-file \"$1\"\n")
+    post_commit_path = tmp_path / ".git" / "hooks" / "post-commit"
+    assert not post_commit_path.exists()
+
+    with patch("pcp.commands.install_hook._install_cron_scripts"):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["install-hook", "--path", str(tmp_path)])
+
+    # commit-msg already existing (any content) without --force is still a
+    # refusal for THAT hook specifically (exit 1, unchanged) -- same
+    # long-standing contract test_install_hook_refuses_overwrite_without_force
+    # already covers. The fix is that post-commit no longer gets skipped
+    # just because commit-msg's own outcome was a refusal.
+    assert result.exit_code == 1
+    assert post_commit_path.exists()
+    assert "pcp scan" in post_commit_path.read_text()
+    # commit-msg itself untouched -- refused, not overwritten.
+    assert commit_msg_path.read_text() == "#!/bin/sh\npcp check --commit-msg-file \"$1\"\n"
+
+
 def test_install_hook_force_overwrites(tmp_path):
     _init_git_repo(tmp_path)
     hook_path = tmp_path / ".git" / "hooks" / "commit-msg"
