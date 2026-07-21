@@ -133,6 +133,8 @@ class _BuildBudget:
         self.tripped = False
         self.infra_signal_streak = 0
         self.infra_anomaly_tripped = False
+        self.gate_skip_streaks: dict[str, int] = {}
+        self.gate_skip_tripped: set[str] = set()
 
     def take_session(self) -> None:
         with self._lock:
@@ -160,6 +162,30 @@ class _BuildBudget:
             threshold = int(os.environ.get("PCP_BUILD_INFRA_ANOMALY_THRESHOLD", "3"))
             if not self.infra_anomaly_tripped and self.infra_signal_streak >= threshold:
                 self.infra_anomaly_tripped = True
+                return True
+            return False
+
+    def record_gate_skip_signal(self, check: str, skipped: bool) -> bool:
+        """Generalizes record_test_timeout_signal to any gate that can
+        silently no-op when its underlying tool is present but broken
+        (network fetch failure, a scan error, a crash) -- e.g. SAST after
+        the 2026-07-21 fix now skips instead of blocking on a tool
+        failure, the right default (don't false-block on infra), but it
+        means a genuinely misconfigured tool could silently never gate
+        anything again for the rest of an unattended multi-hour run unless
+        something is watching for repeated skips. Deliberately does NOT
+        fire for "tool not installed" (qa.py returns tool=None for that,
+        never reaches here with skipped=True) -- that's expected, stable
+        project config, not an anomaly. Tracked per-check (lint and sast
+        streak independently) since one gate silently failing says nothing
+        about the others. Fires once per check per run."""
+        with self._lock:
+            streak = self.gate_skip_streaks.get(check, 0)
+            streak = streak + 1 if skipped else 0
+            self.gate_skip_streaks[check] = streak
+            threshold = int(os.environ.get("PCP_BUILD_GATE_SKIP_ANOMALY_THRESHOLD", "3"))
+            if check not in self.gate_skip_tripped and streak >= threshold:
+                self.gate_skip_tripped.add(check)
                 return True
             return False
 
@@ -1047,6 +1073,42 @@ def _qa_record(
             result = "skipped"
         else:
             result = "block" if errors else "pass"
+
+    # Evidence-integrity self-check, 2026-07-21: a block with no real
+    # evidence behind it is itself an anomaly, not a normal outcome to
+    # trust silently -- this is the exact shape of the SAST-phantom-block
+    # incident (qa.py's semgrep wrapper conflated a tool failure with a
+    # real finding; the "block" had nothing behind it, only caught because
+    # a human happened to read an empty evidence file). This tripwire is
+    # deliberately generic -- it doesn't know or care which check produced
+    # the block, so it still fires the next time this bug SHAPE recurs in
+    # a different tool, not just the one instance patched tonight. Multi-
+    # hour unattended runs have nobody reading evidence files live, so this
+    # has to be loud (console) and durable (escalations.yaml), not just
+    # printed and forgotten.
+    if result == "block" and evidence_path:
+        try:
+            evidence_empty = not (pcp_dir / evidence_path).read_text().strip()
+        except Exception:
+            evidence_empty = False  # can't read it -- don't compound one failure into a false alarm
+        if evidence_empty:
+            console.print(
+                f"[red bold]Evidence-integrity anomaly:[/red bold] check '{check}' blocked "
+                f"({len(errors)} finding(s)) but its evidence file ({evidence_path}) is empty -- "
+                "this block is likely not grounded in a real finding (tool-failure-misreported-"
+                "as-finding, the 2026-07-21 SAST incident shape). Treat it with suspicion."
+            )
+            from pcp import escalations
+            with _STATE_LOCK:
+                escalations.record(
+                    pcp_dir, ctx["module"], ctx["criterion_id"], route="evidence-integrity-anomaly",
+                    findings=[
+                        f"Check '{check}' reported a block with an empty evidence file -- the block "
+                        "is likely ungrounded (a tool failure misreported as a real finding), not a "
+                        "genuine issue with the criterion's code. Verify before trusting this block.",
+                    ],
+                )
+
     usage = (meta or {}).get("usage", {})
     with _STATE_LOCK:
         telemetry.record(
@@ -1135,8 +1197,14 @@ def _run_layer1_check(pcp_dir: Path, project_root: Path, changed_files: list[str
 
 
 def _run_test_suite_check(pcp_dir: Path, project_root: Path, ctx: dict) -> list[str]:
-    """Full regression suite — project-wide. Skips (never blocks) if no test runner detected."""
-    result = qa.run_test_suite(project_root)
+    """Project-wide by default. Under PCP_QA_TEST_SELECTION=impact, scoped
+    to the modules impacted by this attempt's changed files (see
+    impact.py) -- the full suite stays the rare safety net at wave-merge
+    (_run_wave_merge_gate's own qa.run_test_suite call, never scoped) and
+    isn't run here on every one of up to 3 attempts per criterion."""
+    result = qa.run_test_suite(project_root, pcp_dir=pcp_dir, changed_files=ctx.get("files"))
+    if result.get("scoped_to"):
+        console.print(f"[dim]Test suite scoped to impacted modules: {', '.join(result['scoped_to'])}[/dim]")
     violations: list[str] = []
     evidence_path = None
     if result["tool"]:
@@ -1151,9 +1219,28 @@ def _run_test_suite_check(pcp_dir: Path, project_root: Path, ctx: dict) -> list[
     return violations
 
 
-def _run_lint_check(pcp_dir: Path, project_root: Path, changed_files: list[str], ctx: dict) -> list[str]:
+def _report_gate_skip_anomaly(budget: "_BuildBudget", check: str, tool: str, skipped: bool) -> None:
+    """Shared by lint/SAST -- see _BuildBudget.record_gate_skip_signal.
+    Only called when the tool was actually detected (never for a genuinely
+    absent tool, which is expected stable config, not an anomaly)."""
+    if not tool:
+        return
+    if budget.record_gate_skip_signal(check, skipped):
+        streak = budget.gate_skip_streaks[check]
+        console.print(
+            f"[red bold]Gate anomaly suspected:[/red bold] '{check}' ({tool}) has silently skipped "
+            f"{streak} consecutive attempts instead of actually checking anything. This usually means "
+            "the tool itself is broken or misconfigured, not that the code is clean -- verify it before "
+            "trusting any further pass/skip result from this gate this run."
+        )
+
+
+def _run_lint_check(pcp_dir: Path, project_root: Path, changed_files: list[str], ctx: dict, budget: "_BuildBudget") -> list[str]:
     """Lint on changed files only. Skips (never blocks) if no linter detected."""
     result = qa.run_lint(project_root, changed_files)
+    if result.get("skipped"):
+        console.print(f"[yellow]Lint tool issue (not a finding, not blocking):[/yellow] {result['skipped']}")
+    _report_gate_skip_anomaly(budget, "lint", result["tool"], bool(result.get("skipped")))
     violations: list[str] = []
     evidence_path = None
     if result["tool"]:
@@ -1167,11 +1254,12 @@ def _run_lint_check(pcp_dir: Path, project_root: Path, changed_files: list[str],
     return violations
 
 
-def _run_sast_check(pcp_dir: Path, project_root: Path, changed_files: list[str], ctx: dict) -> list[str]:
+def _run_sast_check(pcp_dir: Path, project_root: Path, changed_files: list[str], ctx: dict, budget: "_BuildBudget") -> list[str]:
     """SAST + secret-scan via semgrep, if installed. Scoped to changed files."""
     result = qa.run_sast(project_root, changed_files)
     if result.get("skipped"):
         console.print(f"[yellow]SAST tool issue (not a finding, not blocking):[/yellow] {result['skipped']}")
+    _report_gate_skip_anomaly(budget, "sast", result["tool"], bool(result.get("skipped")))
     violations: list[str] = []
     evidence_path = None
     if result["tool"]:
@@ -2837,8 +2925,8 @@ def _build_one_criterion(
         }
         gate_calls = {
             "tests": lambda: _run_test_suite_check(pcp_dir, project_root, ctx),
-            "lint": lambda: _run_lint_check(pcp_dir, project_root, changed_files, ctx),
-            "sast": lambda: _run_sast_check(pcp_dir, project_root, changed_files, ctx),
+            "lint": lambda: _run_lint_check(pcp_dir, project_root, changed_files, ctx, budget),
+            "sast": lambda: _run_sast_check(pcp_dir, project_root, changed_files, ctx, budget),
             "l1": lambda: _run_layer1_check(pcp_dir, project_root, changed_files, ctx),
             "scope": lambda: _run_scope_check(pcp_dir, mod, c, changed_files, ctx),
             "arch": lambda: _run_architect_review(pcp_dir, diff, changed_files, ctx),

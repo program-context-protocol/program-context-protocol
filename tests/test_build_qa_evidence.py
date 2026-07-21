@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 from pcp.commands.build import (
     _run_test_suite_check, _run_lint_check, _run_sast_check,
-    _run_architect_review, _run_gate_check,
+    _run_architect_review, _run_gate_check, _BuildBudget,
 )
 from pcp import telemetry
 
@@ -11,6 +11,32 @@ CTX = {"attempt": 1, "module": "add", "criterion_id": "A001"}
 
 def _last_qa_record(pcp_dir):
     return [r for r in telemetry.load(pcp_dir) if r.get("cycle") == "qa"][-1]
+
+
+def test_test_suite_check_passes_pcp_dir_and_changed_files_through(tmp_path):
+    """impact.py's scoping (see test_qa.py/test_impact.py) needs both
+    pcp_dir and this attempt's changed files -- verify the wiring, not the
+    scoping logic itself (covered elsewhere)."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    ctx = {**CTX, "files": ["src/x.py"]}
+    with patch("pcp.commands.build.qa.run_test_suite",
+               return_value={"tool": "pytest", "passed": True, "output": "ok"}) as mock_run:
+        _run_test_suite_check(pcp_dir, tmp_path, ctx)
+    _, kwargs = mock_run.call_args
+    assert kwargs["pcp_dir"] == pcp_dir
+    assert kwargs["changed_files"] == ["src/x.py"]
+
+
+def test_test_suite_check_prints_scoped_note_when_scoped(tmp_path, capsys):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("pcp.commands.build.qa.run_test_suite",
+               return_value={"tool": "pytest", "passed": True, "output": "ok", "scoped_to": ["tests/test_x.py"]}):
+        _run_test_suite_check(pcp_dir, tmp_path, CTX)
+    out = capsys.readouterr().out
+    assert "scoped to impacted modules" in out
+    assert "tests/test_x.py" in out
 
 
 def test_test_suite_check_stores_full_untruncated_output(tmp_path):
@@ -60,7 +86,7 @@ def test_lint_check_stores_full_issue_list_beyond_console_cap(tmp_path):
     issues = [f"file.py:{i}: some issue" for i in range(50)]  # past the 10-issue console cap
     with patch("pcp.commands.build.qa.run_lint",
                return_value={"tool": "ruff", "passed": False, "issues": issues}):
-        _run_lint_check(pcp_dir, tmp_path, ["file.py"], CTX)
+        _run_lint_check(pcp_dir, tmp_path, ["file.py"], CTX, _BuildBudget(10))
 
     rec = _last_qa_record(pcp_dir)
     stored = (pcp_dir / rec["evidence_path"]).read_text()
@@ -73,7 +99,7 @@ def test_sast_check_stores_full_findings_beyond_console_cap(tmp_path):
     findings = [f"finding {i}" for i in range(30)]
     with patch("pcp.commands.build.qa.run_sast",
                return_value={"tool": "semgrep", "passed": False, "findings": findings}):
-        _run_sast_check(pcp_dir, tmp_path, ["file.py"], CTX)
+        _run_sast_check(pcp_dir, tmp_path, ["file.py"], CTX, _BuildBudget(10))
 
     rec = _last_qa_record(pcp_dir)
     stored = (pcp_dir / rec["evidence_path"]).read_text()

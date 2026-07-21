@@ -14,7 +14,10 @@ def test_run_pytest_passed_on_zero_exit(tmp_path):
             patch("pcp.qa.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="1 passed", stderr="")
         result = qa.run_test_suite(tmp_path)
-    assert result == {"tool": "pytest", "passed": True, "output": "1 passed"}
+    assert result["tool"] == "pytest"
+    assert result["passed"] is True
+    assert result["output"] == "1 passed"
+    assert result.get("scoped_to") is None  # PCP_QA_TEST_SELECTION not set -- full suite, unscoped
 
 
 def test_run_pytest_no_tests_collected_counts_as_passed(tmp_path):
@@ -131,3 +134,58 @@ def test_run_pytest_passes_overridden_timeout_to_subprocess(tmp_path, monkeypatc
         mock_run.return_value = MagicMock(returncode=0, stdout="1 passed", stderr="")
         qa.run_test_suite(tmp_path)
     assert mock_run.call_args.kwargs["timeout"] == 900
+
+
+def test_test_selection_enabled_reads_env_flag(monkeypatch):
+    monkeypatch.delenv("PCP_QA_TEST_SELECTION", raising=False)
+    assert qa.test_selection_enabled() is False
+    monkeypatch.setenv("PCP_QA_TEST_SELECTION", "impact")
+    assert qa.test_selection_enabled() is True
+
+
+def test_run_test_suite_ignores_selection_when_flag_unset(tmp_path, monkeypatch):
+    """Default behavior is unchanged -- full suite, no scoping -- unless the
+    flag is explicitly set. No silent behavior change for existing projects."""
+    monkeypatch.delenv("PCP_QA_TEST_SELECTION", raising=False)
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+            patch("pcp.qa.subprocess.run") as mock_run, \
+            patch("pcp.impact.blast_radius_test_paths") as mock_scope:
+        mock_run.return_value = MagicMock(returncode=0, stdout="5 passed", stderr="")
+        qa.run_test_suite(tmp_path, pcp_dir=tmp_path / ".pcp", changed_files=["src/x.py"])
+    mock_scope.assert_not_called()
+    assert mock_run.call_args.args[0] == ["pytest", "-q"]
+
+
+def test_run_test_suite_scopes_pytest_args_when_enabled_and_paths_found(tmp_path, monkeypatch):
+    monkeypatch.setenv("PCP_QA_TEST_SELECTION", "impact")
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+            patch("pcp.qa.subprocess.run") as mock_run, \
+            patch("pcp.impact.blast_radius_test_paths", return_value=["tests/test_x.py"]):
+        mock_run.return_value = MagicMock(returncode=0, stdout="1 passed", stderr="")
+        result = qa.run_test_suite(tmp_path, pcp_dir=tmp_path / ".pcp", changed_files=["src/x.py"])
+    assert mock_run.call_args.args[0] == ["pytest", "-q", "tests/test_x.py"]
+    assert result["scoped_to"] == ["tests/test_x.py"]
+
+
+def test_run_test_suite_falls_back_to_full_when_scoping_returns_none(tmp_path, monkeypatch):
+    """impact.py returning None means it couldn't confidently narrow the
+    scope -- must run the full suite, never silently run zero tests."""
+    monkeypatch.setenv("PCP_QA_TEST_SELECTION", "impact")
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+            patch("pcp.qa.subprocess.run") as mock_run, \
+            patch("pcp.impact.blast_radius_test_paths", return_value=None):
+        mock_run.return_value = MagicMock(returncode=0, stdout="5 passed", stderr="")
+        result = qa.run_test_suite(tmp_path, pcp_dir=tmp_path / ".pcp", changed_files=["src/x.py"])
+    assert mock_run.call_args.args[0] == ["pytest", "-q"]
+    assert result.get("scoped_to") is None
+
+
+def test_run_test_suite_falls_back_to_full_when_scoping_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("PCP_QA_TEST_SELECTION", "impact")
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+            patch("pcp.qa.subprocess.run") as mock_run, \
+            patch("pcp.impact.blast_radius_test_paths", side_effect=RuntimeError("boom")):
+        mock_run.return_value = MagicMock(returncode=0, stdout="5 passed", stderr="")
+        result = qa.run_test_suite(tmp_path, pcp_dir=tmp_path / ".pcp", changed_files=["src/x.py"])
+    assert mock_run.call_args.args[0] == ["pytest", "-q"]
+    assert result.get("scoped_to") is None

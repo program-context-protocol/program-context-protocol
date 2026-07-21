@@ -50,18 +50,22 @@ def _timeout_sast() -> int:
     return int(os.environ.get("PCP_QA_SAST_TIMEOUT_SEC", "120"))
 
 
-def _run_pytest(project_root: Path) -> dict | None:
+def _run_pytest(project_root: Path, test_paths: list[str] | None = None) -> dict | None:
     if not shutil.which("pytest"):
         return None
+    args = ["pytest", "-q", *(test_paths or [])]
     try:
         result = subprocess.run(
-            ["pytest", "-q"], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
+            args, capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
     except subprocess.TimeoutExpired:
         return {"tool": "pytest", "passed": False, "output": "timed out"}
     # Exit code 5 = no tests collected yet — not a failure, just nothing to run.
     passed = result.returncode == 0 or result.returncode == 5
-    return {"tool": "pytest", "passed": passed, "output": (result.stdout + result.stderr)[-3000:]}
+    return {
+        "tool": "pytest", "passed": passed, "output": (result.stdout + result.stderr)[-3000:],
+        "scoped_to": test_paths or None,
+    }
 
 
 def _run_npm_test(project_root: Path) -> dict | None:
@@ -95,9 +99,37 @@ def _run_go_test(project_root: Path) -> dict | None:
     return {"tool": "go test", "passed": result.returncode == 0, "output": (result.stdout + result.stderr)[-3000:]}
 
 
-def run_test_suite(project_root: Path) -> dict:
-    """Full regression suite — project-wide, not scoped to changed files, so it
-    catches regressions outside the files this criterion touched."""
+def test_selection_enabled() -> bool:
+    return os.environ.get("PCP_QA_TEST_SELECTION") == "impact"
+
+
+def run_test_suite(project_root: Path, pcp_dir: Path | None = None, changed_files: list[str] | None = None) -> dict:
+    """Full regression suite by default — project-wide, not scoped to
+    changed files, so it catches regressions outside the files this
+    criterion touched.
+
+    When PCP_QA_TEST_SELECTION=impact and pcp_dir/changed_files are given,
+    scopes pytest to the modules impacted by the change (see impact.py:
+    the changed module(s) plus every module that transitively depends on
+    them, via the same dependency graph coupling.py already trusts for
+    coupling_score — not a separate ad hoc mechanism). Only pytest
+    supports scoping today; npm/go test always run in full regardless of
+    this flag, an honest scope limit, not a silent gap. Falls back to the
+    full suite whenever impact.py can't confidently narrow the scope —
+    never silently runs zero tests."""
+    test_paths = None
+    if test_selection_enabled() and pcp_dir is not None and changed_files:
+        from pcp.impact import blast_radius_test_paths
+        try:
+            test_paths = blast_radius_test_paths(pcp_dir, project_root, changed_files)
+        except Exception:
+            test_paths = None  # scoping failed -- fall back to the full suite, don't propagate
+
+    if test_paths and shutil.which("pytest"):
+        out = _run_pytest(project_root, test_paths)
+        if out is not None:
+            return out
+
     for runner in (_run_pytest, _run_npm_test, _run_go_test):
         out = runner(project_root)
         if out is not None:
@@ -111,9 +143,17 @@ def _run_ruff(project_root: Path, changed_files: list[str]) -> dict | None:
     py_files = [f for f in changed_files if f.endswith(".py")]
     if not py_files:
         return {"tool": "ruff", "passed": True, "issues": []}
-    result = subprocess.run(
-        ["ruff", "check", *py_files], capture_output=True, text=True, cwd=project_root, timeout=_timeout_lint(),
-    )
+    try:
+        result = subprocess.run(
+            ["ruff", "check", *py_files], capture_output=True, text=True, cwd=project_root, timeout=_timeout_lint(),
+        )
+    except subprocess.TimeoutExpired:
+        return {"tool": "ruff", "passed": True, "issues": [], "skipped": "timed out"}
+    except Exception as e:
+        # Previously uncaught -- a ruff crash/misconfig took down the whole
+        # gate-evaluation thread instead of degrading to a skip, worse than
+        # the silent-skip failure mode this is meant to guard against.
+        return {"tool": "ruff", "passed": True, "issues": [], "skipped": str(e)}
     issues = [l for l in result.stdout.splitlines() if l.strip()]
     return {"tool": "ruff", "passed": result.returncode == 0, "issues": issues}
 
@@ -125,9 +165,14 @@ def _run_eslint(project_root: Path, changed_files: list[str]) -> dict | None:
     js_files = [f for f in changed_files if f.endswith((".js", ".jsx", ".ts", ".tsx"))]
     if not js_files:
         return {"tool": "eslint", "passed": True, "issues": []}
-    result = subprocess.run(
-        [str(eslint_bin), *js_files], capture_output=True, text=True, cwd=project_root, timeout=_timeout_lint(),
-    )
+    try:
+        result = subprocess.run(
+            [str(eslint_bin), *js_files], capture_output=True, text=True, cwd=project_root, timeout=_timeout_lint(),
+        )
+    except subprocess.TimeoutExpired:
+        return {"tool": "eslint", "passed": True, "issues": [], "skipped": "timed out"}
+    except Exception as e:
+        return {"tool": "eslint", "passed": True, "issues": [], "skipped": str(e)}
     issues = [l for l in result.stdout.splitlines() if l.strip()]
     return {"tool": "eslint", "passed": result.returncode == 0, "issues": issues}
 
