@@ -36,6 +36,7 @@ from pcp.commands.prune import prune
 from pcp.commands.escalations_cmd import escalations_cmd
 from pcp.commands.pressure_test_cmd import pressure_test_cmd
 from pcp.commands.control_audit_cmd import control_audit_cmd
+from pcp.commands.run_log_cmd import run_log_cli
 
 
 @click.group()
@@ -82,3 +83,4 @@ cli.add_command(prune)
 cli.add_command(escalations_cmd)
 cli.add_command(pressure_test_cmd)
 cli.add_command(control_audit_cmd)
+cli.add_command(run_log_cli, name="run-log")
