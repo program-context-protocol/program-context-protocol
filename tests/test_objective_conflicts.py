@@ -6,15 +6,33 @@ build`'s hard-block preflight, `pcp objective-conflicts`, and `pcp
 correct-objective`'s propose-diff-approve-write flow.
 """
 
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
 from pcp.cli import cli
 from pcp import capture, objective_conflicts
+
+
+@pytest.fixture(autouse=True)
+def _claude_bin_stub(monkeypatch):
+    """`pcp build`'s check_environment() fatally requires a resolvable
+    `claude` binary before this gate (or anything else in build()) runs --
+    real on a dev machine with the CLI installed, absent on CI. None of
+    this file's `cli, ["build", ...]` tests exercise the real agent
+    subprocess (they either hard-block on the conflict gate, exit early on
+    "no modules found", or patch find_transcript_for_session/run_capture
+    directly) -- they just need detection to resolve to *something*
+    executable. shutil.which("true") -- not a hardcoded /bin/true -- since
+    that binary lives at /usr/bin/true on macOS and /bin/true on Linux CI;
+    a hardcoded path silently passes on one platform and fails on the
+    other, exactly the class of bug this fixture exists to close."""
+    monkeypatch.setenv("PCP_CLAUDE_BIN", shutil.which("true"))
 
 
 def _pcp_dir(tmp_path) -> Path:
