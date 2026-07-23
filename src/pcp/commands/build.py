@@ -22,6 +22,7 @@ from pcp import decision_log
 from pcp import integrity_audit
 from pcp import librarian
 from pcp import objective_conflicts
+from pcp import run_log
 from pcp import telemetry
 from pcp import qa
 from pcp import evidence
@@ -2774,6 +2775,20 @@ def _build_one_criterion(
     # measured against this ref, so committing can't hide work from gates.
     criterion_start_ref = _git_head(project_root)
 
+    # run_log bracket — pre/post audit entry, actor="pcp-build-agent" so this
+    # is queryable as real pipeline work, distinct from manual/interactive
+    # runs bracketed via `pcp run-log`. Never blocks a real build on failure.
+    run_log_id = None
+    run_log_tokens = {"input": 0, "output": 0, "cache_read": 0, "cost": 0.0}
+    run_log_last_checks: list[str] = []
+    try:
+        run_log_id = run_log.start_run(
+            pcp_dir, module=mod["name"], feature=f"{c['id']}: {c.get('description', '')}",
+            run_type="dev", actor="pcp-build-agent", model=build_model,
+        )
+    except Exception as e:
+        console.print(f"[dim]run-log start skipped: {e}[/dim]")
+
     # Complexity routing (report-first; see _complexity_route). Never
     # overrides an explicit human PCP_BUILD_MODEL.
     route_up, route_signal = _complexity_route(pcp_dir, mod, c)
@@ -2906,6 +2921,11 @@ def _build_one_criterion(
                 "cost_usd": envelope.get("total_cost_usd"),
                 "duration_ms": envelope.get("duration_ms"),
             }
+            _u = envelope.get("usage", {})
+            run_log_tokens["input"] += _u.get("input_tokens", 0) + _u.get("cache_creation_input_tokens", 0)
+            run_log_tokens["output"] += _u.get("output_tokens", 0)
+            run_log_tokens["cache_read"] += _u.get("cache_read_input_tokens", 0)
+            run_log_tokens["cost"] += envelope.get("total_cost_usd") or 0
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -2991,6 +3011,7 @@ def _build_one_criterion(
         with ThreadPoolExecutor(max_workers=len(gate_calls)) as pool:
             futures = {name: pool.submit(fn) for name, fn in gate_calls.items()}
             gate_results = {name: f.result() for name, f in futures.items()}
+        run_log_last_checks = list(gate_calls.keys())
 
         test_timed_out = any("timed out" in v.lower() for v in gate_results["tests"])
         if budget.record_test_timeout_signal(test_timed_out):
@@ -3029,8 +3050,32 @@ def _build_one_criterion(
             )
         else:
             success = True
-            _auto_commit_criterion(project_root, mod["name"], c)
             break
+
+    # Unconditional — pass or fail. A criterion that exhausts all 3 attempts
+    # still leaves its worktree "for inspection" (never merged to main; only
+    # a successful criterion gets merged), but real agent work must not sit
+    # as raw uncommitted files that a stale worktree removal could lose —
+    # the exact ontology-foundry web-server-A013/14/15 pattern, 2026-07-23.
+    _auto_commit_criterion(project_root, mod["name"], c)
+
+    if run_log_id:
+        try:
+            entry = run_log.end_run(
+                pcp_dir, run_log_id, result="success" if success else "failure",
+                model=build_model,
+                token_input=run_log_tokens["input"], token_output=run_log_tokens["output"],
+                token_cache_read=run_log_tokens["cache_read"], cost_usd=run_log_tokens["cost"],
+                tests_ran="tests" in run_log_last_checks,
+                tests_passed=(success if "tests" in run_log_last_checks else None),
+                real_gates_passed=[k for k in run_log_last_checks if k in run_log._DETERMINISTIC_CHECKS],
+                llm_judged_gates_passed=[k for k in run_log_last_checks if k in run_log._LLM_JUDGED_CHECKS],
+                self_reported_usage=False,
+            )
+            if entry["anomaly_flags"]:
+                console.print(f"[yellow]run-log anomalies ({mod['name']}/{c['id']}):[/yellow] " + "; ".join(entry["anomaly_flags"]))
+        except Exception as e:
+            console.print(f"[dim]run-log end skipped: {e}[/dim]")
 
     return success, block_findings
 
