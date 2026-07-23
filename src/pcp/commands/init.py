@@ -456,6 +456,15 @@ controls:
     enforcement: hard_block
     description: "When priorart already confirms an existing package is a direct match for a criterion (or whole module), running the full TDD/architect-review/LLM-gate cycle just to write a thin wrapper around an install is pure waste. This fast path skips the coding-agent session entirely -- but never skips verification: a human must confirm the match (install_approvals.yaml, hash-chained like bypass_log.yaml), and the install still has to pass a real smoke test (Layer 1 + full regression suite) before the criterion is marked complete. A decline or a failed smoke test falls through to the normal full build path, never a silent skip."
     ssdf_practice: ["PW.4.1", "PW.7.2"]
+
+  - id: CTRL-035
+    name: "Objective-conflict gate"
+    layer: build-loop
+    mechanism: "objective_conflicts.reconcile() -- build.py's first preflight step, before any module/agent work starts. An active brd_items.yaml entry with a live drift_flag (set by capture.py's classifier when a captured business item conflicts with objective.md's text) is stamped with a SHA-256 hash of objective.md+target_state.md's content at flag time. If current content still matches that hash, the conflict is unresolved and blocks. If the hash no longer matches, the file was actually edited since the flag was raised -- auto-clears deterministically."
+    tool: "n/a (deterministic hash check; flagging itself is Haiku-classified in capture.py)"
+    enforcement: hard_block
+    description: "2026-07-22 incident, ontology-foundry dogfood: a business objective correction was discussed and agreed, objective.md/target_state.md never got rewritten to match, and a 30+-agent build cycle two days later built exactly the rejected shape end-to-end -- every other gate passed, because every gate validates the build against objective.md as given, never against whether objective.md is still true. `pcp objective-conflicts` lists/dismisses flags; `pcp correct-objective` is the human-gated resolution path (LLM proposes an objective.md/target_state.md rewrite from the stated correction, human approves the real diff, then it's written -- same pattern pcp kickoff/pm already use for module specs). `pcp build` also self-captures its own live session (CLAUDE_CODE_SESSION_ID) before this gate even runs, so a correction discussed in the same still-open session that authorizes the build gets a chance to be caught."
+    ssdf_practice: ["PW.1.1", "PW.4.1"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\
@@ -815,6 +824,37 @@ PCP_CLAUDE_BLOCK_BODY = """\
 This project uses PCP (Program Context Protocol). Every session — new or
 resumed — is governed by `.pcp/`. Read the relevant files before acting;
 do not restate or duplicate their content here.
+
+## There is one track, not two
+
+There is no "just chatting" mode separate from "the PCP track" in this
+project. Whether the human is describing a bug, debating architecture,
+correcting scope, or typing `/pcp` explicitly — you are the PCP PM for this
+conversation, always, by default. A business-level statement made in casual
+conversation is exactly as real as one made inside a formal PM workflow; it
+does not become governed only once someone remembers to invoke a skill.
+
+Concretely, in any conversation on this project:
+- If something stated changes what should be built (scope, priority, a
+  correction to prior direction) — even said in passing — that is a PM-track
+  event. Reflect it into `.pcp/` in the same turn, don't defer it: run
+  `pcp capture` against the live session (or note the item directly) so it
+  lands in `brd_items.yaml`/`decision_log.jsonl`.
+- If it contradicts `.pcp/objective.md` or `target_state.md`'s actual text,
+  say so plainly and either run `pcp correct-objective "<correction>"` (human
+  approves the real diff) right then, or explicitly tell the human the spec
+  is now stale and must be corrected before you treat any later "go ahead"
+  as build authorization. Never let a stale objective sit undetected while
+  the conversation moves on to something else — see `pcp objective-conflicts`
+  (CTRL-035; also enforced as a hard block inside `pcp build` itself).
+- Do not wait for an explicit `/pcp` invocation to apply this — it is the
+  default posture for every conversation in a PCP-managed project, not an
+  opt-in mode.
+
+(2026-07-22 incident: a business correction was discussed and agreed, nothing
+in that conversation treated it as PM-track, `objective.md` was never
+rewritten, and a full build cycle two days later built exactly the rejected
+thing. This section exists because that gap was real, not hypothetical.)
 
 ## Read first, every session
 

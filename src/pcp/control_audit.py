@@ -121,3 +121,39 @@ def write_control_audit(pcp_dir: Path) -> dict:
     audit = build_control_audit(pcp_dir)
     (pcp_dir / "control_audit.md").write_text(render_markdown(audit))
     return audit
+
+
+def sync_catalog(pcp_dir: Path) -> list[str]:
+    """Additive-only merge of the CURRENT package's control catalog into a
+    project's existing controls.yaml. Real gap found 2026-07-22 auditing
+    ontology-foundry: `controls.yaml` is scaffolded once at `pcp init` and
+    never refreshed as the `pcp` package adds new controls over time -- one
+    project had 23 distinct control_ids firing in telemetry.jsonl against a
+    10-entry catalog, invisible to `pcp control-audit`/`pcp provenance`
+    entirely. `pcp init --force` would fix this but also blindly overwrites
+    objective.md/architecture.md/every other scaffolded file in the same
+    pass -- far too destructive just to refresh a catalog. This only ever
+    APPENDS entries whose id isn't already present; never rewrites, reorders,
+    or removes an existing entry (a project may have hand-edited descriptions
+    or removed a control deliberately -- this must not silently undo that).
+    Returns the list of newly-added control ids; [] if the project's catalog
+    is already current or has no controls.yaml at all (use `pcp init` to
+    create one from scratch instead)."""
+    from pcp.commands.init import CONTROLS_TEMPLATE
+
+    path = pcp_dir / "controls.yaml"
+    if not path.exists():
+        return []
+
+    template_controls = (yaml.safe_load(CONTROLS_TEMPLATE) or {}).get("controls", [])
+    existing = _load_controls(pcp_dir)
+    existing_ids = {c["id"] for c in existing}
+
+    added = [c for c in template_controls if c["id"] not in existing_ids]
+    if not added:
+        return []
+
+    data = yaml.safe_load(path.read_text()) or {}
+    data["controls"] = existing + added
+    path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+    return [c["id"] for c in added]

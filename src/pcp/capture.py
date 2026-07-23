@@ -22,6 +22,7 @@ from pathlib import Path
 import yaml
 
 from pcp import decision_log
+from pcp import objective_conflicts
 from pcp import telemetry
 from pcp.llm import client as llm
 
@@ -197,6 +198,7 @@ def apply_business_items(pcp_dir: Path, items: list[dict], source: str) -> Path:
             by_id[supersedes]["status"] = "superseded"
             by_id[supersedes]["superseded_by"] = new_id
             by_id[supersedes]["last_updated"] = now
+        drift_flag = item.get("drift_flag")
         new_entry = {
             "id": new_id,
             "description": item["description"],
@@ -205,7 +207,12 @@ def apply_business_items(pcp_dir: Path, items: list[dict], source: str) -> Path:
             "first_seen": now,
             "last_updated": now,
             "source": source,
-            "drift_flag": item.get("drift_flag"),
+            "drift_flag": drift_flag,
+            # Stamped only when flagged -- this is the "proof of edit" hash
+            # `pcp build`'s objective-conflict gate compares against
+            # objective.md/target_state.md's current content. See
+            # objective_conflicts.py for why this exists.
+            "objective_hash_at_flag": objective_conflicts.objective_hash(pcp_dir) if drift_flag else None,
         }
         existing.append(new_entry)
         by_id[new_id] = new_entry

@@ -23,3 +23,21 @@ def _isolate_agent_depth_env():
         os.environ["PCP_AGENT_DEPTH"] = saved_depth
     if saved_max is not None:
         os.environ["PCP_MAX_AGENT_DEPTH"] = saved_max
+
+
+@pytest.fixture(autouse=True)
+def _isolate_claude_session_id_env():
+    """`pcp build` self-captures CLAUDE_CODE_SESSION_ID's live transcript as a
+    preflight step (see objective_conflicts.py / CTRL-035). Running the test
+    suite from inside an actual Claude Code session (as opposed to CI) means
+    this var is genuinely set in the real process env -- without stripping it,
+    any test that invokes `pcp build` via CliRunner would trigger a REAL
+    transcript lookup + a REAL LLM classification call against THIS session's
+    own conversation, making the suite non-deterministic, slow, and costly.
+    Tests that specifically want to exercise self-capture set this back via
+    monkeypatch.setenv, which self-cleans per-test regardless of this baseline."""
+    saved = os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+    yield
+    os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+    if saved is not None:
+        os.environ["CLAUDE_CODE_SESSION_ID"] = saved

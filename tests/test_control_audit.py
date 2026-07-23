@@ -126,3 +126,67 @@ def test_cli_errors_without_pcp_dir(tmp_path):
     runner = CliRunner()
     result = runner.invoke(cli, ["control-audit", "--path", str(tmp_path)])
     assert result.exit_code == 2
+
+
+# ── --sync: additive-only catalog refresh (2026-07-22) ──
+
+def test_sync_catalog_appends_missing_ids_only(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_controls(pcp_dir, [_control("CTRL-001", name="Test suite must pass")])
+    added = control_audit.sync_catalog(pcp_dir)
+    assert "CTRL-002" in added
+    assert "CTRL-035" in added
+    assert "CTRL-001" not in added  # already present, never touched
+
+    data = yaml.safe_load((pcp_dir / "controls.yaml").read_text())
+    ids = [c["id"] for c in data["controls"]]
+    assert len(ids) == len(set(ids))  # no duplicates
+    assert "CTRL-035" in ids
+
+
+def test_sync_catalog_never_rewrites_existing_entry(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_controls(pcp_dir, [_control("CTRL-001", name="Hand-edited custom name", enforcement="advisory")])
+    control_audit.sync_catalog(pcp_dir)
+    data = yaml.safe_load((pcp_dir / "controls.yaml").read_text())
+    c001 = next(c for c in data["controls"] if c["id"] == "CTRL-001")
+    assert c001["name"] == "Hand-edited custom name"
+    assert c001["enforcement"] == "advisory"
+
+
+def test_sync_catalog_noop_when_already_current(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    from pcp.commands.init import CONTROLS_TEMPLATE
+    (pcp_dir / "controls.yaml").write_text(CONTROLS_TEMPLATE)
+    assert control_audit.sync_catalog(pcp_dir) == []
+
+
+def test_sync_catalog_noop_without_controls_file(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    assert control_audit.sync_catalog(pcp_dir) == []
+    assert not (pcp_dir / "controls.yaml").exists()
+
+
+def test_cli_sync_flag_reports_added_ids(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_controls(pcp_dir, [_control("CTRL-001")])
+    runner = CliRunner()
+    result = runner.invoke(cli, ["control-audit", "--path", str(tmp_path), "--sync"])
+    assert result.exit_code == 0
+    assert "CTRL-035" in result.output
+
+
+def test_cli_sync_flag_reports_noop_when_current(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    from pcp.commands.init import CONTROLS_TEMPLATE
+    (pcp_dir / "controls.yaml").write_text(CONTROLS_TEMPLATE)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["control-audit", "--path", str(tmp_path), "--sync"])
+    assert result.exit_code == 0
+    assert "already current" in result.output
