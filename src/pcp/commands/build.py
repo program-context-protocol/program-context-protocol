@@ -21,6 +21,7 @@ from pcp.pcp_status import write_pcp_md
 from pcp import decision_log
 from pcp import integrity_audit
 from pcp import librarian
+from pcp import objective_conflicts
 from pcp import telemetry
 from pcp import qa
 from pcp import evidence
@@ -354,6 +355,53 @@ def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | N
 def _cleanup_worktree(project_root: Path, module_name: str, wt_path: Path) -> None:
     subprocess.run(["git", "worktree", "remove", str(wt_path), "--force"], cwd=project_root, capture_output=True)
     subprocess.run(["git", "branch", "-D", f"feat/{module_name}"], cwd=project_root, capture_output=True)
+
+
+def _auto_commit_criterion(project_root: Path, module_name: str, criterion: dict) -> None:
+    """Safety net, not a replacement for the agent's own commit.
+    `_build_agent_prompt` deliberately leaves committing optional for the
+    agent (gates measure the working diff either way) — but Ganesh's global
+    Build Cycle rule treats commit as part of the same cycle as build, not a
+    separate step a human opts into later. Once a criterion has passed every
+    gate, commit whatever is still sitting uncommitted so real work doesn't
+    rot in a worktree if the run stops before the module finishes (the
+    2026-07-23 ontology-foundry web-server worktrees). No-op if the agent
+    already committed — working tree is already clean."""
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], capture_output=True, text=True, cwd=project_root,
+    )
+    if not status.stdout.strip():
+        return
+    subprocess.run(["git", "add", "-A"], cwd=project_root, capture_output=True)
+    message = f"{module_name}/{criterion['id']}: {criterion.get('description', '')}".strip()
+    result = subprocess.run(
+        ["git", "commit", "-m", message], cwd=project_root, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        console.print(f"[yellow]Auto-commit for {module_name}/{criterion['id']} failed:[/yellow] {result.stderr.strip()[:300]}")
+
+
+def _auto_push(project_root: Path) -> None:
+    """Step 3 of the global Build Cycle — push if a remote is configured,
+    skip silently otherwise (matches the rule's own "if the repo has a
+    remote configured" condition). Never force-pushes; a rejected push
+    (non-fast-forward, no upstream) is reported, not retried or escalated —
+    that's a real divergence a human should look at, not paper over."""
+    remote = subprocess.run(["git", "remote"], capture_output=True, text=True, cwd=project_root)
+    if not remote.stdout.strip():
+        return
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, cwd=project_root,
+    ).stdout.strip()
+    if not branch or branch == "HEAD":
+        return
+    result = subprocess.run(
+        ["git", "push", "origin", branch], cwd=project_root, capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        console.print(f"[dim]Pushed {branch} to origin.[/dim]")
+    else:
+        console.print(f"[yellow]Auto-push of {branch} failed — resolve manually:[/yellow] {result.stderr.strip()[:300]}")
 
 
 def _wave_record(pcp_dir: Path, wave_number: int, check: str, control_id: str, errors: list[str],
@@ -2683,6 +2731,7 @@ def _run_install_only(
 
     _qa_record(pcp_dir, ctx, "install-only", [], control_id="CTRL-034", tool="install", result="pass")
     console.print(f"[green]✓ Install-only fast path passed — {scope_label}[/green]")
+    _auto_commit_criterion(project_root, mod["name"], criterion or {"id": "MODULE", "description": candidate_desc})
     return True, []
 
 
@@ -2980,6 +3029,7 @@ def _build_one_criterion(
             )
         else:
             success = True
+            _auto_commit_criterion(project_root, mod["name"], c)
             break
 
     return success, block_findings
@@ -3170,6 +3220,54 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
     from pcp.commands.doctor import check_environment
     check_environment(pcp_dir)
 
+    # Self-capture the CALLING session before the objective-conflict gate below
+    # even looks at brd_items.yaml. Real incident, 2026-07-22: a correction was
+    # discussed and "go ahead" given in the SAME still-open Claude Code session
+    # -- `pcp capture` is normally wired to a SessionEnd hook, which never fires
+    # until the session ends, so the correction never got classified at all and
+    # the gate below would have found zero conflicts to block on. This makes
+    # `pcp build` capture its own live, still-open session -- deterministic,
+    # not dependent on a skill/orchestrator remembering to call `pcp capture`
+    # itself. Advisory, never blocks: any failure here must not stop a build
+    # that has nothing to do with capture working.
+    _self_session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if _self_session_id:
+        try:
+            _self_transcript = find_transcript_for_session(_self_session_id)
+            if _self_transcript:
+                console.print("[dim]Capturing current session for business/technical drift before build...[/dim]")
+                run_capture(pcp_dir, _self_transcript, source=f"session:{_self_session_id}", session_id=_self_session_id)
+        except Exception as e:
+            console.print(f"[dim]Self-capture skipped: {e}[/dim]")
+
+    # Objective-conflict gate (CTRL-035) -- a captured business decision that
+    # conflicts with objective.md/target_state.md's actual text must not sit
+    # silently in brd.md prose while a build cycle spends millions of tokens
+    # against the stale target. reconcile() also auto-clears any conflict
+    # whose flagged objective_hash no longer matches current file content --
+    # i.e. a human already made the edit -- so this only blocks on conflicts
+    # nobody has actually resolved yet. See objective_conflicts.py.
+    unresolved_conflicts = objective_conflicts.reconcile(pcp_dir)
+    if unresolved_conflicts:
+        telemetry.record(
+            pcp_dir, cycle="build", check="objective-conflict-gate", control_id="CTRL-035",
+            result="blocked", error_count=len(unresolved_conflicts),
+            errors=[c.get("id", "?") for c in unresolved_conflicts],
+        )
+        console.print("[bold red]Build blocked -- unresolved objective conflict(s):[/bold red]")
+        for c in unresolved_conflicts:
+            console.print(f"  [red]{c.get('id')}[/red]: {c.get('description')}")
+            console.print(f"    [dim]conflict: {c.get('drift_flag')}[/dim]")
+        console.print(
+            "\n[yellow]A captured business decision conflicts with objective.md/target_state.md.[/yellow] "
+            "Rewrite the spec by hand to reflect it (spec files stay human-only), or if this is a false "
+            "positive: [dim]pcp objective-conflicts --dismiss <ID> --reason \"...\"[/dim]"
+        )
+        sys.exit(2)
+    telemetry.record(
+        pcp_dir, cycle="build", check="objective-conflict-gate", control_id="CTRL-035", result="pass",
+    )
+
     modules_dir = get_modules_dir(pcp_dir)
     if not modules_dir.exists():
         console.print("[yellow]No modules found. Run `pcp kickoff` or `pcp init` first.[/yellow]")
@@ -3358,6 +3456,11 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
         elif num_waves > 1:
             console.print(f"[green]✓ Wave {wave_number} merge checks passed.[/green]")
 
+        # Step 3 of the global Build Cycle — push once this wave's merges are
+        # clean, not just at the very end, so completed work is safe on the
+        # remote even if a later wave fails.
+        _auto_push(project_root)
+
     console.print(
         f"\n[bold]Run total:[/bold] {budget.session_count} agent session(s), "
         f"~${budget.run_cost_total:.2f} (build-agent only — see .pcp/token_ledger.yaml for judge-call spend too)"
@@ -3379,3 +3482,30 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
         )
     except Exception as e:
         console.print(f"[dim]Telemetry summary skipped: {e}[/dim]")
+
+    # Step 4+ of the global Build Cycle — the cycle isn't done at "committed
+    # and pushed," it's done when the product is actually running. `pcp
+    # deploy` already owns the checklist/gate/mandatory-approval/smoke-test
+    # machinery (irreversible production action — human approval stays
+    # mandatory, `--yes` still opts out for CI, unaffected by this build
+    # run's own --yes which only ever covered the install-only prompt). This
+    # just stops deploy from being a separate step a human has to remember
+    # to run — every successful build run surfaces the approval prompt
+    # itself. No-op (never blocks a successful build) if no deploy command
+    # is configured yet, or if this session has no attached terminal (a
+    # blocking confirm() prompt would just hang a headless/CI run — those
+    # cases still need an explicit `pcp deploy` call).
+    from pcp.commands.doctor import load_integrations
+    from pcp.commands.deploy import deploy as deploy_cmd
+    deploy_command = (load_integrations(pcp_dir).get("deploy") or {}).get("command")
+    if deploy_command and sys.stdin.isatty():
+        console.print("\n[bold]Build cycle complete — running deploy checklist...[/bold]")
+        try:
+            deploy_cmd.callback(project_path=str(project_root), yes=False, rollout="100")
+        except SystemExit as e:
+            if e.code:
+                console.print(f"[dim]Deploy step exited ({e.code}) — the build itself still succeeded.[/dim]")
+    elif deploy_command:
+        console.print("[dim]Deploy configured but this session has no attached terminal — run `pcp deploy` manually to ship this.[/dim]")
+    else:
+        console.print("[dim]No deploy command configured — run `pcp doctor` then `pcp deploy` to ship this.[/dim]")
