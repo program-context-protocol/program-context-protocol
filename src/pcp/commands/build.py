@@ -21,6 +21,7 @@ from pcp.pcp_status import write_pcp_md
 from pcp import decision_log
 from pcp import integrity_audit
 from pcp import librarian
+from pcp import narrative_lint
 from pcp import objective_conflicts
 from pcp import run_log
 from pcp import telemetry
@@ -642,6 +643,12 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     # 13.5. ci_rules.yaml contract completeness (CTRL-033, advisory,
     # project-wide, not per-module).
     _run_wave_contract_completeness_check(pcp_dir, wave_number)
+
+    # 13.6. Narrative lint (CTRL-036, advisory, project-wide) — CLAUDE.md-
+    # family narrative prose vs. tracked state (current_state.md/
+    # architecture.md). Costs one Haiku call only when a status-shaped line
+    # exists to check.
+    _run_wave_narrative_lint_check(pcp_dir, wave_number)
 
     # 14. Integrity Auditor (CTRL-030, advisory) — retrospective statistical-
     # drift signals across ALL completed criteria so far: fast completions
@@ -2067,6 +2074,25 @@ def _run_wave_contract_completeness_check(pcp_dir: Path, wave_number: int) -> li
                  files=["ci_rules.yaml"], result="pass")
     for f in findings:
         console.print(f"[yellow]Contract completeness (advisory):[/yellow] {f}")
+    return findings
+
+
+def _run_wave_narrative_lint_check(pcp_dir: Path, wave_number: int) -> list[str]:
+    """CTRL-036, ADVISORY, project-wide (not per-module — CLAUDE.md-family
+    files aren't scoped to one module). See narrative_lint.py's module
+    docstring for the fleet evidence (2026-07-24 context-hygiene pass):
+    narrative prose in CLAUDE.md drifted from tracked state 3-for-3 in
+    projects checked, undetected by every other gate in this catalog
+    because they all validate code against spec, never free-text prose
+    against current_state.md/architecture.md. Deterministic sub-checks
+    (stale dates, missing referenced files) plus one batched judge call
+    for semantic contradiction — same rung-6 posture as CTRL-020."""
+    result = narrative_lint.run(pcp_dir)
+    findings = result["stale_dates"] + result["missing_files"] + result["contradictions"]
+    _wave_record(pcp_dir, wave_number, "narrative-lint", "CTRL-036", findings,
+                 files=result["files_scanned"], result="pass")
+    for f in findings:
+        console.print(f"[yellow]Narrative lint (advisory):[/yellow] {f}")
     return findings
 
 

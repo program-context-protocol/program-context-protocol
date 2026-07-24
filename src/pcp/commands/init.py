@@ -465,6 +465,15 @@ controls:
     enforcement: hard_block
     description: "2026-07-22 incident, ontology-foundry dogfood: a business objective correction was discussed and agreed, objective.md/target_state.md never got rewritten to match, and a 30+-agent build cycle two days later built exactly the rejected shape end-to-end -- every other gate passed, because every gate validates the build against objective.md as given, never against whether objective.md is still true. `pcp objective-conflicts` lists/dismisses flags; `pcp correct-objective` is the human-gated resolution path (LLM proposes an objective.md/target_state.md rewrite from the stated correction, human approves the real diff, then it's written -- same pattern pcp kickoff/pm already use for module specs). `pcp build` also self-captures its own live session (CLAUDE_CODE_SESSION_ID) before this gate even runs, so a correction discussed in the same still-open session that authorizes the build gets a chance to be caught."
     ssdf_practice: ["PW.1.1", "PW.4.1"]
+
+  - id: CTRL-036
+    name: "Narrative lint (CLAUDE.md vs tracked state)"
+    layer: wave-merge
+    mechanism: "narrative_lint.py run() -- deterministic stale-dated-reference and missing-referenced-file scan of every CLAUDE.md-family file, plus ONE batched judge call comparing status-shaped narrative lines (Pending/Open Decision/Planned/etc.) against current_state.md+architecture.md for semantic contradiction"
+    tool: "judge model (JUDGE_MODEL, contradiction check only; the two file-scan sub-checks are deterministic)"
+    enforcement: advisory
+    description: "2026-07-24 fleet evidence: a context-hygiene pass across 4 projects (Event-Manager, win2mac, agentberg, atacamaMDM) found narrative prose in CLAUDE.md -- stage descriptions, 'Open Decisions,' 'Pending' lists -- drifted from tracked state 3-for-3 in projects checked (largest: ~65 lines of dead launch-weekend content still live 7 weeks post-launch, undetected). Nothing in PCP's existing gate catalog checks free-text prose against current_state.md/architecture.md -- every other gate validates code against spec. Deterministic sub-checks port `~/.claude/scripts/session-hygiene-check.sh`'s mechanical checks into PCP's own enforcement lifecycle (telemetry, not just a SessionStart print); the semantic contradiction check is the one irreducibly judgment-shaped part, same rung-6 posture as CTRL-020's rung-necessity check -- one batched call, advisory, fails open. Standalone via `pcp narrative-lint`; also runs at every wave-merge boundary."
+    ssdf_practice: ["PW.1.1"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\
