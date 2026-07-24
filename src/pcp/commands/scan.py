@@ -180,6 +180,7 @@ def _scan_module(
             "check": c.get("check", "manual"),
             "status": status,
             "detail": detail,
+            "verified_by": c.get("verified_by"),
         })
 
     return {"module": module_name, "criteria": results}
@@ -209,7 +210,10 @@ def _write_current_state(pcp_dir: Path, modules_results: list[dict], timestamp: 
         for c in m["criteria"]:
             mark = "x" if c["status"] == "complete" else " "
             key = f"{m['module'].upper()}/{c['id']}"
-            lines.append(f"- [{mark}] {key}: {c['description']}")
+            verified = f" [verified: {c['verified_by']}]" if c["status"] == "complete" and c.get("verified_by") else (
+                " [unverified — not marked complete by pcp build]" if c["status"] == "complete" else ""
+            )
+            lines.append(f"- [{mark}] {key}: {c['description']}{verified}")
             if c["detail"] and c["detail"] not in ("manual", ""):
                 lines.append(f"  > {c['detail']}")
 

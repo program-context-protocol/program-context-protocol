@@ -65,6 +65,11 @@
             "type": "string",
             "enum": ["pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"]
           },
+          "verified_by": {
+            "type": "string",
+            "enum": ["pcp_build", "pcp_build_install_only", "manual"],
+            "description": "Who/what flipped status to complete. Stamped automatically by build.py's _mark_criterion_complete -- the ONLY place this ever gets set by the real gated loop (full TDD/QA/architect-review cycle = pcp_build; install-only fast path, CTRL-034 = pcp_build_install_only). Absence on a complete criterion means it was hand-edited outside pcp build entirely -- never set that by hand, it would defeat the point."
+          },
           "logic_tier": {
             "type": "integer",
             "enum": [1, 2, 3, 4, 5, 6],

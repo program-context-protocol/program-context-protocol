@@ -423,6 +423,23 @@ def _wave_record(pcp_dir: Path, wave_number: int, check: str, control_id: str, e
     )
 
 
+def _write_progress(pcp_dir: Path, module: str, criterion_id: str, attempt: int, step: str) -> None:
+    """Live build progress (2026-07-24) -- .pcp/build_progress.yaml, read by
+    `pcp build-status`. A backgrounded/parallel-worktree build with no way
+    to see what's currently running is exactly what triggered a real
+    ontology-foundry incident (07-21: 'i want to see whats happening').
+    Advisory/UX only -- a write failure here must never fail a real build."""
+    try:
+        from datetime import datetime, timezone
+        data = {
+            "module": module, "criterion_id": criterion_id, "attempt": attempt, "step": step,
+            "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        (pcp_dir / "build_progress.yaml").write_text(yaml.dump(data, default_flow_style=False))
+    except Exception:
+        pass
+
+
 def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str, wave_number: int = 0) -> list[str]:
     """Per docs/greenfield.md Phase 4 — contract validation, full integration
     test suite, validate-strategy re-check, wave-level architect-review."""
@@ -2839,6 +2856,7 @@ def _build_one_criterion(
 
     for attempt in range(1, 4):
         console.print(f"\n[dim]Attempt {attempt}/3 — {mod['name']}/{c['id']}...[/dim]")
+        _write_progress(pcp_dir, mod["name"], c["id"], attempt, "coding")
 
         allowed, spend_reason = spend.check_ceiling(pcp_dir)
         if not allowed:
@@ -3013,6 +3031,7 @@ def _build_one_criterion(
         # (previously unguarded -- fine when only one gate call ever ran at
         # a time, a real race the moment more than one runs concurrently).
         console.print(f"[dim]Evaluating gates ({mod['name']}/{c['id']})...[/dim]")
+        _write_progress(pcp_dir, mod["name"], c["id"], attempt, "qa: evaluating gates")
         ctx = {
             "module": mod["name"], "submodule": None, "criterion_id": c["id"],
             "criterion_description": c.get("description", ""),
@@ -3106,17 +3125,26 @@ def _build_one_criterion(
     return success, block_findings
 
 
-def _mark_criterion_complete(mod: dict, criterion_id: str) -> None:
+def _mark_criterion_complete(mod: dict, criterion_id: str, verified_by: str = "pcp_build") -> None:
     """No cross-module contention (each module only ever touches its own
     acceptance.yaml), but still guarded for consistency — and, under
     criterion-level parallelism, this same file IS written by concurrent
     threads for different criteria in the same module, so the guard is load-
-    bearing there, not just defensive."""
+    bearing there, not just defensive.
+
+    `verified_by` (2026-07-24): the ONLY place a criterion's status ever
+    flips to complete through this real gated loop -- stamping it here is
+    what makes current_state.md/dashboard able to show "audited complete"
+    vs a hand-edited acceptance.yaml (which never touches this function, so
+    a manually-flipped criterion simply has no verified_by field at all).
+    Closes the "pcp build and a regular build say completed the same way"
+    gap named 2026-07-24."""
     with _STATE_LOCK:
         acc_data = load_yaml(mod["acc_path"])
         for crit in acc_data.get("criteria", []):
             if crit["id"] == criterion_id:
                 crit["status"] = "complete"
+                crit["verified_by"] = verified_by
         mod["acc_path"].write_text(yaml.dump(acc_data, default_flow_style=False))
 
 
@@ -3153,7 +3181,7 @@ def _build_module_worker(
             )
             if ok:
                 for c in mod["pending_criteria"]:
-                    _mark_criterion_complete(mod, c["id"])
+                    _mark_criterion_complete(mod, c["id"], verified_by="pcp_build_install_only")
                 console.print(f"\n[green]✓ Module '{mod['name']}' built successfully (install-only)![/green]")
                 return {"module": mod["name"], "success": True}
 
@@ -3165,9 +3193,11 @@ def _build_module_worker(
             if success:
                 console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
                 _mark_criterion_complete(mod, c["id"])
+                _write_progress(pcp_dir, mod["name"], c["id"], 0, "done")
             else:
                 console.print(f"[red]✗ Failed to build Criterion [{c['id']}] after 3 attempts.[/red]")
                 _record_escalation(pcp_dir, mod["name"], c["id"], block_findings)
+                _write_progress(pcp_dir, mod["name"], c["id"], 0, "failed")
                 return {"module": mod["name"], "success": False, "failed_criterion": c["id"], "block_findings": block_findings}
 
         console.print(f"\n[green]✓ Module '{mod['name']}' built successfully![/green]")
@@ -3192,9 +3222,11 @@ def _build_module_worker(
             if success:
                 console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
                 _mark_criterion_complete(mod, c["id"])
+                _write_progress(pcp_dir, mod["name"], c["id"], 0, "done")
             else:
                 console.print(f"[red]✗ Failed to build Criterion [{c['id']}] after 3 attempts.[/red]")
                 _record_escalation(pcp_dir, mod["name"], c["id"], block_findings)
+                _write_progress(pcp_dir, mod["name"], c["id"], 0, "failed")
                 return {"module": mod["name"], "success": False, "failed_criterion": c["id"], "block_findings": block_findings}
             continue
 
@@ -3236,6 +3268,7 @@ def _build_module_worker(
                     _cleanup_worktree(project_root, units[cid], worktrees[cid])
                     console.print(f"[green]✓ Criterion [{cid}] passed all gates successfully![/green]")
                     _mark_criterion_complete(mod, cid)
+                    _write_progress(pcp_dir, mod["name"], cid, 0, "done")
                 else:
                     any_failed, failed_id = True, cid
                     console.print(f"[red]✗ Merge conflict bringing criterion '{cid}' back into '{mod['name']}':[/red]\n{merge_output}")
@@ -3287,6 +3320,9 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
     except NoPCPDir as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(2)
+
+    from datetime import datetime, timezone
+    _build_start_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     from pcp.commands.doctor import check_environment
     check_environment(pcp_dir)
@@ -3531,6 +3567,18 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
         # clean, not just at the very end, so completed work is safe on the
         # remote even if a later wave fails.
         _auto_push(project_root)
+
+    # Build Cycle Report (2026-07-24) — the evidence pcp build already
+    # generates (run_log proof-of-delivery, .pcp/evidence/, telemetry.jsonl)
+    # gets handed to the human here instead of sitting in files nobody
+    # opens. Never fails the run — a report-writing bug must not fail a
+    # build that otherwise succeeded.
+    try:
+        from pcp import build_report
+        report_path = build_report.write(pcp_dir, _build_start_ts)
+        console.print(f"\n[bold]Build Cycle Report[/bold] → {report_path.relative_to(project_root)}")
+    except Exception as e:
+        console.print(f"[dim]Build report skipped: {e}[/dim]")
 
     console.print(
         f"\n[bold]Run total:[/bold] {budget.session_count} agent session(s), "

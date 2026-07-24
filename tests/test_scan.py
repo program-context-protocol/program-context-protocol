@@ -5,7 +5,10 @@ from unittest.mock import patch
 
 import pytest
 
-from pcp.commands.scan import _check_ast_pattern, _check_file_exists, _evaluate_criterion, _SOURCE_FILES_CACHE, _FILE_CONTENT_CACHE
+from pcp.commands.scan import (
+    _check_ast_pattern, _check_file_exists, _evaluate_criterion, _SOURCE_FILES_CACHE, _FILE_CONTENT_CACHE,
+    _scan_module, _write_current_state,
+)
 
 
 def _reset_caches():
@@ -152,3 +155,59 @@ def test_evaluate_criterion_visual_preserves_prior_status_when_playwright_missin
         status, detail = _evaluate_criterion(criterion, "mod", Path("."), {}, {}, tmp_path / ".pcp")
     assert status == "complete"
     assert "not installed" in detail
+
+
+# ── verified_by provenance (2026-07-24) ──
+
+def test_scan_module_propagates_verified_by(tmp_path):
+    import yaml
+    acc_path = tmp_path / "acceptance.yaml"
+    acc_path.write_text(yaml.dump({"criteria": [
+        {"id": "A001", "description": "x", "check": "manual", "status": "complete", "verified_by": "pcp_build"},
+    ]}))
+    result = _scan_module("mod", acc_path, tmp_path, {})
+    assert result["criteria"][0]["verified_by"] == "pcp_build"
+
+
+def test_scan_module_verified_by_absent_when_never_stamped(tmp_path):
+    import yaml
+    acc_path = tmp_path / "acceptance.yaml"
+    acc_path.write_text(yaml.dump({"criteria": [
+        {"id": "A001", "description": "x", "check": "manual", "status": "complete"},
+    ]}))
+    result = _scan_module("mod", acc_path, tmp_path, {})
+    assert result["criteria"][0]["verified_by"] is None
+
+
+def test_current_state_md_marks_verified_criterion(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    modules_results = [{"module": "mod", "criteria": [
+        {"id": "A001", "description": "x", "check": "manual", "status": "complete",
+         "detail": "manual", "verified_by": "pcp_build"},
+    ]}]
+    out_path = _write_current_state(pcp_dir, modules_results, "2026-07-24T00:00:00Z")
+    text = out_path.read_text()
+    assert "[verified: pcp_build]" in text
+
+
+def test_current_state_md_flags_unverified_completion(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    modules_results = [{"module": "mod", "criteria": [
+        {"id": "A001", "description": "x", "check": "manual", "status": "complete", "detail": "manual", "verified_by": None},
+    ]}]
+    out_path = _write_current_state(pcp_dir, modules_results, "2026-07-24T00:00:00Z")
+    text = out_path.read_text()
+    assert "unverified — not marked complete by pcp build" in text
+
+
+def test_current_state_md_pending_criterion_gets_no_verified_annotation(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    modules_results = [{"module": "mod", "criteria": [
+        {"id": "A001", "description": "x", "check": "manual", "status": "pending", "detail": "manual", "verified_by": None},
+    ]}]
+    out_path = _write_current_state(pcp_dir, modules_results, "2026-07-24T00:00:00Z")
+    text = out_path.read_text()
+    assert "verified" not in text

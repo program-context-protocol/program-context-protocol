@@ -9,6 +9,7 @@ only on git/claude (required for the lifecycle to function at all).
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,10 @@ from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 console = Console()
 
 REQUIRED_TOOLS = ["git", "claude"]
+
+DEFAULT_SCHEMA_BLOAT_THRESHOLD = 50
+DEFAULT_TEST_SCHEMA_PATTERN = "test_%"
+_SAFE_SCHEMA_PATTERN_RE = re.compile(r"^[A-Za-z0-9_%-]+$")
 
 DEPLOY_HINT_FILES = {
     "railway.toml": "railway up",
@@ -197,6 +202,74 @@ def _rung_tooling_recommendations(pcp_dir: Path, project_root: Path) -> list[str
     return recs
 
 
+def _postgres_url() -> str | None:
+    for var in ("DATABASE_URL", "POSTGRES_URL", "PG_DATABASE_URL", "TEST_DATABASE_URL"):
+        val = os.environ.get(var)
+        if val and "postgres" in val:
+            return val
+    return None
+
+
+def check_schema_bloat(threshold: int | None = None, pattern: str | None = None) -> dict | None:
+    """Postgres test-schema bloat preflight (2026-07-24, ontology-foundry
+    incident root cause): a schema-per-test pattern that never tears down
+    left 2000+ stray schemas, which correlated directly with pytest timeouts
+    under worktree-parallel builds -- looked like a `pcp build` stall from
+    the outside, was actually Postgres. Returns None (inert, never blocks)
+    if no postgres connection is configured or `psql` isn't on PATH -- pure
+    advisory detection, same warn-first posture every other doctor check
+    uses. Pattern is restricted to LIKE-safe characters (no quote-breakout)
+    since it's interpolated into a query string."""
+    url = _postgres_url()
+    if not url or not _which("psql"):
+        return None
+    threshold = threshold if threshold is not None else int(
+        os.environ.get("PCP_SCHEMA_BLOAT_THRESHOLD", DEFAULT_SCHEMA_BLOAT_THRESHOLD)
+    )
+    pattern = pattern or os.environ.get("PCP_TEST_SCHEMA_PATTERN", DEFAULT_TEST_SCHEMA_PATTERN)
+    if not _SAFE_SCHEMA_PATTERN_RE.match(pattern):
+        return None
+    query = f"SELECT count(*) FROM information_schema.schemata WHERE schema_name LIKE '{pattern}'"
+    try:
+        result = subprocess.run(["psql", url, "-tAc", query], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        count = int(result.stdout.strip())
+    except ValueError:
+        return None
+    return {"count": count, "pattern": pattern, "threshold": threshold, "bloated": count > threshold}
+
+
+def fix_schema_bloat(pattern: str) -> dict:
+    """Drops every schema matching `pattern` -- destructive, the CLI command
+    owns confirmation (never called on a bare `pcp doctor`). Returns
+    {"dropped": [...], "errors": [...]}."""
+    if not _SAFE_SCHEMA_PATTERN_RE.match(pattern):
+        return {"dropped": [], "errors": [f"unsafe pattern: {pattern!r}"]}
+    url = _postgres_url()
+    if not url or not _which("psql"):
+        return {"dropped": [], "errors": ["no postgres connection or psql binary detected"]}
+    list_query = f"SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE '{pattern}'"
+    result = subprocess.run(["psql", url, "-tAc", list_query], capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        return {"dropped": [], "errors": [result.stderr.strip()]}
+    schemas = [s.strip() for s in result.stdout.splitlines() if s.strip()]
+    dropped, errors = [], []
+    for s in schemas:
+        r = subprocess.run(
+            ["psql", url, "-c", f'DROP SCHEMA IF EXISTS "{s}" CASCADE'],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0:
+            dropped.append(s)
+        else:
+            errors.append(f"{s}: {r.stderr.strip()}")
+    return {"dropped": dropped, "errors": errors}
+
+
 def load_integrations(pcp_dir: Path) -> dict:
     path = pcp_dir / "integrations.yaml"
     if not path.exists():
@@ -224,6 +297,24 @@ def check_environment(pcp_dir: Path, fatal_on_missing_required: bool = True) -> 
             f"[dim]Preflight: no {', '.join(optional_missing)} tool detected — those QA steps will skip. "
             f"Run `pcp doctor` to review.[/dim]"
         )
+
+    bloat = check_schema_bloat()
+    if bloat and bloat["bloated"]:
+        console.print(
+            f"[yellow bold]⚠ Postgres schema bloat:[/yellow bold] {bloat['count']} schemas matching "
+            f"'{bloat['pattern']}' (threshold {bloat['threshold']}) — a known cause of pytest timeouts "
+            f"that look like a stuck build. Run `pcp doctor --fix-schema-bloat` to clean up."
+        )
+
+    from pcp import build_loop_bypass, telemetry
+    bypass_findings = build_loop_bypass.check(pcp_dir, pcp_dir.parent)
+    telemetry.record(
+        pcp_dir, cycle="qa", check="build-loop-bypass", control_id="CTRL-037",
+        module=None, submodule=None, criterion_id=None,
+        files=[], result="pass", errors=bypass_findings, error_count=len(bypass_findings),
+    )
+    for f in bypass_findings:
+        console.print(f"[yellow bold]⚠ Build-loop bypass:[/yellow bold] {f}")
     return tools
 
 
@@ -232,7 +323,10 @@ def check_environment(pcp_dir: Path, fatal_on_missing_required: bool = True) -> 
               help="Project root (default: cwd, walks up to find .pcp/).")
 @click.option("--check", "check_only", is_flag=True,
               help="Non-interactive: detect and report only, don't prompt or write.")
-def doctor(project_path: str | None, check_only: bool):
+@click.option("--fix-schema-bloat", "fix_bloat", is_flag=True,
+              help="Drop stray Postgres test schemas matching PCP_TEST_SCHEMA_PATTERN. Destructive — always confirms.")
+@click.option("--yes", "yes", is_flag=True, help="Skip the confirmation prompt for --fix-schema-bloat (CI/non-interactive use).")
+def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, yes: bool):
     """Check/configure CLI integrations for this project's PCP lifecycle."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
@@ -242,6 +336,36 @@ def doctor(project_path: str | None, check_only: bool):
 
     project_root = pcp_dir.parent
     tools = detect_tools()
+
+    bloat = check_schema_bloat()
+    if fix_bloat:
+        if not bloat:
+            console.print("[dim]--fix-schema-bloat: no postgres connection or psql detected — nothing to do.[/dim]")
+            sys.exit(0)
+        if bloat["count"] == 0:
+            console.print(f"[green]No schemas matching '{bloat['pattern']}' — nothing to drop.[/green]")
+            sys.exit(0)
+        console.print(f"[bold]{bloat['count']} schema(s)[/bold] matching '{bloat['pattern']}' will be permanently dropped.")
+        if not yes and not click.confirm("Proceed?", default=False):
+            console.print("[yellow]Aborted.[/yellow]")
+            sys.exit(0)
+        result = fix_schema_bloat(bloat["pattern"])
+        console.print(f"[green]Dropped {len(result['dropped'])} schema(s).[/green]")
+        if result["errors"]:
+            console.print(f"[red]{len(result['errors'])} error(s):[/red]")
+            for e in result["errors"][:10]:
+                console.print(f"  {e}")
+        sys.exit(1 if result["errors"] else 0)
+
+    if bloat and bloat["bloated"]:
+        console.print(
+            f"[yellow bold]⚠ Postgres schema bloat:[/yellow bold] {bloat['count']} schemas matching "
+            f"'{bloat['pattern']}' (threshold {bloat['threshold']}) — run `pcp doctor --fix-schema-bloat` to clean up.\n"
+        )
+
+    from pcp import build_loop_bypass
+    for f in build_loop_bypass.check(pcp_dir, project_root):
+        console.print(f"[yellow bold]⚠ Build-loop bypass:[/yellow bold] {f}\n")
 
     table = Table(title="PCP Environment Check")
     table.add_column("Integration")

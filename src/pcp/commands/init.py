@@ -474,6 +474,15 @@ controls:
     enforcement: advisory
     description: "2026-07-24 fleet evidence: a context-hygiene pass across 4 projects (Event-Manager, win2mac, agentberg, atacamaMDM) found narrative prose in CLAUDE.md -- stage descriptions, 'Open Decisions,' 'Pending' lists -- drifted from tracked state 3-for-3 in projects checked (largest: ~65 lines of dead launch-weekend content still live 7 weeks post-launch, undetected). Nothing in PCP's existing gate catalog checks free-text prose against current_state.md/architecture.md -- every other gate validates code against spec. Deterministic sub-checks port `~/.claude/scripts/session-hygiene-check.sh`'s mechanical checks into PCP's own enforcement lifecycle (telemetry, not just a SessionStart print); the semantic contradiction check is the one irreducibly judgment-shaped part, same rung-6 posture as CTRL-020's rung-necessity check -- one batched call, advisory, fails open. Standalone via `pcp narrative-lint`; also runs at every wave-merge boundary."
     ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-037
+    name: "Build-loop bypass detector"
+    layer: cross-cutting
+    mechanism: "build_loop_bypass.py check() -- git log commit dates vs telemetry.jsonl's last entry timestamp, run by doctor.py's check_environment() (pcp build/watch/deploy's own automatic preflight) and the interactive `pcp doctor`"
+    tool: "n/a (deterministic)"
+    enforcement: advisory
+    description: "2026-07-24 incident (ontology-foundry, 3rd recurrence: 07-08, mid-July, 07-21-onward): pcp build's formal gated loop stopped being invoked, not by decision -- a real Postgres schema-bloat bug got killed and never relaunched -- while 31 commits landed via `pcp pm` + ad-hoc work over the next 3 days, telemetry.jsonl silent the whole time. Nothing previously surfaced that drift at the moment it started; it only became visible via manual transcript archaeology. Flags when commits continue past telemetry's last record by more than PCP_BUILD_LOOP_BYPASS_THRESHOLD_DAYS (default 3) -- inert until a project has at least one real telemetry record to compare against."
+    ssdf_practice: ["PW.1.1"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\

@@ -1,5 +1,5 @@
 import json
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import yaml
 from click.testing import CliRunner
@@ -7,7 +7,7 @@ from click.testing import CliRunner
 from pcp.cli import cli
 from pcp.commands.doctor import (
     detect_tools, check_environment, _detect_one, _guess_deploy_command,
-    detect_context7, configure_context7,
+    detect_context7, configure_context7, check_schema_bloat, fix_schema_bloat,
 )
 
 
@@ -206,3 +206,104 @@ def test_doctor_cli_check_only_reports_context7_without_writing(tmp_path):
     assert result.exit_code == 0
     assert "Context7" in result.output
     assert not (tmp_path / ".mcp.json").exists()
+
+
+# ── Postgres schema-bloat preflight (2026-07-24, ontology-foundry incident) ──
+
+def test_schema_bloat_none_without_postgres_url(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with patch("shutil.which", side_effect=_fake_which({"psql"})):
+        assert check_schema_bloat() is None
+
+
+def test_schema_bloat_none_without_psql(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://x/y")
+    with patch("shutil.which", side_effect=_fake_which(set())):
+        assert check_schema_bloat() is None
+
+
+def test_schema_bloat_unsafe_pattern_returns_none(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://x/y")
+    with patch("shutil.which", side_effect=_fake_which({"psql"})):
+        assert check_schema_bloat(pattern="'; DROP TABLE x; --") is None
+
+
+def test_schema_bloat_reports_count_and_bloated_flag(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://x/y")
+    with patch("shutil.which", side_effect=_fake_which({"psql"})), \
+            patch("pcp.commands.doctor.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="120\n")
+        result = check_schema_bloat(threshold=50, pattern="test_%")
+    assert result == {"count": 120, "pattern": "test_%", "threshold": 50, "bloated": True}
+
+
+def test_schema_bloat_under_threshold_not_flagged(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://x/y")
+    with patch("shutil.which", side_effect=_fake_which({"psql"})), \
+            patch("pcp.commands.doctor.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="3\n")
+        result = check_schema_bloat(threshold=50, pattern="test_%")
+    assert result["bloated"] is False
+
+
+def test_fix_schema_bloat_unsafe_pattern_rejected():
+    result = fix_schema_bloat("bad pattern; drop")
+    assert result["dropped"] == []
+    assert "unsafe pattern" in result["errors"][0]
+
+
+def test_fix_schema_bloat_drops_listed_schemas(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://x/y")
+    with patch("shutil.which", side_effect=_fake_which({"psql"})), \
+            patch("pcp.commands.doctor.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="test_a\ntest_b\n"),  # list
+            MagicMock(returncode=0, stdout=""),  # drop test_a
+            MagicMock(returncode=0, stdout=""),  # drop test_b
+        ]
+        result = fix_schema_bloat("test_%")
+    assert result["dropped"] == ["test_a", "test_b"]
+    assert result["errors"] == []
+
+
+def test_fix_schema_bloat_records_per_schema_errors(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://x/y")
+    with patch("shutil.which", side_effect=_fake_which({"psql"})), \
+            patch("pcp.commands.doctor.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="test_a\n"),  # list
+            MagicMock(returncode=1, stderr="permission denied"),  # drop fails
+        ]
+        result = fix_schema_bloat("test_%")
+    assert result["dropped"] == []
+    assert "permission denied" in result["errors"][0]
+
+
+def test_doctor_cli_fix_schema_bloat_prompts_and_drops(tmp_path, monkeypatch):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    monkeypatch.setenv("DATABASE_URL", "postgres://x/y")
+    with patch("shutil.which", side_effect=_fake_which({"git", "claude", "psql"})), \
+            patch("pcp.commands.doctor.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="99\n"),      # count
+            MagicMock(returncode=0, stdout="test_a\n"),  # list
+            MagicMock(returncode=0, stdout=""),          # drop test_a
+        ]
+        runner = CliRunner()
+        result = runner.invoke(cli, ["doctor", "--path", str(tmp_path), "--fix-schema-bloat", "--yes"])
+    assert result.exit_code == 0
+    assert "Dropped 1 schema(s)" in result.output
+
+
+def test_doctor_cli_check_warns_on_bloat(tmp_path, monkeypatch):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    monkeypatch.setenv("DATABASE_URL", "postgres://x/y")
+    with patch("shutil.which", side_effect=_fake_which({"git", "claude", "psql"})), \
+            patch("pcp.commands.doctor.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="500\n")
+        runner = CliRunner()
+        result = runner.invoke(cli, ["doctor", "--path", str(tmp_path), "--check"])
+    assert result.exit_code == 0
+    assert "schema bloat" in result.output.lower()
