@@ -123,6 +123,51 @@ def test_dismiss_clears_conflict(tmp_path):
     assert objective_conflicts.reconcile(pcp_dir) == []
 
 
+def test_brd_md_stops_rendering_a_dismissed_conflict_under_drift_flags(tmp_path):
+    """Regression, 2026-07-25: --dismiss intentionally leaves drift_flag set as
+    the historical record, and the build gate honours drift_dismissed_at. But
+    _write_brd_md() filtered on drift_flag alone, so brd.md kept reporting a
+    dismissed conflict as open forever."""
+    pcp_dir = _pcp_dir(tmp_path)
+    _flagged_item(pcp_dir)
+    items = yaml.safe_load((pcp_dir / "brd_items.yaml").read_text())["items"]
+
+    capture._write_brd_md(pcp_dir, items, "2026-07-25T00:00:00Z")
+    assert "Drift Flags" in (pcp_dir / "brd.md").read_text()
+
+    objective_conflicts.dismiss(pcp_dir, "BRD-001", "false positive, module-level not objective-level")
+    items = yaml.safe_load((pcp_dir / "brd_items.yaml").read_text())["items"]
+    assert items[0]["drift_flag"], "dismiss must keep drift_flag as the historical record"
+
+    capture._write_brd_md(pcp_dir, items, "2026-07-25T00:00:00Z")
+    body = (pcp_dir / "brd.md").read_text()
+    assert "Drift Flags" not in body
+    assert objective_conflicts.reconcile(pcp_dir) == []
+
+
+def test_brd_md_and_build_gate_agree_on_a_resolved_conflict(tmp_path):
+    """The renderer and the gate must share one definition of 'still open'."""
+    pcp_dir = _pcp_dir(tmp_path)
+    _flagged_item(pcp_dir)
+    (pcp_dir / "objective.md").write_text("# Objective\n\nCompletely rewritten.\n")
+
+    unresolved = objective_conflicts.reconcile(pcp_dir)  # hash no longer matches -> auto-clears
+    items = yaml.safe_load((pcp_dir / "brd_items.yaml").read_text())["items"]
+    capture._write_brd_md(pcp_dir, items, "2026-07-25T00:00:00Z")
+
+    assert unresolved == []
+    assert "Drift Flags" not in (pcp_dir / "brd.md").read_text()
+
+
+def test_is_unresolved_conflict_predicate():
+    base = {"id": "BRD-001", "status": "active", "drift_flag": "conflicts with objective"}
+    assert objective_conflicts.is_unresolved_conflict(base)
+    assert not objective_conflicts.is_unresolved_conflict({**base, "drift_dismissed_at": "2026-07-25T00:00:00Z"})
+    assert not objective_conflicts.is_unresolved_conflict({**base, "drift_resolved_at": "2026-07-25T00:00:00Z"})
+    assert not objective_conflicts.is_unresolved_conflict({**base, "status": "superseded"})
+    assert not objective_conflicts.is_unresolved_conflict({**base, "drift_flag": None})
+
+
 def test_dismiss_returns_false_for_unknown_id(tmp_path):
     pcp_dir = _pcp_dir(tmp_path)
     _flagged_item(pcp_dir)

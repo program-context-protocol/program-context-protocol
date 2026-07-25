@@ -122,7 +122,10 @@ def classify_transcript(pcp_dir: Path, conversation_text: str, source: str) -> d
 
 def _write_brd_md(pcp_dir: Path, items: list[dict], timestamp: str) -> Path:
     active = [i for i in items if i.get("status") == "active"]
-    drift = [i for i in active if i.get("drift_flag")]
+    # Same predicate the build gate uses — a resolved or dismissed conflict is
+    # not an open one, and must stop being reported as such (see
+    # objective_conflicts.is_unresolved_conflict for the divergence this fixes).
+    drift = [i for i in active if objective_conflicts.is_unresolved_conflict(i)]
     superseded = [i for i in items if i.get("status") == "superseded"]
 
     lines = [

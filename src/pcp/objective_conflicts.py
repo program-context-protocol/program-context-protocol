@@ -55,6 +55,23 @@ def _save_items(pcp_dir: Path, items: list[dict]) -> None:
     (pcp_dir / "brd_items.yaml").write_text(yaml.dump({"items": items}, default_flow_style=False))
 
 
+def is_unresolved_conflict(item: dict) -> bool:
+    """One definition of "this conflict is still open", shared by the build
+    gate and every renderer.
+
+    It existed only inside reconcile()'s loop until 2026-07-25, when a real
+    divergence surfaced: `pcp objective-conflicts --dismiss` writes
+    drift_dismissed_at/_reason but deliberately leaves drift_flag set (the flag
+    is the historical record of what was flagged). The gate honoured the
+    dismissal; capture._write_brd_md() filtered on drift_flag alone, so a
+    dismissed item kept rendering under "Drift Flags" in brd.md forever —
+    reporting an open conflict the build no longer had. Any new consumer must
+    call this rather than re-deriving the predicate."""
+    if item.get("status") != "active" or not item.get("drift_flag"):
+        return False
+    return not (item.get("drift_resolved_at") or item.get("drift_dismissed_at"))
+
+
 def reconcile(pcp_dir: Path) -> list[dict]:
     """Auto-clears drift flags whose objective_hash_at_flag no longer matches
     current objective.md/target_state.md content -- the file actually got
@@ -74,9 +91,7 @@ def reconcile(pcp_dir: Path) -> list[dict]:
     unresolved = []
 
     for item in items:
-        if item.get("status") != "active" or not item.get("drift_flag"):
-            continue
-        if item.get("drift_resolved_at") or item.get("drift_dismissed_at"):
+        if not is_unresolved_conflict(item):
             continue
         flagged_hash = item.get("objective_hash_at_flag")
         if flagged_hash and flagged_hash != current_hash:
