@@ -42,6 +42,21 @@ def test_timeout_info() -> tuple[int, bool]:
     return _timeout_test(), "PCP_QA_TEST_TIMEOUT_SEC" not in os.environ
 
 
+def _timeout_message(tool: str) -> str:
+    """A bare "timed out" in the evidence file reads as "the test suite failed"
+    to whoever opens it next -- it names neither the limit that was hit nor the
+    knob that changes it, so the natural next move is to go debug tests that
+    may well be fine. Say which limit, and say the default is a default."""
+    seconds, is_default = test_timeout_info()
+    suffix = " (PCP default — not tuned for this project)" if is_default else ""
+    return (
+        f"{tool} exceeded the {seconds}s PCP_QA_TEST_TIMEOUT_SEC limit{suffix} and was killed. "
+        f"No test result was produced — this is NOT a test failure. Either the suite genuinely "
+        f"needs longer (raise PCP_QA_TEST_TIMEOUT_SEC) or it is blocked on something that never "
+        f"returns (a hung DB connection, a wrong-environment target, a lock)."
+    )
+
+
 def _timeout_lint() -> int:
     return int(os.environ.get("PCP_QA_LINT_TIMEOUT_SEC", "60"))
 
@@ -59,7 +74,7 @@ def _run_pytest(project_root: Path, test_paths: list[str] | None = None) -> dict
             args, capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
     except subprocess.TimeoutExpired:
-        return {"tool": "pytest", "passed": False, "output": "timed out"}
+        return {"tool": "pytest", "passed": False, "output": _timeout_message("pytest")}
     # Exit code 5 = no tests collected yet — not a failure, just nothing to run.
     passed = result.returncode == 0 or result.returncode == 5
     return {
@@ -83,7 +98,7 @@ def _run_npm_test(project_root: Path) -> dict | None:
             ["npm", "test", "--silent"], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
     except subprocess.TimeoutExpired:
-        return {"tool": "npm test", "passed": False, "output": "timed out"}
+        return {"tool": "npm test", "passed": False, "output": _timeout_message("npm test")}
     return {"tool": "npm test", "passed": result.returncode == 0, "output": (result.stdout + result.stderr)[-3000:]}
 
 
@@ -95,7 +110,7 @@ def _run_go_test(project_root: Path) -> dict | None:
             ["go", "test", "./..."], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
     except subprocess.TimeoutExpired:
-        return {"tool": "go test", "passed": False, "output": "timed out"}
+        return {"tool": "go test", "passed": False, "output": _timeout_message("go test")}
     return {"tool": "go test", "passed": result.returncode == 0, "output": (result.stdout + result.stderr)[-3000:]}
 
 

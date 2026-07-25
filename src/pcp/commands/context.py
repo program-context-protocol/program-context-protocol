@@ -9,6 +9,7 @@ PreToolUse spec guard -- PCP doesn't edit .claude/settings.json itself.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -37,9 +38,42 @@ def _build_context(pcp_dir: Path) -> dict:
     }
 
 
+def _max_generated_chars() -> int:
+    """Per-section budget for the AUTO-GENERATED sections only. Read at call
+    time, not frozen at import, so a test can monkeypatch it."""
+    return int(os.environ.get("PCP_CONTEXT_MAX_GENERATED_CHARS", "20000"))
+
+
+def _generated_section(title: str, body: str, rel_path: str, budget: int) -> list[str]:
+    """current_state.md and diff.md are auto-generated and grow with module
+    count -- on a many-module project they run to six figures of characters
+    each. `--inject` writes this block into CLAUDE.md, which every session then
+    reads in full, so pasting them whole silently makes the single most
+    expensive file in the repo unboundedly large (2026-07-25: ~269k chars of
+    generated state across the two on a real dogfood project).
+
+    Over budget, emit a POINTER instead of the body. That is not a silent
+    truncation -- the size and the path are both stated, and an agent that
+    needs the detail can read the file, which is the same projection rule
+    context_map.yaml already applies to sliced state."""
+    if len(body) <= budget:
+        return [f"## {title}\n", body, ""]
+    return [
+        f"## {title}\n",
+        f"_Omitted from this block: `{rel_path}` is {len(body):,} chars, over the "
+        f"{budget:,}-char budget for auto-generated sections. Read the file directly "
+        f"for the detail. Raise `PCP_CONTEXT_MAX_GENERATED_CHARS` to inline it anyway._",
+        "",
+    ]
+
+
 def _render_markdown(ctx: dict) -> str:
     parts = ["# PCP Project Context\n"]
+    budget = _max_generated_chars()
 
+    # Intent files go in WHOLE, always -- fragmenting spec collapses
+    # faithfulness (context_map.py's second design law). Only the generated
+    # projections below are budgeted.
     if ctx["objective"]:
         parts += ["## Objective\n", ctx["objective"], ""]
 
@@ -47,12 +81,13 @@ def _render_markdown(ctx: dict) -> str:
         parts += ["## Architecture\n", ctx["architecture"], ""]
 
     if ctx["current_state"]:
-        parts += ["## Current State\n", ctx["current_state"], ""]
+        parts += _generated_section(
+            "Current State", ctx["current_state"], ".pcp/current_state.md", budget)
     else:
         parts += ["## Current State\n", "_Not generated yet. Run `pcp scan`._", ""]
 
     if ctx["diff"]:
-        parts += ["## Pending Gaps\n", ctx["diff"], ""]
+        parts += _generated_section("Pending Gaps", ctx["diff"], ".pcp/diff.md", budget)
 
     return "\n".join(parts)
 

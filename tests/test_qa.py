@@ -43,7 +43,20 @@ def test_run_pytest_timeout_treated_as_failure(tmp_path):
             patch("pcp.qa.subprocess.run", side_effect=sp.TimeoutExpired(cmd="pytest", timeout=300)):
         result = qa.run_test_suite(tmp_path)
     assert result["passed"] is False
-    assert "timed out" in result["output"]
+    # The evidence file must name the limit that was hit, the knob that
+    # changes it, and that this is not a test failure -- a bare "timed out"
+    # sends whoever reads it next to debug tests that may be fine.
+    assert "PCP_QA_TEST_TIMEOUT_SEC" in result["output"]
+    assert "300s" in result["output"]
+    assert "NOT a test failure" in result["output"]
+
+
+def test_timeout_message_flags_untuned_default(monkeypatch):
+    monkeypatch.delenv("PCP_QA_TEST_TIMEOUT_SEC", raising=False)
+    assert "PCP default" in qa._timeout_message("pytest")
+    monkeypatch.setenv("PCP_QA_TEST_TIMEOUT_SEC", "900")
+    msg = qa._timeout_message("pytest")
+    assert "900s" in msg and "PCP default" not in msg
 
 
 def test_run_lint_no_tool_detected(tmp_path):

@@ -318,16 +318,58 @@ def _worktree_dir(project_root: Path, module_name: str) -> Path:
     return project_root.parent / f"{project_root.name}-{module_name}"
 
 
+def _sync_worktree_to_base(wt_path: Path, base_sha: str, module_name: str) -> None:
+    """Bring a REUSED branch/worktree up to the base commit before building on
+    it. A fresh `-b` branch already starts at the base; a branch left over from
+    an earlier run (or from an earlier wave whose siblings have since merged)
+    can be arbitrarily far behind, and every commit main gained in the meantime
+    becomes conflict surface at merge time. Merging base in here moves that
+    reconciliation to the START of the criterion, where the agent still has a
+    session to fix it, instead of the end, where `_merge_module_branch` can only
+    report the conflict and leave the worktree behind.
+
+    Deliberately NOT a rebase: rebasing rewrites commits an interrupted run may
+    already have pushed. No-op when already up to date. On conflict or a dirty
+    tree, abort and warn rather than hand the agent a half-merged checkout."""
+    if not base_sha:
+        return
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=wt_path, capture_output=True, text=True,
+    ).stdout.strip()
+    if dirty:
+        console.print(
+            f"[yellow]Worktree for '{module_name}' has uncommitted changes from a prior run — "
+            f"skipping base sync. It may be behind main.[/yellow]"
+        )
+        return
+    result = subprocess.run(
+        ["git", "merge", "--no-edit", base_sha], cwd=wt_path, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        subprocess.run(["git", "merge", "--abort"], cwd=wt_path, capture_output=True)
+        console.print(
+            f"[yellow]Could not sync worktree for '{module_name}' to the current base "
+            f"(conflict). Building on a stale base; expect a merge conflict at the end.[/yellow]"
+        )
+
+
 def _setup_worktree(project_root: Path, module_name: str) -> Path:
     wt_path = _worktree_dir(project_root, module_name)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=project_root, capture_output=True, text=True,
+    ).stdout.strip()
     if wt_path.exists():
-        return wt_path  # reuse from a prior interrupted run
+        # Reuse from a prior interrupted run — but not its stale base.
+        _sync_worktree_to_base(wt_path, base_sha, module_name)
+        return wt_path
     branch = f"feat/{module_name}"
     branch_exists = subprocess.run(
         ["git", "rev-parse", "--verify", branch], cwd=project_root, capture_output=True,
     ).returncode == 0
     cmd = ["git", "worktree", "add", str(wt_path)] + ([branch] if branch_exists else ["-b", branch])
     subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
+    if branch_exists:
+        _sync_worktree_to_base(wt_path, base_sha, module_name)
     return wt_path
 
 
@@ -374,7 +416,20 @@ def _auto_commit_criterion(project_root: Path, module_name: str, criterion: dict
     )
     if not status.stdout.strip():
         return
-    subprocess.run(["git", "add", "-A"], cwd=project_root, capture_output=True)
+    # `git add -A` minus agent-session-local config. Claude Code writes
+    # .claude/settings*.json into whatever directory it runs in, with values
+    # scoped to THAT directory (TMPDIR, granted permissions) -- so every
+    # parallel worktree produces a different version of the same new path.
+    # Committing them makes every wave merge an add/add conflict on a scratch
+    # file (2026-07-25 ontology-foundry: three criteria that had passed all
+    # their gates could not be merged). `pcp init`'s .gitignore covers new
+    # projects; this covers every project that already had a .gitignore, which
+    # init deliberately never modifies.
+    subprocess.run(
+        ["git", "add", "-A", "--",
+         ":!.claude/settings.json", ":!.claude/settings.local.json"],
+        cwd=project_root, capture_output=True,
+    )
     message = f"{module_name}/{criterion['id']}: {criterion.get('description', '')}".strip()
     result = subprocess.run(
         ["git", "commit", "-m", message], cwd=project_root, capture_output=True, text=True,

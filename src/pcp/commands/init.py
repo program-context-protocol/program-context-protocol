@@ -749,6 +749,14 @@ build/
 venv/
 .DS_Store
 .pcp/.build_loop_warning_shown_*
+
+# Agent-session-local config. Claude Code writes these per working directory,
+# and a worktree-scoped value (TMPDIR, granted permissions) differs in every
+# parallel build worktree. Committing them turns every wave merge into an
+# add/add conflict on a scratch config file — 2026-07-25 ontology-foundry,
+# where three criteria that had all passed their gates could not be merged.
+.claude/settings.json
+.claude/settings.local.json
 """
 
 SDLC_PHASE_TEMPLATE = """\

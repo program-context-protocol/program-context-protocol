@@ -12,7 +12,7 @@ from click.testing import CliRunner
 from pcp.cli import cli
 from pcp.commands.build import (
     _BuildBudget, BudgetExceeded, _setup_worktree, _merge_module_branch,
-    _cleanup_worktree,
+    _cleanup_worktree, _auto_commit_criterion,
 )
 
 
@@ -345,3 +345,63 @@ def test_module_filter_no_nudge_when_it_is_the_only_pending_module(parallel_proj
 
     assert result.exit_code == 0, result.output
     assert "other module(s) also have pending criteria" not in result.output
+
+
+# ── Stale-base + agent-local-config merge hazards (2026-07-25) ──
+
+def test_setup_worktree_syncs_a_stale_reused_branch_to_current_base(tmp_path):
+    """A feat/ branch left over from an earlier run is arbitrarily far behind
+    main, and every commit main gained since is conflict surface at merge
+    time. Setup must reconcile it at the START of the criterion, not leave it
+    for _merge_module_branch to report as an unresolvable conflict."""
+    repo = _init_repo(tmp_path / "repo")
+    _git(["branch", "feat/stale"], repo)
+
+    # main moves on after the branch was cut.
+    (repo / "added_on_main.txt").write_text("main work\n")
+    _git(["add", "-A"], repo)
+    _git(["commit", "-q", "-m", "main moves on"], repo)
+
+    wt = _setup_worktree(repo, "stale")
+    assert (wt / "added_on_main.txt").exists(), "reused branch was left on a stale base"
+
+
+def test_setup_worktree_leaves_a_dirty_reused_worktree_alone(tmp_path):
+    """An interrupted run's uncommitted work must never be clobbered by the
+    base sync — skip the merge and warn instead."""
+    repo = _init_repo(tmp_path / "repo")
+    wt = _setup_worktree(repo, "dirty")
+    (wt / "in_progress.txt").write_text("half-written agent work\n")
+
+    (repo / "added_on_main.txt").write_text("main work\n")
+    _git(["add", "-A"], repo)
+    _git(["commit", "-q", "-m", "main moves on"], repo)
+
+    again = _setup_worktree(repo, "dirty")
+    assert again == wt
+    assert (wt / "in_progress.txt").read_text() == "half-written agent work\n"
+
+
+def test_setup_worktree_merge_is_a_noop_when_already_current(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+    wt = _setup_worktree(repo, "fresh")
+    assert _git(["rev-parse", "HEAD"], wt).stdout.strip() == head_before
+
+
+def test_auto_commit_never_commits_agent_session_local_config(tmp_path):
+    """Claude Code writes .claude/settings*.json into whatever directory it
+    runs in, scoped to THAT directory. Committing it makes every wave merge an
+    add/add conflict on a scratch config file."""
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "settings.json").write_text('{"env": {"TMPDIR": "/wt-a"}}')
+    (repo / ".claude" / "settings.local.json").write_text('{"permissions": []}')
+    (repo / "real_work.py").write_text("def f(): return 1\n")
+
+    _auto_commit_criterion(repo, "mod", {"id": "A001", "description": "do the thing"})
+
+    tracked = _git(["ls-files"], repo).stdout.split()
+    assert "real_work.py" in tracked
+    assert ".claude/settings.json" not in tracked
+    assert ".claude/settings.local.json" not in tracked

@@ -75,3 +75,48 @@ def test_context_inject_appends_when_no_existing_block(tmp_path):
     updated = claude_md_path.read_text()
     assert "# My Project Rules" in updated
     assert "Build a calculator app." in updated
+
+
+def test_generated_sections_are_budgeted_not_pasted_whole(tmp_path, monkeypatch):
+    """current_state.md/diff.md grow with module count; --inject writes them
+    into CLAUDE.md, which every session then reads in full. Over budget they
+    must become a pointer, and the pointer must say so out loud."""
+    pcp_dir = _init_pcp(tmp_path)
+    monkeypatch.setenv("PCP_CONTEXT_MAX_GENERATED_CHARS", "100")
+    (pcp_dir / "current_state.md").write_text("STATE-" + "x" * 5000)
+    (pcp_dir / "diff.md").write_text("GAPS-" + "y" * 5000)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["context", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "xxxx" not in result.output and "yyyy" not in result.output
+    assert ".pcp/current_state.md" in result.output
+    assert ".pcp/diff.md" in result.output
+    assert "PCP_CONTEXT_MAX_GENERATED_CHARS" in result.output
+    # Intent files are never budgeted -- fragmenting spec collapses faithfulness.
+    assert "Build a calculator app." in result.output
+
+
+def test_generated_sections_inlined_when_under_budget(tmp_path, monkeypatch):
+    pcp_dir = _init_pcp(tmp_path)
+    monkeypatch.setenv("PCP_CONTEXT_MAX_GENERATED_CHARS", "20000")
+    (pcp_dir / "diff.md").write_text("GAP-001 pending")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["context", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "50% complete." in result.output
+    assert "GAP-001 pending" in result.output
+    assert "Omitted from this block" not in result.output
+
+
+def test_json_output_is_never_budgeted(tmp_path, monkeypatch):
+    """--json feeds IDE tooling that consumes the fields programmatically —
+    it is not the CLAUDE.md paste path, so it stays complete."""
+    pcp_dir = _init_pcp(tmp_path)
+    monkeypatch.setenv("PCP_CONTEXT_MAX_GENERATED_CHARS", "10")
+    (pcp_dir / "current_state.md").write_text("STATE-" + "x" * 5000)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["context", "--path", str(tmp_path), "--json"])
+    assert json.loads(result.output)["current_state"].startswith("STATE-xxxx")
