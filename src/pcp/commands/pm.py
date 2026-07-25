@@ -347,4 +347,56 @@ def pm(intent: str, project_path: str | None):
         if val_result:
             render_val_results(pcp_dir, val_result, output_json=False)
 
+    _warn_stale_decomposition(pcp_dir, decomposition, modules_result, intent)
+
     console.print("[green]✓[/green] Project state refreshed. Run [cyan]pcp build[/cyan] to begin development.")
+
+
+def _decomposition_is_stale(decomposition: str, modules_result: list[dict]) -> list[str]:
+    """Module names this pm call touched that decomposition.md never mentions.
+
+    Deterministic substring check (rung 1) — no LLM deciding whether the
+    strategy doc is still true. Adding a module via `pcp pm` silently left
+    decomposition.md describing a module set that no longer exists, and since
+    validate-strategy judges specs against that same stale decomposition, the
+    gap could persist indefinitely."""
+    if not decomposition.strip():
+        return []
+    haystack = decomposition.lower()
+    stale = []
+    for mr in modules_result:
+        name = (mr.get("module_name") or "").strip().lower()
+        if not name:
+            continue
+        if name not in haystack and name.replace("_", "-") not in haystack and name.replace("_", " ") not in haystack:
+            stale.append(name)
+    return stale
+
+
+def _warn_stale_decomposition(pcp_dir, decomposition: str, modules_result: list[dict], intent: str) -> None:
+    """pm deliberately never writes program-level spec files (that separation is
+    why correct-objective exists as its own command), so this surfaces the
+    drift and offers to run the human-approved `pcp amend` path right here
+    rather than leaving a nudge nobody acts on."""
+    stale = _decomposition_is_stale(decomposition, modules_result)
+    if not stale:
+        return
+    console.print(
+        f"\n[yellow]⚠  decomposition.md does not mention {', '.join(stale)} — "
+        "the strategy doc validate-strategy judges against is now stale.[/yellow]"
+    )
+    change = f"Module(s) {', '.join(stale)} were added/changed via `pcp pm`: {intent}"
+    try:
+        wants_fix = click.confirm("Amend decomposition.md now (you'll review the diff)?", default=True)
+    except (click.Abort, RuntimeError, EOFError):
+        wants_fix = False
+    if not wants_fix:
+        console.print(f'[dim]Run later: pcp amend decomposition "{change}"[/dim]')
+        return
+    from pcp.commands.amend import amend
+    ctx = click.get_current_context(silent=True)
+    if ctx:
+        ctx.invoke(amend, target_file="decomposition", change=change,
+                   project_path=str(pcp_dir.parent), yes=False, allow_weakening=False)
+    else:
+        console.print(f'[dim]Run: pcp amend decomposition "{change}"[/dim]')

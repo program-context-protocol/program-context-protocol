@@ -10,7 +10,7 @@ posture (this is a deliberate choice over the opa-python-client + REST-server
 approach: that would add a persistent service PCP has to manage, for no
 benefit over a one-shot eval at the point a decision is actually needed).
 
-Human-authored policies live in .pcp/policies/*.rego — same "human writes,
+Human-authored policies live in .pcp/policies/*.rego — same "human authorizes,
 tooling reads" posture as ci_rules.yaml.
 """
 

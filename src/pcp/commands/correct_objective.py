@@ -1,7 +1,7 @@
-"""pcp correct-objective — the human-gated write path for objective.md/
+"""pcp correct-objective — the human-authorized write path for objective.md/
 target_state.md.
 
-Hard Rule #1 ("spec files are human-written only") protects against an
+Hard Rule #2 ("spec files are human-authorized only") protects against an
 autonomous build-agent silently drifting the spec (`protected_path` hard-blocks
 any write while `PCP_AGENT_SESSION=1`). It was never meant to mean "Ganesh
 hand-types the markdown diff himself" -- `pcp kickoff`/`pcp pm` already write
@@ -17,9 +17,12 @@ Deliberately separate from `pcp pm`: pm never touches the program-level spec
 files, only module specs -- keeping this a distinct, explicit command means
 running it always shows a real diff of the two most consequential files in
 the project, never gets silently bundled into a routine module-intent call.
+
+The propose/diff/approve/write mechanic itself now lives in `spec_write.py`,
+shared with `pcp amend` — which gives the same treatment to the six other
+protected files that had no write path at all (2026-07-25).
 """
 
-import difflib
 import sys
 from pathlib import Path
 
@@ -29,8 +32,9 @@ from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 from pcp.llm import client as llm
-from pcp import decision_log
 from pcp import objective_conflicts
+from pcp import spec_write
+from pcp.spec_write import SpecTarget
 from pcp.commands.validate_strategy import (
     _build_user_prompt as build_val_prompt,
     SYSTEM_PROMPT as VAL_SYSTEM_PROMPT,
@@ -62,12 +66,6 @@ Output schema:
   "summary": "one paragraph: exactly what changed and why, for the audit trail"
 }
 """
-
-
-def _diff(old: str, new: str, name: str) -> str:
-    return "\n".join(difflib.unified_diff(
-        old.splitlines(), new.splitlines(), fromfile=f"a/{name}", tofile=f"b/{name}", lineterm="",
-    ))
 
 
 def _load_conflict(pcp_dir: Path, item_id: str) -> dict | None:
@@ -108,57 +106,29 @@ def correct_objective(correction: str | None, from_conflict: str | None, project
 
     obj_path = pcp_dir / "objective.md"
     ts_path = pcp_dir / "target_state.md"
-    old_objective = obj_path.read_text() if obj_path.exists() else ""
-    old_target_state = ts_path.read_text() if ts_path.exists() else ""
 
     user_prompt = "\n\n".join([
         f"## Correction\n{correction}",
-        f"## Current objective.md\n{old_objective}",
-        f"## Current target_state.md\n{old_target_state}",
+        f"## Current objective.md\n{obj_path.read_text() if obj_path.exists() else ''}",
+        f"## Current target_state.md\n{ts_path.read_text() if ts_path.exists() else ''}",
     ])
 
-    console.print("[dim]Drafting objective.md/target_state.md rewrite...[/dim]")
-    try:
-        result = llm.call_json(SYSTEM_PROMPT, user_prompt, model=llm.BUILD_MODEL, pcp_dir=pcp_dir, command="correct-objective")
-    except (RuntimeError, ValueError) as e:
-        console.print(f"[red]Error calling LLM:[/red] {e}")
-        sys.exit(2)
-
-    new_objective = result.get("objective_md", "")
-    new_target_state = result.get("target_state_md", "")
-    if not new_objective or not new_target_state:
-        console.print("[red]Error:[/red] LLM did not return both files.")
-        sys.exit(2)
-
-    obj_diff = _diff(old_objective, new_objective, "objective.md")
-    ts_diff = _diff(old_target_state, new_target_state, "target_state.md")
-
-    if not obj_diff and not ts_diff:
-        console.print("[yellow]No changes -- the correction doesn't appear to require a rewrite. "
-                       "If this is unexpected, restate the correction more concretely.[/yellow]")
-        sys.exit(0)
-
-    console.print(f"\n[bold]Summary:[/bold] {result.get('summary', '')}\n")
-    if obj_diff:
-        console.print("[bold]objective.md diff:[/bold]")
-        console.print(obj_diff)
-    if ts_diff:
-        console.print("\n[bold]target_state.md diff:[/bold]")
-        console.print(ts_diff)
-
-    if not yes and not click.confirm("\nApply this rewrite to objective.md/target_state.md?"):
-        console.print("[yellow]Aborted -- files unchanged.[/yellow]")
-        sys.exit(0)
-
-    obj_path.write_text(new_objective)
-    ts_path.write_text(new_target_state)
-    console.print("[green]✓[/green] objective.md/target_state.md rewritten.")
-
-    decision_log.record(
-        pcp_dir, source="correct-objective", session_id=None,
-        category="architecture", summary=f"Objective correction applied: {correction}",
-        evidence=result.get("summary", ""),
+    outcome = spec_write.propose_and_write(
+        pcp_dir,
+        [
+            SpecTarget(name="objective.md", path=obj_path, key="objective_md"),
+            SpecTarget(name="target_state.md", path=ts_path, key="target_state_md"),
+        ],
+        SYSTEM_PROMPT,
+        user_prompt,
+        command="correct-objective",
+        intent=correction,
+        yes=yes,
+        no_change_hint="If this is unexpected, restate the correction more concretely.",
     )
+    if not outcome.written:
+        sys.exit(0)
+    new_objective = outcome.result["objective_md"]
 
     # Auto-clears any objective_conflicts entry whose flagged hash no longer
     # matches — including conflict_item itself, since the file just changed.

@@ -541,7 +541,7 @@ done
 - `WARN` → spawn agents, but include the warning in every criterion brief: "Persona WARN on this module: `<warning>`. Account for it in your implementation."
 - Clean → proceed normally.
 
-Spec files are human-written — agents never fix spec violations. Only PM can update the spec.
+Spec files are human-**authorized** — a build agent never fixes a spec violation on its own. Route it to the PM, who applies it through the gated write path for that file (`pcp correct-objective` / `pcp pm` / `pcp amend`): the change is proposed, the PM sees a real diff, approves, then it's written. "Authorized" means unattended writes are forbidden, not that the PM hand-types the diff.
 
 ### Branch Isolation Protocol
 
@@ -1741,7 +1741,7 @@ If a decision is genuinely new: self-decide using best practices, document as DR
 - Never invent CI or Railway status — read from CLI output
 - Never spawn more agents than modules needing work
 - Never silently skip a deferred item — always write to deferred_queue.yaml + notify
-- Never auto-resolve a spec file conflict — specs are human-written, always defer
+- Never auto-resolve a spec file conflict unattended — specs are human-authorized; defer to the PM, then apply via `pcp correct-objective` / `pcp pm` / `pcp amend` (diff shown, PM approves, then written)
 - Never generate or guess production credentials — security boundary, always stop and notify
 - Never redeploy to production after rollback without PM confirmation
 - If Playwright not installed and `check: visual` required: notify and defer rather than skip
