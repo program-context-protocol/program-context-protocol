@@ -270,12 +270,52 @@ compute_waves = _compute_waves
 # is never consulted and the module's criteria build exactly as before:
 # strictly sequential, each on the prior commit, in declared list order.
 
+def _max_parallel_criteria() -> int:
+    """Concurrency cap for criteria WITHIN one module.
+
+    This pool was uncapped (`max_workers=len(wave_criteria)`) while the
+    module-level pool was capped at 5 — the asymmetry behind the 2026-07-22
+    30+-agent spawn, where the documented "15" was prose and nothing enforced
+    it. Harmless while criterion parallelism was opt-in and almost nothing
+    opted in; the moment it became the default, `core-data-model`'s 46
+    independent criteria would have started 46 concurrent agents, each with a
+    worktree and a test suite hitting the same Postgres.
+
+    Defaults to 5, matching _max_parallel_modules(). Worst case is therefore
+    modules x criteria concurrent agents, bounded overall by
+    PCP_MAX_BUILD_SESSIONS. Raise PCP_BUILD_MAX_PARALLEL_CRITERIA for a
+    single-module run (`--module X`), where no module-level fan-out is
+    competing for the same database."""
+    return max(1, int(os.environ.get("PCP_BUILD_MAX_PARALLEL_CRITERIA", "5")))
+
+
 def _criteria_parallel_enabled(mod: dict) -> bool:
-    """A module opts in by having ANY criterion declare `depends_on` (even
-    an empty list — presence, not content, is the signal, same convention
-    as design_justification/build_vs_buy elsewhere in this schema: a
-    deliberately-declared field, not an inferred one)."""
-    return any(c.get("depends_on") is not None for c in mod["pending_criteria"])
+    """Criteria build in parallel by default.
+
+    This used to require a module to "opt in" by having ANY criterion declare
+    `depends_on`, even an empty list — presence as the signal. That reads
+    exactly backwards: a module whose criteria declare NO dependencies is
+    stating they are mutually independent, which is the *best* case for
+    fanning out. PCP treated it as "not opted in" and ran the whole module one
+    criterion at a time.
+
+    Measured 2026-07-27, ontology-foundry: `logic-artifact-storage` has 12
+    criteria and 0 declaring `depends_on`, so it ran a single agent
+    sequentially. Across the project 145 of 382 criteria are in modules with
+    no `depends_on` anywhere — all serial for want of a field whose absence
+    already meant "independent".
+
+    Parallelism is now the default and `depends_on` does the one job it should:
+    ORDERING. Declared, it forces a criterion into a later wave; absent, the
+    criterion is independent and lands in wave 0. The collision risk that once
+    justified caution is handled where it belongs — optimistic scheduling with
+    exact detection and a rebuild on conflict (see
+    _partition_wave_by_file_scope and the merge path in _build_module_worker).
+
+    PCP_CRITERIA_SERIAL=1 forces the old one-at-a-time behaviour."""
+    if os.environ.get("PCP_CRITERIA_SERIAL") == "1":
+        return False
+    return len(mod["pending_criteria"]) > 1
 
 
 def _compute_criterion_waves(mod: dict) -> dict[str, int]:
@@ -3551,12 +3591,15 @@ def _build_module_worker(
 
         console.print(
             f"\n[bold]Criterion wave {wave_number}:[/bold] {len(wave_criteria)} independent "
-            f"criteria in '{mod['name']}' building in parallel (each in its own worktree)..."
+            f"criteria in '{mod['name']}' building in parallel "
+            f"(up to {min(_max_parallel_criteria(), len(wave_criteria))} at once, each in its own worktree)..."
         )
         units = {c["id"]: f"{mod['name']}-{c['id']}" for c in wave_criteria}
         worktrees = {c["id"]: _setup_worktree(project_root, units[c["id"]]) for c in wave_criteria}
         results: dict[str, tuple[bool, list[str]]] = {}
-        with ThreadPoolExecutor(max_workers=len(wave_criteria)) as executor:
+        with ThreadPoolExecutor(
+            max_workers=min(_max_parallel_criteria(), len(wave_criteria))
+        ) as executor:
             futures = {
                 executor.submit(
                     _build_one_criterion, pcp_dir, worktrees[c["id"]], mod, c, build_model, build_model_explicit, budget, yes,

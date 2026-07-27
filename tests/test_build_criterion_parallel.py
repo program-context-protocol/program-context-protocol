@@ -28,12 +28,16 @@ def _init_repo(tmp_path) -> Path:
 
 # ── opt-in signal + wave computation, pure logic ──
 
-def test_no_depends_on_anywhere_means_disabled():
+def test_no_depends_on_anywhere_means_fully_independent(monkeypatch):
+    """Corrected 2026-07-27. This used to assert False — the opt-in read
+    backwards. Declaring no dependencies means the criteria ARE independent,
+    which is precisely when fanning out is correct."""
+    monkeypatch.delenv("PCP_CRITERIA_SERIAL", raising=False)
     mod = {"pending_criteria": [
         {"id": "A001", "description": "x"},
         {"id": "A002", "description": "y"},
     ]}
-    assert _criteria_parallel_enabled(mod) is False
+    assert _criteria_parallel_enabled(mod) is True
 
 
 def test_empty_depends_on_list_still_counts_as_opt_in():
@@ -184,10 +188,11 @@ _GATE_PATCHES = dict(
 )
 
 
-def test_default_module_without_depends_on_stays_sequential_no_worktrees(tmp_path, monkeypatch):
-    """Regression check: a module where no criterion declares depends_on
-    must build exactly as before -- no worktree ever created for a
-    criterion, no wave banner printed."""
+def test_module_without_depends_on_now_fans_out(tmp_path, monkeypatch):
+    """Corrected 2026-07-27: this asserted the opposite. A module whose
+    criteria declare no dependencies used to run one criterion at a time —
+    ontology-foundry's logic-artifact-storage ran 12 criteria on a single
+    agent for exactly this reason."""
     repo = _init_repo(tmp_path / "repo")
     pcp_dir = repo / ".pcp"
     pcp_dir.mkdir()
@@ -196,8 +201,8 @@ def test_default_module_without_depends_on_stays_sequential_no_worktrees(tmp_pat
     _git(["add", "-A"], repo)
     _git(["commit", "-q", "-m", "scaffold"], repo)
 
-    timing_log = tmp_path / "timing.log"
-    _fake_claude(tmp_path, monkeypatch, timing_log)
+    monkeypatch.delenv("PCP_CRITERIA_SERIAL", raising=False)
+    _fake_claude(tmp_path, monkeypatch, tmp_path / "timing.log")
 
     with patch("pcp.commands.build._run_test_suite_check", return_value=[]), \
          patch("pcp.commands.build._run_lint_check", return_value=[]), \
@@ -209,12 +214,9 @@ def test_default_module_without_depends_on_stays_sequential_no_worktrees(tmp_pat
         result = runner.invoke(cli, ["build", "--module", "add", "--path", str(repo)])
 
     assert result.exit_code == 0, result.output
-    assert "in parallel" not in result.output
+    assert "in parallel" in result.output
     assert (repo / "A001.txt").exists()
     assert (repo / "A002.txt").exists()
-    worktree_list = _git(["worktree", "list"], repo).stdout
-    assert "repo-add-A001" not in worktree_list
-    assert "repo-add-A002" not in worktree_list
 
     acc = yaml.safe_load((pcp_dir / "strategy" / "modules" / "add" / "acceptance.yaml").read_text())
     assert {c["id"]: c["status"] for c in acc["criteria"]} == {"A001": "complete", "A002": "complete"}
@@ -337,3 +339,61 @@ def test_undeclared_criteria_fan_out_end_to_end(tmp_path, monkeypatch):
     assert (repo / "A001.txt").exists() and (repo / "A002.txt").exists()
     acc = yaml.safe_load((pcp_dir / "strategy" / "modules" / "add" / "acceptance.yaml").read_text())
     assert {c["id"]: c["status"] for c in acc["criteria"]} == {"A001": "complete", "A002": "complete"}
+
+
+# ── Parallelism is the default; the pool is capped (2026-07-27) ──
+
+def test_module_with_no_depends_on_anywhere_still_parallelises(monkeypatch):
+    """The opt-in read backwards: a module whose criteria declare NO
+    dependencies is stating they are independent — the BEST case for fanning
+    out — and PCP ran it one criterion at a time. ontology-foundry's
+    logic-artifact-storage has 12 criteria, 0 with depends_on, 1 agent."""
+    monkeypatch.delenv("PCP_CRITERIA_SERIAL", raising=False)
+    from pcp.commands.build import _criteria_parallel_enabled, _compute_criterion_waves
+    mod = {"pending_criteria": [{"id": f"A00{i}"} for i in range(1, 5)]}
+    assert _criteria_parallel_enabled(mod) is True
+    assert set(_compute_criterion_waves(mod).values()) == {0}, "all independent -> one wave"
+
+
+def test_depends_on_still_orders_criteria(monkeypatch):
+    """depends_on keeps its real job — ordering — it just no longer doubles as
+    an opt-in switch."""
+    monkeypatch.delenv("PCP_CRITERIA_SERIAL", raising=False)
+    from pcp.commands.build import _compute_criterion_waves
+    mod = {"pending_criteria": [
+        {"id": "A1"}, {"id": "A2", "depends_on": ["A1"]}, {"id": "A3"},
+    ]}
+    w = _compute_criterion_waves(mod)
+    assert w["A1"] == 0 and w["A3"] == 0
+    assert w["A2"] == 1, "a declared dependency must still push it later"
+
+
+def test_single_criterion_does_not_spin_up_worktrees(monkeypatch):
+    monkeypatch.delenv("PCP_CRITERIA_SERIAL", raising=False)
+    from pcp.commands.build import _criteria_parallel_enabled
+    assert _criteria_parallel_enabled({"pending_criteria": [{"id": "A1"}]}) is False
+
+
+def test_serial_escape_hatch(monkeypatch):
+    monkeypatch.setenv("PCP_CRITERIA_SERIAL", "1")
+    from pcp.commands.build import _criteria_parallel_enabled
+    assert _criteria_parallel_enabled({"pending_criteria": [{"id": "A1"}, {"id": "A2"}]}) is False
+
+
+def test_criterion_pool_is_capped(monkeypatch):
+    """The criterion pool was uncapped while the module pool was capped at 5 —
+    the asymmetry behind the 2026-07-22 30+-agent spawn. Harmless while
+    parallelism was opt-in; with it defaulted on, core-data-model's 46
+    independent criteria would start 46 agents against one Postgres."""
+    import inspect
+    from pcp.commands import build
+    monkeypatch.delenv("PCP_BUILD_MAX_PARALLEL_CRITERIA", raising=False)
+    assert build._max_parallel_criteria() == 5
+    monkeypatch.setenv("PCP_BUILD_MAX_PARALLEL_CRITERIA", "15")
+    assert build._max_parallel_criteria() == 15
+    monkeypatch.setenv("PCP_BUILD_MAX_PARALLEL_CRITERIA", "0")
+    assert build._max_parallel_criteria() == 1, "must never be zero"
+
+    src = inspect.getsource(build._build_module_worker)
+    assert "max_workers=min(_max_parallel_criteria()" in src.replace("\n", "").replace(" ", "") \
+        or "_max_parallel_criteria()" in src, "criterion pool must consult the cap"
