@@ -304,6 +304,63 @@ def _compute_criterion_waves(mod: dict) -> dict[str, int]:
     return wave_of
 
 
+def _partition_wave_by_file_scope(wave_criteria: list[dict]) -> list[list[dict]]:
+    """Split one dependency wave into sub-waves that cannot collide on a file.
+
+    `depends_on` expresses ORDER, never file disjointness. Two criteria with no
+    dependency between them are scheduled together and each builds in its own
+    worktree, blind to the other — so if both create the same file, both pass
+    their own gates and the second merge dies on CONFLICT (add/add), leaving the
+    build stopped and a human holding a git conflict.
+
+    Observed 2026-07-27 (signtool dogfood): pdf-document-storage A001 and A004
+    both created `src/pdf_document_storage/logging_safety.py` and both edited
+    `pyproject.toml`. A004 merged; A001 could not. Flagged as a known risk on
+    07-25 and left unfixed — this is that fix.
+
+    The rule is conservative on purpose: run two criteria together only when
+    PCP can PROVE they touch different files, which means both declared a
+    `target` and the targets differ. A criterion with no declared target has an
+    unknown file surface, so it gets a sub-wave to itself. That is the honest
+    reading — fanning out work whose blast radius nobody declared is the unsafe
+    act, not parallelism as such.
+
+    Cost is real: `pcp kickoff` did not populate `target` at all until this same
+    change taught it to, so existing projects lose criterion-level parallelism
+    until their specs declare targets. That is the correct trade — a halted
+    build and manual git surgery cost far more than serial execution, and the
+    slowdown is exactly the incentive to declare targets. Set
+    PCP_CRITERIA_PARALLEL_UNDECLARED=1 to restore the old optimistic behavior.
+
+    Order within the wave is preserved; this only decides what may run
+    alongside what.
+    """
+    optimistic = os.environ.get("PCP_CRITERIA_PARALLEL_UNDECLARED") == "1"
+    sub_waves: list[list[dict]] = []
+    current: list[dict] = []
+    claimed: set[str] = set()
+
+    for c in wave_criteria:
+        target = (c.get("target") or "").strip()
+        if not target and not optimistic:
+            # Unknown blast radius — never run alongside anything else.
+            if current:
+                sub_waves.append(current)
+                current, claimed = [], set()
+            sub_waves.append([c])
+            continue
+        key = target or f"__undeclared__{c['id']}"
+        if key in claimed:
+            sub_waves.append(current)
+            current, claimed = [], set()
+        current.append(c)
+        claimed.add(key)
+
+    if current:
+        sub_waves.append(current)
+    return sub_waves
+
+
 # ── Worktree isolation for parallel module builds ──────────────────────────
 # Each module being built concurrently gets its own git worktree + branch, same
 # pattern as the /pcp skill's Branch Isolation Protocol. Only the coding
@@ -3421,8 +3478,12 @@ def _build_module_worker(
     # just given a criterion-scoped unit name instead of a module name).
     wave_of = _compute_criterion_waves(mod)
     num_waves = max(wave_of.values(), default=0) + 1
+    scheduled: list[list[dict]] = []
     for wave_number in range(num_waves):
-        wave_criteria = [c for c in mod["pending_criteria"] if wave_of.get(c["id"], 0) == wave_number]
+        in_wave = [c for c in mod["pending_criteria"] if wave_of.get(c["id"], 0) == wave_number]
+        if in_wave:
+            scheduled.extend(_partition_wave_by_file_scope(in_wave))
+    for wave_number, wave_criteria in enumerate(scheduled):
         if not wave_criteria:
             continue
 

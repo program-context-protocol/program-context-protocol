@@ -697,3 +697,88 @@ def test_no_unregistered_pcp_runtime_writer():
         f"{unregistered}. Decide which it is — an operational write must be "
         "registered or it will pollute the judge diff and break wave merges."
     )
+
+
+# ── File-scope wave partitioning (the 2026-07-27 collision, fixed) ──
+
+def _crit(cid, target=None, **kw):
+    c = {"id": cid, "description": f"criterion {cid}", "status": "pending"}
+    if target:
+        c["target"] = target
+    c.update(kw)
+    return c
+
+
+def test_undeclared_targets_never_run_together(monkeypatch):
+    """The signtool failure: A001 and A004 had no declared target, ran
+    concurrently, both created the same file, and the second merge died on
+    CONFLICT (add/add). Unknown blast radius means run alone."""
+    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_UNDECLARED", raising=False)
+    from pcp.commands.build import _partition_wave_by_file_scope
+
+    waves = _partition_wave_by_file_scope([_crit("A001"), _crit("A002"), _crit("A004")])
+    assert [[c["id"] for c in w] for w in waves] == [["A001"], ["A002"], ["A004"]]
+
+
+def test_distinct_declared_targets_still_run_in_parallel(monkeypatch):
+    """The fix must not kill parallelism outright — declaring distinct targets
+    is what buys it back."""
+    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_UNDECLARED", raising=False)
+    from pcp.commands.build import _partition_wave_by_file_scope
+
+    waves = _partition_wave_by_file_scope([
+        _crit("A001", target="src/a.py"),
+        _crit("A002", target="src/b.py"),
+        _crit("A003", target="src/c.py"),
+    ])
+    assert len(waves) == 1
+    assert [c["id"] for c in waves[0]] == ["A001", "A002", "A003"]
+
+
+def test_same_declared_target_is_serialised(monkeypatch):
+    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_UNDECLARED", raising=False)
+    from pcp.commands.build import _partition_wave_by_file_scope
+
+    waves = _partition_wave_by_file_scope([
+        _crit("A001", target="src/shared.py"),
+        _crit("A002", target="src/other.py"),
+        _crit("A003", target="src/shared.py"),
+    ])
+    ids = [[c["id"] for c in w] for w in waves]
+    # A003 collides with A001, so it cannot be in the same sub-wave.
+    for w in ids:
+        assert not ("A001" in w and "A003" in w)
+    assert sum(len(w) for w in ids) == 3, "no criterion may be dropped"
+
+
+def test_no_criterion_is_ever_dropped_or_duplicated(monkeypatch):
+    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_UNDECLARED", raising=False)
+    from pcp.commands.build import _partition_wave_by_file_scope
+
+    crits = [
+        _crit("A001"), _crit("A002", target="src/a.py"),
+        _crit("A003", target="src/a.py"), _crit("A004", target="src/b.py"),
+        _crit("A005"),
+    ]
+    waves = _partition_wave_by_file_scope(crits)
+    flat = [c["id"] for w in waves for c in w]
+    assert sorted(flat) == ["A001", "A002", "A003", "A004", "A005"]
+    assert len(flat) == len(set(flat))
+
+
+def test_optimistic_opt_out_restores_old_behaviour(monkeypatch):
+    monkeypatch.setenv("PCP_CRITERIA_PARALLEL_UNDECLARED", "1")
+    from pcp.commands.build import _partition_wave_by_file_scope
+
+    waves = _partition_wave_by_file_scope([_crit("A001"), _crit("A002"), _crit("A004")])
+    assert len(waves) == 1, "opt-out must let undeclared criteria run together again"
+
+
+def test_kickoff_prompt_no_longer_endorses_merge_time_collisions():
+    """The prompt used to tell the model to 'let the two criteria's own
+    file-level conflicts surface at merge time' — actively instructing the
+    failure mode that halted the signtool build."""
+    from pcp.commands import kickoff
+    src = Path(kickoff.__file__).read_text()
+    assert "surface at merge time" not in src
+    assert "target" in src and "targets differ" in src

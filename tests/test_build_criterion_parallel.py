@@ -143,17 +143,26 @@ FAKE_AGENT = textwrap.dedent("""\
 
 
 def _write_module(pcp_dir, name, criteria):
-    """criteria: list of (id, depends_on_or_None)."""
+    """criteria: list of (id, depends_on_or_None) or (id, deps, target).
+
+    `target` matters since 2026-07-27: criterion-level parallelism now requires
+    PCP to be able to PROVE two criteria touch different files, which means both
+    declared a target and the targets differ. Undeclared targets are serialised.
+    """
     mod_dir = pcp_dir / "strategy" / "modules" / name
     mod_dir.mkdir(parents=True)
     spec = {"version": "1.0", "module": name, "description": f"module {name} does something.",
             "objective_coverage": ["x"], "dependencies": [], "constraints": []}
     (mod_dir / "spec.yaml").write_text(yaml.dump(spec))
     crit_entries = []
-    for cid, deps in criteria:
+    for spec_tuple in criteria:
+        cid, deps = spec_tuple[0], spec_tuple[1]
+        target = spec_tuple[2] if len(spec_tuple) > 2 else None
         entry = {"id": cid, "description": "core impl", "check": "manual", "status": "pending"}
         if deps is not None:
             entry["depends_on"] = deps
+        if target:
+            entry["target"] = target
         crit_entries.append(entry)
     acc = {"version": "1.0", "module": name, "criteria": crit_entries}
     (mod_dir / "acceptance.yaml").write_text(yaml.dump(acc))
@@ -216,7 +225,8 @@ def test_opted_in_independent_criteria_build_concurrently_in_worktrees(tmp_path,
     pcp_dir = repo / ".pcp"
     pcp_dir.mkdir()
     (pcp_dir / "objective.md").write_text("# Objective\nBuild things.")
-    _write_module(pcp_dir, "add", [("A001", []), ("A002", [])])
+    # Distinct declared targets — what buys parallelism since 2026-07-27.
+    _write_module(pcp_dir, "add", [("A001", [], "src/a001.py"), ("A002", [], "src/a002.py")])
     _git(["add", "-A"], repo)
     _git(["commit", "-q", "-m", "scaffold"], repo)
 
@@ -233,7 +243,7 @@ def test_opted_in_independent_criteria_build_concurrently_in_worktrees(tmp_path,
         result = runner.invoke(cli, ["build", "--module", "add", "--path", str(repo)])
 
     assert result.exit_code == 0, result.output
-    assert "Criterion wave 0: 2 independent criteria in 'add' building in parallel" in result.output
+    assert "2 independent criteria in 'add' building in parallel" in result.output
     assert (repo / "A001.txt").exists()
     assert (repo / "A002.txt").exists()
 
@@ -292,3 +302,35 @@ def test_opted_in_chain_dependency_still_runs_in_order(tmp_path, monkeypatch):
         crit, phase, ts = line.split()
         events.setdefault(crit, {})[phase] = float(ts)
     assert events["A001"]["end"] <= events["A002"]["start"]
+
+
+def test_undeclared_targets_are_serialised_end_to_end(tmp_path, monkeypatch):
+    """The signtool regression, end to end: two independent criteria with no
+    declared target must NOT be fanned out into concurrent worktrees, because
+    nothing can prove they won't create the same file. Both must still build."""
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Objective\nBuild things.")
+    _write_module(pcp_dir, "add", [("A001", []), ("A002", [])])   # no targets
+    _git(["add", "-A"], repo)
+    _git(["commit", "-q", "-m", "scaffold"], repo)
+
+    _fake_claude(tmp_path, monkeypatch, tmp_path / "timing.log")
+
+    with patch("pcp.commands.build._run_test_suite_check", return_value=[]), \
+         patch("pcp.commands.build._run_lint_check", return_value=[]), \
+         patch("pcp.commands.build._run_sast_check", return_value=[]), \
+         patch("pcp.commands.build._run_layer1_check", return_value=[]), \
+         patch("pcp.commands.build._run_architect_review", return_value=[]), \
+         patch("pcp.commands.build._run_gate_check", return_value=[]):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["build", "--module", "add", "--path", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    assert "building in parallel" not in result.output, \
+        "criteria with undeclared file surface must not be fanned out"
+    assert (repo / "A001.txt").exists() and (repo / "A002.txt").exists(), \
+        "serialising must not drop work"
+    acc = yaml.safe_load((pcp_dir / "strategy" / "modules" / "add" / "acceptance.yaml").read_text())
+    assert {c["id"]: c["status"] for c in acc["criteria"]} == {"A001": "complete", "A002": "complete"}

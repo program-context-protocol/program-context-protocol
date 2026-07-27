@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "program-context-protocol"
-version = "0.9.11"
+version = "0.9.12"
 description = "PCP — prevent LLM hallucination and context drift across dev sessions"
 license = {text = "MIT OR Apache-2.0"}
 requires-python = ">=3.10"

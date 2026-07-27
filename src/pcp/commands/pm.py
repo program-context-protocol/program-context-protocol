@@ -86,7 +86,8 @@ Output schema:
               "rationale": "Why this decision, one sentence.",
               "candidates_considered": []
             },
-            "depends_on": []
+            "depends_on": [],
+            "target": "src/path/to/the/file/this/criterion/writes.py"
           }
         ]
       }
@@ -97,6 +98,8 @@ Output schema:
 Every NEW criterion MUST declare logic_tier (1-6, the cheapest rung that correctly makes this decision: 1=deterministic, 2=optimization/solver, 3=statistical/ML, 4=RAG, 5=cached reuse, 6=deep-think LLM -- default to the cheapest rung that genuinely fits, do not default everything to 6) and build_vs_buy: {decision, rationale, candidates_considered} where decision is exactly one of: reuse_whole, reuse_partial (vendor one file/function, not the whole repo), reimplement_from_reference (study a solved approach and write original code, no code copied), fork_adapt, build_fresh. If a module this intent touches is infrastructure-shaped (portal, auth, integrations, orchestration engine), its spec_changes ALSO needs a real module-level build_vs_buy decision instead of 'not_applicable'.
 
 Every NEW criterion MUST also declare depends_on: a list of OTHER criterion ids (within the same module) that must be built first. Default to an EMPTY list -- most criteria are genuinely independent and should build in parallel. Only list a real id when this criterion's implementation would break or be meaningless without that other one existing first. When genuinely unsure, prefer the empty list -- a false dependency costs real parallelism for nothing.
+
+Every criterion SHOULD also declare `target`: the single primary file path it will create or modify (e.g. "src/storage/upload.py"). This is not documentation -- build.py schedules criterion-level parallelism from it. Two criteria run concurrently, each in its own isolated worktree blind to the other, ONLY when both declare a target and the targets differ; a criterion with no declared target has an unknown file surface and is run alone. Declaring accurate, DISTINCT targets is therefore what buys parallel builds. Two criteria that will genuinely both touch the same file must either declare that same target (so they are serialised) or be split differently -- never leave it blank hoping it works out.
 """
 
 
