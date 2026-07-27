@@ -169,7 +169,7 @@ def test_full_suite_escape_hatch_disables_scoping(tmp_path, monkeypatch):
         mock_run.return_value = MagicMock(returncode=0, stdout="5 passed", stderr="")
         qa.run_test_suite(tmp_path, pcp_dir=tmp_path / ".pcp", changed_files=["src/x.py"])
     mock_scope.assert_not_called()
-    assert mock_run.call_args.args[0] == ["pytest", "-q"]
+    assert mock_run.call_args.args[0] == ["/usr/bin/pytest", "-q"]
 
 
 def test_run_test_suite_scopes_pytest_args_when_enabled_and_paths_found(tmp_path, monkeypatch):
@@ -179,7 +179,7 @@ def test_run_test_suite_scopes_pytest_args_when_enabled_and_paths_found(tmp_path
             patch("pcp.impact.blast_radius_test_paths", return_value=["tests/test_x.py"]):
         mock_run.return_value = MagicMock(returncode=0, stdout="1 passed", stderr="")
         result = qa.run_test_suite(tmp_path, pcp_dir=tmp_path / ".pcp", changed_files=["src/x.py"])
-    assert mock_run.call_args.args[0] == ["pytest", "-q", "tests/test_x.py"]
+    assert mock_run.call_args.args[0] == ["/usr/bin/pytest", "-q", "tests/test_x.py"]
     assert result["scoped_to"] == ["tests/test_x.py"]
 
 
@@ -192,7 +192,7 @@ def test_run_test_suite_falls_back_to_full_when_scoping_returns_none(tmp_path, m
             patch("pcp.impact.blast_radius_test_paths", return_value=None):
         mock_run.return_value = MagicMock(returncode=0, stdout="5 passed", stderr="")
         result = qa.run_test_suite(tmp_path, pcp_dir=tmp_path / ".pcp", changed_files=["src/x.py"])
-    assert mock_run.call_args.args[0] == ["pytest", "-q"]
+    assert mock_run.call_args.args[0] == ["/usr/bin/pytest", "-q"]
     assert result.get("scoped_to") is None
 
 
@@ -203,7 +203,7 @@ def test_run_test_suite_falls_back_to_full_when_scoping_raises(tmp_path, monkeyp
             patch("pcp.impact.blast_radius_test_paths", side_effect=RuntimeError("boom")):
         mock_run.return_value = MagicMock(returncode=0, stdout="5 passed", stderr="")
         result = qa.run_test_suite(tmp_path, pcp_dir=tmp_path / ".pcp", changed_files=["src/x.py"])
-    assert mock_run.call_args.args[0] == ["pytest", "-q"]
+    assert mock_run.call_args.args[0] == ["/usr/bin/pytest", "-q"]
     assert result.get("scoped_to") is None
 
 
@@ -215,7 +215,8 @@ def test_testmon_detected_by_asking_pytest_not_by_importing(tmp_path):
     its own venv. Importing testmon here would answer the wrong question."""
     import inspect
     src = inspect.getsource(qa.testmon_available)
-    assert '"pytest", "--help"' in src or "'pytest', '--help'" in src
+    assert '"--help"' in src
+    assert "project_tool(" in src, "must ask the SAME pytest that will run the tests"
     assert "import testmon" not in src
 
 
@@ -254,7 +255,7 @@ def test_wave_merge_path_stays_full_and_unscoped(tmp_path):
          patch("pcp.qa.subprocess.run") as run:
         run.return_value = MagicMock(returncode=0, stdout="1279 passed", stderr="")
         qa.run_test_suite(tmp_path)
-    assert run.call_args.args[0] == ["pytest", "-q"]
+    assert run.call_args.args[0] == ["/usr/bin/pytest", "-q"]
 
 
 def test_broken_testmon_db_falls_back_to_a_real_run(tmp_path):
@@ -285,3 +286,64 @@ def test_testmon_cache_is_never_auto_committed():
     shape that broke wave merges twice today."""
     from pcp.commands.build import _AUTO_COMMIT_EXCLUDES
     assert ":!.testmondata" in _AUTO_COMMIT_EXCLUDES
+
+
+# ── Tools resolve from the project venv, not PATH (2026-07-27) ──
+
+def _fake_venv(tmp_path, *tools):
+    d = tmp_path / ".venv" / "bin"
+    d.mkdir(parents=True)
+    for t in tools:
+        f = d / t
+        f.write_text("#!/bin/sh\nexit 0\n")
+        f.chmod(0o755)
+    return d
+
+
+def test_project_venv_wins_over_path(tmp_path):
+    """PCP shelled out to a bare `pytest`, so a user who ran `pcp build`
+    without activating the venv had their project tested by whatever pytest was
+    global — different interpreter, different packages, results describing some
+    other environment. Same shape as the Postgres check counting schemas on
+    whatever answered 5432."""
+    d = _fake_venv(tmp_path, "pytest")
+    assert qa.project_tool(tmp_path, "pytest") == str(d / "pytest")
+
+
+def test_falls_back_to_path_when_no_venv(tmp_path):
+    with patch("shutil.which", return_value="/usr/local/bin/pytest"):
+        assert qa.project_tool(tmp_path, "pytest") == "/usr/local/bin/pytest"
+
+
+def test_falls_back_when_venv_lacks_the_tool(tmp_path):
+    """A venv with pytest but no semgrep must still find the global semgrep."""
+    _fake_venv(tmp_path, "pytest")
+    with patch("shutil.which", return_value="/usr/local/bin/semgrep"):
+        assert qa.project_tool(tmp_path, "semgrep") == "/usr/local/bin/semgrep"
+
+
+def test_path_override_forces_old_behaviour(tmp_path, monkeypatch):
+    _fake_venv(tmp_path, "pytest")
+    monkeypatch.setenv("PCP_TOOL_FROM_PATH", "1")
+    with patch("shutil.which", return_value="/usr/local/bin/pytest"):
+        assert qa.project_tool(tmp_path, "pytest") == "/usr/local/bin/pytest"
+
+
+def test_pytest_run_uses_the_resolved_binary_and_reports_it(tmp_path):
+    d = _fake_venv(tmp_path, "pytest")
+    with patch.object(qa, "testmon_available", return_value=False), \
+         patch("pcp.qa.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="7 passed", stderr="")
+        out = qa._run_pytest(tmp_path, ["tests/x"])
+    assert run.call_args.args[0][0] == str(d / "pytest")
+    assert out["pytest_bin"] == str(d / "pytest"), "the result must name which pytest ran"
+
+
+def test_testmon_detection_asks_the_same_pytest_that_will_run(tmp_path):
+    """Detecting against the global pytest while running the venv's one would
+    answer the wrong question in both directions."""
+    d = _fake_venv(tmp_path, "pytest")
+    with patch("pcp.qa.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="--testmon", stderr="")
+        assert qa.testmon_available(tmp_path) is True
+    assert run.call_args.args[0][0] == str(d / "pytest")

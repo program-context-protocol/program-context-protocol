@@ -65,6 +65,37 @@ def _timeout_sast() -> int:
     return int(os.environ.get("PCP_QA_SAST_TIMEOUT_SEC", "120"))
 
 
+def project_tool(project_root: Path, name: str) -> str | None:
+    """Resolve a dev tool from the PROJECT's virtualenv before falling back to PATH.
+
+    PCP shelled out to a bare `pytest`, which resolves from PATH. A user who
+    runs `pcp build` without activating the project's venv therefore had their
+    project tested by whatever pytest happened to be global -- a different
+    interpreter, different installed packages, and results that describe some
+    other environment. It stayed invisible because activating the venv is the
+    normal habit; nothing failed loudly when it wasn't.
+
+    That is the same shape as two other bugs found on 2026-07-27: the Postgres
+    check counting schemas on whatever answered port 5432 (a shadow container,
+    for four days), and `pcp --version` reporting metadata while the code was
+    something else. A check aimed confidently at the wrong target reads exactly
+    like a passing check.
+
+    Order: the project's own venv, then PATH. `PCP_TOOL_FROM_PATH=1` forces the
+    old behaviour for projects that deliberately use globally-installed tools.
+    """
+    if os.environ.get("PCP_TOOL_FROM_PATH") != "1":
+        for venv in (".venv", "venv", "env"):
+            for sub in ("bin", "Scripts"):
+                candidate = project_root / venv / sub / name
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return str(candidate)
+                exe = candidate.with_suffix(".exe")
+                if exe.is_file():
+                    return str(exe)
+    return shutil.which(name)
+
+
 def testmon_available(project_root: Path) -> bool:
     """Is pytest-testmon installed in the environment pytest will run from?
 
@@ -79,8 +110,11 @@ def testmon_available(project_root: Path) -> bool:
     """
     if os.environ.get("PCP_QA_NO_TESTMON") == "1":
         return False
+    pytest_bin = project_tool(project_root, "pytest")
+    if not pytest_bin:
+        return False
     try:
-        r = subprocess.run(["pytest", "--help"], capture_output=True, text=True,
+        r = subprocess.run([pytest_bin, "--help"], capture_output=True, text=True,
                            cwd=project_root, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return False
@@ -112,10 +146,11 @@ def _run_pytest(project_root: Path, test_paths: list[str] | None = None,
     runner is a cache, and the wave boundary is exactly where a cache should be
     distrusted and the real answer computed.
     """
-    if not shutil.which("pytest"):
+    pytest_bin = project_tool(project_root, "pytest")
+    if not pytest_bin:
         return None
     use_testmon = incremental and testmon_available(project_root)
-    args = ["pytest", "-q"] + (["--testmon"] if use_testmon else []) + list(test_paths or [])
+    args = [pytest_bin, "-q"] + (["--testmon"] if use_testmon else []) + list(test_paths or [])
     try:
         result = subprocess.run(
             args, capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
@@ -129,13 +164,14 @@ def _run_pytest(project_root: Path, test_paths: list[str] | None = None,
     # zero tests from a cache PCP cannot verify.
     if use_testmon and result.returncode not in (0, 1):
         plain = subprocess.run(
-            ["pytest", "-q", *(test_paths or [])],
+            [pytest_bin, "-q", *(test_paths or [])],
             capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
         return {
             "tool": "pytest", "passed": plain.returncode in (0, 5),
             "output": (plain.stdout + plain.stderr)[-3000:],
             "scoped_to": test_paths or None, "incremental": False,
+            "pytest_bin": pytest_bin,
             "testmon_fallback": f"testmon exited {result.returncode}; re-ran full scope",
         }
 
@@ -143,6 +179,7 @@ def _run_pytest(project_root: Path, test_paths: list[str] | None = None,
     return {
         "tool": "pytest", "passed": passed, "output": (result.stdout + result.stderr)[-3000:],
         "scoped_to": test_paths or None, "incremental": use_testmon,
+        "pytest_bin": pytest_bin,
     }
 
 
@@ -218,7 +255,7 @@ def run_test_suite(project_root: Path, pcp_dir: Path | None = None, changed_file
         except Exception:
             test_paths = None  # scoping failed -- fall back to the full suite, don't propagate
 
-    if test_paths and shutil.which("pytest"):
+    if test_paths and project_tool(project_root, "pytest"):
         out = _run_pytest(project_root, test_paths, incremental=True)
         if out is not None:
             return out
@@ -231,14 +268,15 @@ def run_test_suite(project_root: Path, pcp_dir: Path | None = None, changed_file
 
 
 def _run_ruff(project_root: Path, changed_files: list[str]) -> dict | None:
-    if not shutil.which("ruff"):
+    ruff_bin = project_tool(project_root, "ruff")
+    if not ruff_bin:
         return None
     py_files = [f for f in changed_files if f.endswith(".py")]
     if not py_files:
         return {"tool": "ruff", "passed": True, "issues": []}
     try:
         result = subprocess.run(
-            ["ruff", "check", *py_files], capture_output=True, text=True, cwd=project_root, timeout=_timeout_lint(),
+            [ruff_bin, "check", *py_files], capture_output=True, text=True, cwd=project_root, timeout=_timeout_lint(),
         )
     except subprocess.TimeoutExpired:
         return {"tool": "ruff", "passed": True, "issues": [], "skipped": "timed out"}
@@ -280,15 +318,17 @@ def run_lint(project_root: Path, changed_files: list[str]) -> dict:
 
 
 def _run_python_coverage(project_root: Path) -> dict | None:
-    if not shutil.which("coverage") or not shutil.which("pytest"):
+    coverage_bin = project_tool(project_root, "coverage")
+    pytest_bin = project_tool(project_root, "pytest")
+    if not coverage_bin or not pytest_bin:
         return None
     try:
         subprocess.run(
-            ["coverage", "run", "-m", "pytest", "-q"],
+            [coverage_bin, "run", "-m", "pytest", "-q"],
             capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
         result = subprocess.run(
-            ["coverage", "report", "--format=total"],
+            [coverage_bin, "report", "--format=total"],
             capture_output=True, text=True, cwd=project_root, timeout=30,
         )
     except subprocess.TimeoutExpired:
@@ -333,11 +373,12 @@ def run_coverage(project_root: Path) -> dict:
 
 def run_sast(project_root: Path, changed_files: list[str]) -> dict:
     """SAST + secret-scan via semgrep, if installed. Scoped to changed files."""
-    if not shutil.which("semgrep") or not changed_files:
+    semgrep_bin = project_tool(project_root, "semgrep")
+    if not semgrep_bin or not changed_files:
         return {"tool": None, "passed": True, "findings": []}
     try:
         result = subprocess.run(
-            ["semgrep", "--config=auto", "--quiet", "--error", *changed_files],
+            [semgrep_bin, "--config=auto", "--quiet", "--error", *changed_files],
             capture_output=True, text=True, cwd=project_root, timeout=_timeout_sast(),
         )
     except subprocess.TimeoutExpired:

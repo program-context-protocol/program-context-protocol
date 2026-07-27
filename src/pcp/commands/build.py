@@ -1626,7 +1626,16 @@ def _run_test_suite_check(pcp_dir: Path, project_root: Path, ctx: dict) -> list[
     scoped. PCP_QA_FULL_SUITE=1 restores the old behaviour."""
     result = qa.run_test_suite(project_root, pcp_dir=pcp_dir, changed_files=ctx.get("files"))
     if result.get("scoped_to"):
-        console.print(f"[dim]Test suite scoped to impacted modules: {', '.join(result['scoped_to'])}[/dim]")
+        detail = f"[dim]Test suite scoped to impacted modules: {', '.join(result['scoped_to'])}"
+        if result.get("incremental"):
+            detail += " (testmon: only tests whose dependencies changed)"
+        # Name the binary. A gate run by the wrong pytest -- the global one,
+        # because the project venv was not on PATH -- passes exactly like a
+        # correct one. Saying which interpreter produced the result is the
+        # cheapest defence against that whole class.
+        if result.get("pytest_bin"):
+            detail += f" via {result['pytest_bin']}"
+        console.print(detail + "[/dim]")
     violations: list[str] = []
     evidence_path = None
     if result["tool"]:
