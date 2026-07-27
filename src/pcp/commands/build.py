@@ -3513,10 +3513,22 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
         for c in unresolved_conflicts:
             console.print(f"  [red]{c.get('id')}[/red]: {c.get('description')}")
             console.print(f"    [dim]conflict: {c.get('drift_flag')}[/dim]")
+        # This message used to say "rewrite the spec by hand (spec files stay
+        # human-only)" -- the exact doctrine bug corrected on 2026-07-25:
+        # protected files are human-AUTHORIZED, not human-TYPED, and every one
+        # of them has a propose -> real-diff -> approve -> write path. Sending
+        # the user off to hand-edit, without naming the command built for
+        # precisely this moment (`--from-conflict` exists to pull the
+        # correction text straight out of the flagged item), was PCP telling
+        # people to bypass its own gated mechanism.
+        first_id = unresolved_conflicts[0].get("id", "<ID>")
         console.print(
-            "\n[yellow]A captured business decision conflicts with objective.md/target_state.md.[/yellow] "
-            "Rewrite the spec by hand to reflect it (spec files stay human-only), or if this is a false "
-            "positive: [dim]pcp objective-conflicts --dismiss <ID> --reason \"...\"[/dim]"
+            "\n[yellow]A captured business decision conflicts with objective.md/target_state.md.[/yellow]"
+        )
+        console.print(
+            f"  Resolve it:      [dim]pcp correct-objective --from-conflict {first_id}[/dim]\n"
+            f"                   [dim](LLM proposes the rewrite, you approve a real diff before anything is written)[/dim]\n"
+            f"  False positive:  [dim]pcp objective-conflicts --dismiss {first_id} --reason \"...\"[/dim]"
         )
         sys.exit(2)
     telemetry.record(

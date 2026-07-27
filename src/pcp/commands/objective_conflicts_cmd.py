@@ -58,7 +58,11 @@ def objective_conflicts_cmd(project_path: str | None, dismiss_id: str | None, re
             c.get("id", ""), c.get("description", ""), c.get("drift_flag", ""), c.get("source", ""),
         )
     console.print(table)
+    # Not "edit by hand": these files are human-AUTHORIZED, not human-typed,
+    # and `correct-objective --from-conflict` exists to pull the correction
+    # text straight out of the flagged item and diff it for approval.
+    first_id = unresolved[0].get("id", "<ID>")
     console.print(
-        "\n[dim]Resolve by editing objective.md/target_state.md by hand, or dismiss a false positive:[/dim]\n"
-        "[dim]pcp objective-conflicts --dismiss <ID> --reason \"...\"[/dim]"
+        f"\n[dim]Resolve:         pcp correct-objective --from-conflict {first_id}[/dim]\n"
+        f"[dim]False positive:  pcp objective-conflicts --dismiss {first_id} --reason \"...\"[/dim]"
     )

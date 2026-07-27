@@ -2,7 +2,8 @@
 
 Closes a real incident, 2026-07-22 (ontology-foundry dogfood): a business
 decision to stop storing business-transaction instances was made and agreed
-2026-07-20; objective.md/target_state.md (human-only edit, Hard Rule #1) never
+2026-07-20; objective.md/target_state.md (human-AUTHORIZED, Hard Rule 2 — see
+`pcp correct-objective` for the propose/diff/approve path) never
 got rewritten; two days later a 30+-agent, multi-million-token `pcp build`
 cycle built exactly the rejected shape end-to-end (storage layer, agent tools,
 UI) — every gate passed, because every gate validates the build against

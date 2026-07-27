@@ -412,3 +412,26 @@ def test_correct_objective_from_conflict_resolves_flagged_item(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert objective_conflicts.reconcile(pcp_dir) == []
+
+
+def test_conflict_guidance_names_the_gated_command_not_hand_editing():
+    """Hard Rule 2 is human-AUTHORIZED, not human-typed. Both the build gate
+    and the standalone command used to tell the user to rewrite specs 'by
+    hand', never naming `pcp correct-objective --from-conflict` — PCP sending
+    people around its own gated propose/diff/approve path. Found live in the
+    2026-07-27 signtool dogfood, where the gate fired correctly and then gave
+    the wrong instruction."""
+    import inspect
+    from pcp.commands import build as build_mod
+    from pcp.commands import objective_conflicts_cmd
+
+    for mod in (build_mod, objective_conflicts_cmd):
+        src = inspect.getsource(mod)
+        code = "\n".join(
+            ln for ln in src.splitlines() if not ln.lstrip().startswith("#")
+        )
+        assert "by hand" not in code, f"{mod.__name__} still tells users to hand-edit specs"
+        assert "human-only" not in code, f"{mod.__name__} still says spec files are human-only"
+
+    assert "correct-objective" in inspect.getsource(objective_conflicts_cmd)
+    assert "correct-objective" in inspect.getsource(build_mod)
