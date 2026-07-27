@@ -132,4 +132,6 @@ def test_records_telemetry_advisory(tmp_path):
     _run_wave_ui_kit_check(pcp_dir, [{"name": "widgets"}], 0)
     record = [r for r in _qa_records(pcp_dir) if r["check"] == "wave-ui-kit"][0]
     assert record["control_id"] == "CTRL-028"
-    assert record["result"] == "pass"  # advisory, never blocks the wave
+    assert record["result"] == "advisory"  # advisory: ran, found something, deliberately did not block.
+    # NOT "pass" -- that value is what `pcp provenance` reads, and claiming
+    # a clean pass for a check that found things falsifies the audit trail.

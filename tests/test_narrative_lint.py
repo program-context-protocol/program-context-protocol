@@ -174,4 +174,6 @@ def test_wave_check_records_telemetry_as_advisory_pass(tmp_path):
     assert len(findings) == 1  # stale date
     recs = [r for r in telemetry.load(pcp_dir) if r.get("check") == "wave-narrative-lint"]
     assert recs and recs[0]["control_id"] == "CTRL-036"
-    assert recs[0]["result"] == "pass"  # advisory never blocks
+    assert recs[0]["result"] == "advisory"  # advisory: ran, found something, deliberately did not block.
+    # NOT "pass" -- that value is what `pcp provenance` reads, and claiming
+    # a clean pass for a check that found things falsifies the audit trail.

@@ -482,6 +482,22 @@ def _wave_record(pcp_dir: Path, wave_number: int, check: str, control_id: str, e
     instead of only ever reaching the user as a console line."""
     if result is None:
         result = "block" if errors else "pass"
+    elif result == "pass" and errors:
+        # An advisory check passes `result="pass"` explicitly to say "found
+        # things, but do not block the wave". Recording that as a literal
+        # "pass" made the audit trail lie: eleven controls (CTRL-008, 019,
+        # 020, 021, 025, 027, 028, 030, 031, 033, 036) reported a clean pass
+        # in telemetry.jsonl no matter what they found, and `pcp provenance`
+        # reads exactly that field. A tool selling audit-grade evidence must
+        # not have its own controls falsify it.
+        #
+        # "advisory" is the honest third value: the check ran, it found
+        # something, and it deliberately did not block. Distinct from "pass"
+        # (found nothing), "block" (found something and stopped the wave),
+        # and "skipped" (never ran at all). `error_count` was always correct
+        # here, which is why `pcp control-audit` — keying off error_count —
+        # was unaffected; provenance keys off `result` and was not.
+        result = "advisory"
     telemetry.record(
         pcp_dir,
         cycle="qa", cycle_number=wave_number, check=f"wave-{check}", control_id=control_id,
@@ -893,6 +909,13 @@ _PCP_OPERATIONAL_PATHS = (
     ".pcp/brd.md", ".pcp/brd_items.yaml", ".pcp/coverage_audit.jsonl",
     ".pcp/escalations.yaml", ".pcp/prune_log.yaml", ".pcp/current_state.md",
     ".pcp/diff.md", ".pcp/notify_heartbeat.yaml",
+    # Added 2026-07-27. `_write_progress` (added 07-24) writes this on every
+    # single build attempt, so omitting it re-created the exact 07-17 bug the
+    # comment above describes: PCP's own bookkeeping landing in changed_files,
+    # polluting the judge diff and drawing scope-guard findings against the
+    # agent. Any NEW file PCP writes under .pcp/ during a build attempt must be
+    # added here at the same time it is introduced.
+    ".pcp/build_progress.yaml",
 )
 _PCP_OPERATIONAL_DIRS = (".pcp/evidence/", ".pcp/transcripts/")
 
@@ -1214,6 +1237,13 @@ def _qa_record(
             result = "skipped"
         else:
             result = "block" if errors else "pass"
+    elif result == "pass" and errors:
+        # Same invariant as _wave_record (see there for the full reasoning):
+        # an advisory check forces result="pass" to mean "found things, don't
+        # block", and recording that literally made the audit trail claim a
+        # clean pass. CTRL-032 (architect pre-flight) did exactly this, and
+        # the test suite asserted the falsified value rather than catching it.
+        result = "advisory"
 
     # Evidence-integrity self-check, 2026-07-21: a block with no real
     # evidence behind it is itself an anomaly, not a normal outcome to
@@ -2812,6 +2842,7 @@ def _run_architect_preflight(pcp_dir: Path, mod: dict, criterion: dict) -> list[
 def _run_install_only(
     pcp_dir: Path, project_root: Path, mod: dict, *,
     criterion: dict | None, install_command: str, candidate_desc: str, yes: bool,
+    budget: "_BuildBudget",
 ) -> tuple[bool, list[str]]:
     """Fast path for a human-confirmed direct prior-art match — skip the full
     TDD/architect-review/LLM-gate cycle entirely, just install + verify with
@@ -2871,6 +2902,17 @@ def _run_install_only(
 
     violations = _run_layer1_check(pcp_dir, project_root, changed_files, ctx)
     violations += _run_test_suite_check(pcp_dir, project_root, ctx)
+    # SAST added 2026-07-27. This fast path exists precisely to pull in
+    # THIRD-PARTY code on a human's say-so, which makes it the single place a
+    # supply-chain problem is most likely to enter — and it was the one path
+    # that skipped the secret/SAST scan entirely. The LLM gates are genuinely
+    # not worth running here (there is no agent-written diff to review, which
+    # is the whole point of the fast path), but a deterministic scan of what
+    # the install actually put on disk costs one semgrep run and is exactly
+    # the check this path most needs. Cheap, deterministic, no LLM calls —
+    # consistent with CTRL-034's "skip the expensive cycle, keep the
+    # verification" posture.
+    violations += _run_sast_check(pcp_dir, project_root, changed_files, ctx, budget)
 
     if violations:
         console.print("[red]Install-only smoke test failed — falling through to full build.[/red]")
@@ -2906,6 +2948,7 @@ def _build_one_criterion(
             ok, findings = _run_install_only(
                 pcp_dir, project_root, mod, criterion=c,
                 install_command=install_command, candidate_desc=candidate_desc, yes=yes,
+                budget=budget,
             )
             if ok:
                 return True, []
@@ -3282,6 +3325,7 @@ def _build_module_worker(
             ok, _findings = _run_install_only(
                 pcp_dir, project_root, mod, criterion=None,
                 install_command=install_command, candidate_desc=candidate_desc, yes=yes,
+                budget=budget,
             )
             if ok:
                 for c in mod["pending_criteria"]:

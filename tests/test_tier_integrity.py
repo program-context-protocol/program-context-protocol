@@ -64,7 +64,9 @@ def test_presence_records_telemetry_as_advisory_pass(tmp_path):
     _run_wave_tier_presence_check(pcp_dir, [{"name": "m"}], 0)
     recs = [r for r in telemetry.load(pcp_dir) if r.get("check") == "wave-tier-presence"]
     assert recs and recs[0]["control_id"] == "CTRL-019"
-    assert recs[0]["result"] == "pass"  # advisory never blocks
+    assert recs[0]["result"] == "advisory"  # advisory: ran, found something, deliberately did not block.
+    # NOT "pass" -- that value is what `pcp provenance` reads, and claiming
+    # a clean pass for a check that found things falsifies the audit trail.
 
 
 # ── CTRL-020 rung necessity ──

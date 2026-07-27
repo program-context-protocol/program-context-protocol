@@ -41,6 +41,7 @@ def test_declined_approval_falls_through(tmp_path):
         ok, findings = _run_install_only(
             pcp_dir, tmp_path, _mod(), criterion={"id": "A001"},
             install_command="true", candidate_desc="some-pkg", yes=False,
+            budget=_BuildBudget(max_sessions=10),
         )
     assert ok is False
     assert "declined" in findings[0]
@@ -57,6 +58,7 @@ def test_yes_flag_skips_prompt_installs_and_passes(tmp_path):
         ok, findings = _run_install_only(
             pcp_dir, tmp_path, _mod(), criterion={"id": "A001"},
             install_command="true", candidate_desc="some-pkg", yes=True,
+            budget=_BuildBudget(max_sessions=10),
         )
     mock_confirm.assert_not_called()
     assert ok is True
@@ -75,6 +77,7 @@ def test_install_command_failure_blocks(tmp_path):
     ok, findings = _run_install_only(
         pcp_dir, tmp_path, _mod(), criterion={"id": "A001"},
         install_command="exit 1", candidate_desc="some-pkg", yes=True,
+        budget=_BuildBudget(max_sessions=10),
     )
     assert ok is False
     assert "install_command failed" in findings[0]
@@ -88,8 +91,8 @@ def test_install_command_failure_blocks(tmp_path):
 def test_approval_log_is_hash_chained(tmp_path):
     _git_repo(tmp_path)
     pcp_dir = _pcp_dir(tmp_path)
-    _run_install_only(pcp_dir, tmp_path, _mod(), criterion={"id": "A001"}, install_command="true", candidate_desc="x", yes=True)
-    _run_install_only(pcp_dir, tmp_path, _mod(), criterion={"id": "A002"}, install_command="true", candidate_desc="y", yes=True)
+    _run_install_only(pcp_dir, tmp_path, _mod(), criterion={"id": "A001"}, install_command="true", candidate_desc="x", yes=True, budget=_BuildBudget(max_sessions=10))
+    _run_install_only(pcp_dir, tmp_path, _mod(), criterion={"id": "A002"}, install_command="true", candidate_desc="y", yes=True, budget=_BuildBudget(max_sessions=10))
     breaks = verify_chain(_approvals(pcp_dir))
     assert breaks == []
 

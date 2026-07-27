@@ -29,6 +29,11 @@ console = Console()
 
 RESULT_SYMBOL = {
     "pass": "OK", "block": "BLOCK", "skipped": "skip", "error": "ERROR", "bypassed": "bypass",
+    # "advisory" (2026-07-27): the check ran, found something, and deliberately
+    # did not block. Distinct from "pass" (found nothing) and "skipped" (never
+    # ran) — see _wave_record in build.py for why conflating it with "pass" was
+    # falsifying this very document.
+    "advisory": "ADVISORY",
 }
 
 # Fallback for telemetry records written before control_id existed (2026-07-01).

@@ -137,7 +137,9 @@ def test_nav_depth_records_telemetry_advisory(tmp_path):
     _run_wave_nav_depth_check(pcp_dir, [{"name": "widgets"}], 0)
     record = [r for r in _qa_records(pcp_dir) if r["check"] == "wave-nav-depth"][0]
     assert record["control_id"] == "CTRL-025"
-    assert record["result"] == "pass"  # advisory, never blocks the wave
+    assert record["result"] == "advisory"  # advisory: ran, found something, deliberately did not block.
+    # NOT "pass" -- that value is what `pcp provenance` reads, and claiming
+    # a clean pass for a check that found things falsifies the audit trail.
 
 
 # ── CTRL-027: top menu bar convention (desktop_app archetype only) ──

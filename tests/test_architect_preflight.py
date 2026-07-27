@@ -58,7 +58,9 @@ def test_preflight_returns_rendered_findings(tmp_path):
         result = _run_architect_preflight(pcp_dir, _mod(), criterion)
     assert result == ["rung mismatch — reconsider tier"]
     record = [r for r in _qa_records(pcp_dir) if r["check"] == "architect-preflight"][0]
-    assert record["result"] == "pass"  # advisory, never blocks
+    assert record["result"] == "advisory"  # advisory: ran, found something, deliberately did not block.
+    # NOT "pass" -- that value is what `pcp provenance` reads, and claiming
+    # a clean pass for a check that found things falsifies the audit trail.
     assert record["error_count"] == 1
 
 

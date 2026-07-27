@@ -470,3 +470,75 @@ def test_failed_merge_leaves_no_half_merged_repo(tmp_path):
     # The base branch's own commit must be intact -- aborting cleans up the
     # half-merge, it does not revert work that was already committed.
     assert (repo / "shared.txt").read_text() == "from base\n"
+
+
+# ── Audit-trail honesty + install-only SAST (2026-07-27) ──
+
+def test_advisory_check_with_findings_is_not_recorded_as_pass(tmp_path):
+    """Eleven wave checks pass result="pass" explicitly to mean "don't block
+    the wave". Recording that literally made telemetry.jsonl — which `pcp
+    provenance` reads directly — report a clean pass no matter what they
+    found. A tool selling audit-grade evidence must not falsify its own."""
+    from pcp.commands.build import _wave_record
+    import json
+
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+
+    _wave_record(pcp_dir, 1, "nav-depth", "CTRL-025", ["nav is 5 deep"], files=["a.tsx"], result="pass")
+    _wave_record(pcp_dir, 1, "menu-bar", "CTRL-027", [], files=["b.tsx"], result="pass")
+
+    records = [json.loads(ln) for ln in (pcp_dir / "telemetry.jsonl").read_text().splitlines() if ln.strip()]
+    found = {r["check"]: r for r in records}
+
+    assert found["wave-nav-depth"]["result"] == "advisory", "a check that found something is not a pass"
+    assert found["wave-nav-depth"]["error_count"] == 1
+    assert found["wave-menu-bar"]["result"] == "pass", "a genuinely clean check stays a pass"
+
+
+def test_wave_record_default_and_block_paths_unchanged(tmp_path):
+    from pcp.commands.build import _wave_record
+    import json
+
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _wave_record(pcp_dir, 1, "contract", "CTRL-007", ["dep incomplete"])      # no result= -> block
+    _wave_record(pcp_dir, 1, "test-suite", "CTRL-001", [])                     # no result= -> pass
+    _wave_record(pcp_dir, 1, "sast", "CTRL-003", ["x"], result="skipped")      # explicit non-pass preserved
+
+    r = {json.loads(ln)["check"]: json.loads(ln) for ln in
+         (pcp_dir / "telemetry.jsonl").read_text().splitlines() if ln.strip()}
+    assert r["wave-contract"]["result"] == "block"
+    assert r["wave-test-suite"]["result"] == "pass"
+    assert r["wave-sast"]["result"] == "skipped", "an explicit non-pass result must not be rewritten"
+
+
+def test_provenance_renders_advisory_result():
+    """A result value telemetry can emit but provenance cannot render would
+    show up as a blank cell in the audit document."""
+    from pcp.commands.provenance import RESULT_SYMBOL
+    assert "advisory" in RESULT_SYMBOL
+
+
+def test_install_only_scans_what_it_installed():
+    """The fast path exists to pull in THIRD-PARTY code on a human's say-so —
+    the likeliest supply-chain entry point in the whole tool — and it was the
+    one path that skipped the secret/SAST scan."""
+    import inspect
+    from pcp.commands.build import _run_install_only
+    src = inspect.getsource(_run_install_only)
+    assert "_run_sast_check" in src
+    assert "_run_layer1_check" in src
+    assert "_run_test_suite_check" in src
+
+
+def test_pcp_own_progress_file_is_not_agent_output():
+    """_write_progress writes this on every attempt; if it is not classified
+    as operational it lands in changed_files, pollutes the judge diff and
+    draws scope-guard findings against the agent — the exact 2026-07-17 bug."""
+    from pcp.commands.build import _is_pcp_operational
+    assert _is_pcp_operational(".pcp/build_progress.yaml")
+    assert _is_pcp_operational("./.pcp/build_progress.yaml")
+    assert not _is_pcp_operational("src/app/main.py")
+    # Module specs are deliberately NOT operational -- they are real deliverables.
+    assert not _is_pcp_operational(".pcp/strategy/modules/api/spec.yaml")
