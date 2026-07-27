@@ -443,13 +443,20 @@ def test_failed_merge_leaves_no_half_merged_repo(tmp_path):
     _git(["add", "-A"], repo)
     _git(["commit", "-q", "-m", "base"], repo)
 
-    # A branch and main both edit the same line -> guaranteed conflict.
+    # Never hardcode "main": `git init`'s default branch follows the ambient
+    # init.defaultBranch, which is "master" on stock git and in CI. Hardcoding
+    # it made `git checkout main` silently no-op (_git does not check the
+    # return code), so both edits landed on one branch, no conflict occurred,
+    # and the test passed locally while failing in CI.
+    base_branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], repo).stdout.strip()
+
+    # The branch and the base both edit the same line -> guaranteed conflict.
     _git(["checkout", "-q", "-b", "feat/conflicting"], repo)
     (repo / "shared.txt").write_text("from branch\n")
     _git(["commit", "-qam", "branch edit"], repo)
-    _git(["checkout", "-q", "main"], repo)
-    (repo / "shared.txt").write_text("from main\n")
-    _git(["commit", "-qam", "main edit"], repo)
+    assert _git(["checkout", "-q", base_branch], repo).returncode == 0
+    (repo / "shared.txt").write_text("from base\n")
+    _git(["commit", "-qam", "base edit"], repo)
 
     ok, _output = _merge_module_branch(repo, "conflicting")
     assert ok is False
@@ -460,5 +467,6 @@ def test_failed_merge_leaves_no_half_merged_repo(tmp_path):
     status = _git(["status", "--porcelain"], repo).stdout
     assert not [ln for ln in status.splitlines() if ln.startswith(("UU", "AA", "DD"))], \
         f"unmerged paths remain: {status}"
-    # main's own commit must be intact -- aborting cleans up, it does not revert.
-    assert (repo / "shared.txt").read_text() == "from main\n"
+    # The base branch's own commit must be intact -- aborting cleans up the
+    # half-merge, it does not revert work that was already committed.
+    assert (repo / "shared.txt").read_text() == "from base\n"
