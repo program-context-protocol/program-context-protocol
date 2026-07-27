@@ -250,8 +250,21 @@ def _render_results(pcp_dir: Path, result: dict, output_json: bool) -> int:
         for c in contradictions:
             console.print(f"  ✗  [cyan]{c['module']}[/cyan]: {c['conflict']}")
 
+    severe_coupling = [v for v in coupling_violations if v.get("type") in ("circular", "god_module", "shared_state")]
+
     if coupling_violations:
-        console.print("\n[bold red]Coupling violations[/bold red]  [dim](fix before build — each violation makes pivoting expensive)[/dim]")
+        # Only circular/god_module/shared_state actually fail this check (see
+        # has_failures below). Heading every list with "fix before build" told
+        # users that a plain direct dependency — the normal shape of any
+        # pipeline architecture — was a build blocker, and the clarifying
+        # "informational, not blocking" line below only printed when there
+        # were no coverage gaps, i.e. it was suppressed exactly when the user
+        # was most alarmed. Observed 2026-07-27: a clean 6-module linear
+        # pipeline reported six "Coupling violations (fix before build)".
+        if severe_coupling:
+            console.print("\n[bold red]Coupling violations[/bold red]  [dim](fix before build — each makes pivoting expensive)[/dim]")
+        else:
+            console.print("\n[bold]Coupling notes[/bold]  [dim](informational — direct dependencies do not block the build)[/dim]")
         for v in coupling_violations:
             mods = " ↔ ".join(v.get("modules", []))
             vtype = v.get("type", "unknown")
@@ -273,8 +286,6 @@ def _render_results(pcp_dir: Path, result: dict, output_json: bool) -> int:
         for m in missing:
             console.print(f"  ⚠  {m['name']}: {m['reason']}")
 
-    severe_coupling = [v for v in coupling_violations if v.get("type") in ("circular", "god_module", "shared_state")]
-
     if not gaps and not contradictions and not missing and not coupling_violations:
         console.print("[green]✓  All objective areas covered. No contradictions. No coupling violations.[/green]")
     elif not gaps and not contradictions and not missing and coupling_violations:
@@ -294,7 +305,25 @@ def _render_results(pcp_dir: Path, result: dict, output_json: bool) -> int:
     # Direct dependencies alone (no circularity, no god modules) are informational,
     # not blocking — most real projects have some. Only severe coupling and
     # coverage gaps fail the check.
-    has_failures = bool(gaps or severe_coupling)
+    #
+    # Scorer-consensus (2026-07-27): the same rule `pcp build`'s wave gate has
+    # applied since 2026-07-17, which standalone validate-strategy never got —
+    # so the two commands reached opposite verdicts on identical data, `build`
+    # calling it advisory while this exited 1. Keyword overlap has systematic
+    # false negatives when an objective's numbered list uses different
+    # vocabulary from module coverage text; measured across four real projects
+    # the deterministic score ranged 0%-100% on healthy decompositions. Two
+    # scorers disagreeing is uncertainty, not a verdict. Severe coupling still
+    # always fails: that is graph math, no second opinion needed.
+    coverage_advisory = bool(gaps) and assertions_lib.scorers_disagree(result) and not severe_coupling
+    if coverage_advisory:
+        console.print(
+            f"\n[yellow]Coverage gaps above are ADVISORY, not failures:[/yellow] the deterministic "
+            f"keyword scorer reads {result.get('coverage_score', 0):.0%} while the LLM's own judgment "
+            f"is {result.get('llm_coverage_score', 0):.0%}. Two scorers disagreeing is an uncertainty "
+            f"signal — review the gaps, but this is not a blocking result."
+        )
+    has_failures = bool((gaps and not coverage_advisory) or severe_coupling)
     return 1 if has_failures else 0
 
 

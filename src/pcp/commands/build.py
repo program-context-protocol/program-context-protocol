@@ -24,6 +24,7 @@ from pcp import librarian
 from pcp import narrative_lint
 from pcp import objective_conflicts
 from pcp import run_log
+from pcp import assertions as assertions_lib
 from pcp import telemetry
 from pcp import qa
 from pcp import evidence
@@ -643,13 +644,13 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
             # when both agree it's bad. Severe coupling always blocks: that
             # is real graph math, no second opinion needed.
             llm_score = vs.get("llm_coverage_score")
-            scorers_disagree = (
-                vs.get("scoring_method") == "deterministic"
-                and llm_score is not None
-                and llm_score >= 0.85
-                and vs.get("coverage_score", 0) < llm_score
-            )
-            if coverage_gaps and scorers_disagree and not severe_coupling:
+            # Shared with `pcp validate-strategy` (assertions.scorers_disagree)
+            # so the two can never drift into disagreeing about the same data.
+            # credibility_floor=1.0: any disagreement is advisory here. The
+            # wave gate re-checks UNCHANGED specs after every wave, so a dip
+            # is noise rather than new evidence — unlike a standalone audit.
+            disagree = assertions_lib.scorers_disagree(vs, credibility_floor=1.0)
+            if coverage_gaps and disagree and not severe_coupling:
                 console.print(
                     f"[yellow]Wave validate-strategy (advisory): deterministic assertion "
                     f"coverage {vs.get('coverage_score', 0):.0%} disagrees with LLM coverage "

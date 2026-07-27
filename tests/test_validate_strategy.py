@@ -255,3 +255,110 @@ def test_deterministic_gap_shown_in_cli_output(tmp_path):
     assert result.exit_code == 1
     assert "deterministic" in result.output
     assert "quarterly export reports" in result.output
+
+
+# ── Scorer consensus + coupling presentation (2026-07-27 investigation) ──
+
+def test_scorers_disagree_rule_matches_real_measured_cases():
+    """Measured across four real projects: the deterministic keyword scorer
+    read 0%-100% on healthy decompositions (Postcar 0/5 with 11 real modules,
+    signtool 1/4, win2mac 8/8). It has systematic false negatives whenever an
+    objective's numbered list is phrased in different vocabulary from module
+    coverage text."""
+    from pcp import assertions as A
+    assert A.scorers_disagree({"scoring_method": "deterministic",
+                               "coverage_score": 0.0, "llm_coverage_score": 0.95})
+    assert A.scorers_disagree({"scoring_method": "deterministic",
+                               "coverage_score": 0.25, "llm_coverage_score": 0.95})
+    # Both scorers agreeing it is bad is a real verdict, not a disagreement.
+    assert not A.scorers_disagree({"scoring_method": "deterministic",
+                                   "coverage_score": 0.20, "llm_coverage_score": 0.30})
+    # LLM-only scoring has nothing to disagree with.
+    assert not A.scorers_disagree({"scoring_method": "llm", "coverage_score": 0.4})
+    # Deterministic scoring HIGHER than the LLM is not a false negative.
+    assert not A.scorers_disagree({"scoring_method": "deterministic",
+                                   "coverage_score": 0.99, "llm_coverage_score": 0.90})
+    # The credibility floor is what keeps the Goodhart mitigation armed: a
+    # scorer that matched a MAJORITY of assertions and missed one is reporting
+    # a credible localised gap, not vocabulary mismatch, so it still blocks
+    # even against a confident LLM. Only a scorer that failed on most
+    # assertions is treated as broken-on-this-objective.
+    assert not A.scorers_disagree({"scoring_method": "deterministic",
+                                   "coverage_score": 0.5, "llm_coverage_score": 1.0})
+    assert not A.scorers_disagree({"scoring_method": "deterministic",
+                                   "coverage_score": 0.9, "llm_coverage_score": 0.95})
+    assert A.scorers_disagree({"scoring_method": "deterministic",
+                               "coverage_score": 0.49, "llm_coverage_score": 0.95})
+
+
+def test_build_and_validate_strategy_share_one_consensus_rule():
+    """The rule existed only inside build.py's wave gate, so `pcp build` called
+    a disagreement advisory while standalone `pcp validate-strategy` exited 1
+    on identical data. Same rule, two commands, one definition."""
+    import inspect
+    from pcp.commands import build, validate_strategy
+    for mod in (build, validate_strategy):
+        assert "scorers_disagree" in inspect.getsource(mod)
+    # build.py must not carry its own inline copy any more.
+    assert "llm_score >= 0.85" not in inspect.getsource(build)
+
+
+def test_advisory_coverage_gaps_do_not_fail_the_command(tmp_path, capsys):
+    from pcp.commands.validate_strategy import _render_results
+    result = {
+        "coverage_score": 0.25, "llm_coverage_score": 0.95,
+        "scoring_method": "deterministic",
+        "coverage_gaps": [{"area": "self-hosted cost", "quote": "no per-document cost"}],
+        "coupling_violations": [
+            {"type": "direct_dependency", "modules": ["a", "b"], "description": "a -> b"},
+        ],
+    }
+    assert _render_results(tmp_path, result, False) == 0, "scorer disagreement must not fail"
+    out = capsys.readouterr().out
+    assert "ADVISORY" in out
+    # A plain direct dependency must not be presented as a build blocker.
+    assert "fix before build" not in out
+    assert "informational" in out
+
+
+def test_real_coverage_failure_still_fails(tmp_path):
+    """Both scorers agreeing coverage is bad must still exit 1."""
+    from pcp.commands.validate_strategy import _render_results
+    result = {
+        "coverage_score": 0.20, "llm_coverage_score": 0.25,
+        "scoring_method": "deterministic",
+        "coverage_gaps": [{"area": "auth", "quote": "no module covers login"}],
+        "coupling_violations": [],
+    }
+    assert _render_results(tmp_path, result, False) == 1
+
+
+def test_severe_coupling_still_fails_and_says_fix_before_build(tmp_path, capsys):
+    from pcp.commands.validate_strategy import _render_results
+    result = {
+        "coverage_score": 0.95, "llm_coverage_score": 0.95,
+        "scoring_method": "deterministic", "coverage_gaps": [],
+        "coupling_violations": [
+            {"type": "circular", "modules": ["a", "b"], "description": "a -> b -> a"},
+        ],
+    }
+    assert _render_results(tmp_path, result, False) == 1, "graph math needs no second opinion"
+    assert "fix before build" in capsys.readouterr().out
+
+
+def test_the_two_callers_tolerances_are_explicit_not_accidental():
+    """det=50% vs llm=100% means different things in the two contexts, and both
+    behaviours are load-bearing:
+
+      * wave gate (credibility_floor=1.0): advisory — it re-checks UNCHANGED
+        specs every wave, so a dip is noise. This is the 2026-07-17 LinkBox
+        case that hard-blocked a wave on specs nobody had touched.
+      * standalone audit (default 0.5): blocks — a scorer that matched a
+        majority and missed one is reporting a credible gap, which is exactly
+        the Goodhart mitigation the deterministic scorer exists to provide.
+    """
+    from pcp import assertions as A
+    ambiguous = {"scoring_method": "deterministic",
+                 "coverage_score": 0.5, "llm_coverage_score": 1.0}
+    assert A.scorers_disagree(ambiguous, credibility_floor=1.0), "wave gate must tolerate"
+    assert not A.scorers_disagree(ambiguous), "standalone audit must not"

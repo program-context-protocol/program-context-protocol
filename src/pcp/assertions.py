@@ -93,3 +93,60 @@ def compute_coverage(assertions: list[dict], modules: dict[str, dict]) -> dict:
         "assertions_covered": len(covered_by),
         "assertion_coverage_map": covered_by,
     }
+
+
+# Confidence floor above which the LLM's own coverage judgment is trusted
+# enough that a much lower deterministic score reads as scorer disagreement
+# rather than as real missing coverage.
+LLM_CONFIDENCE_FLOOR = 0.85
+
+# Below this, the deterministic scorer failed to match a MAJORITY of the
+# objective's assertions, which indicates the keyword heuristic does not work
+# against this objective's phrasing at all — not that coverage is genuinely
+# absent. At or above it, individual misses are credible and still block.
+SCORER_CREDIBILITY_FLOOR = 0.5
+
+
+def scorers_disagree(result: dict, floor: float = LLM_CONFIDENCE_FLOOR,
+                     credibility_floor: float = SCORER_CREDIBILITY_FLOOR) -> bool:
+    """True when the deterministic score contradicts a confident LLM score.
+
+    Keyword overlap is explicitly "not ground truth" (see this module's own
+    docstring): it has systematic false negatives whenever an objective's
+    numbered list is phrased in different vocabulary from the modules'
+    `objective_coverage`. Measured 2026-07-27 across four real projects, the
+    deterministic score ranged 0%-100% on healthy decompositions — Postcar
+    scored 0/5 with 11 real modules because its assertions are terse feature
+    names, and signtool scored 1/4 because two of its assertions are
+    non-functional outcomes ("the sender never has to explain it") that no
+    module coverage text will ever share words with.
+
+    Two scorers disagreeing is an uncertainty signal, not a verdict. This
+    lives here, callable, because the rule previously existed ONLY inside
+    build.py's wave gate: `pcp build` correctly treated the disagreement as
+    advisory while standalone `pcp validate-strategy` exited 1 on the very
+    same data. One rule, one definition, both callers.
+    """
+    llm_score = result.get("llm_coverage_score")
+    det_score = result.get("coverage_score", 0)
+    return (
+        result.get("scoring_method") == "deterministic"
+        and llm_score is not None
+        and llm_score >= floor
+        and det_score < llm_score
+        # ...and the deterministic scorer must look BROKEN on this objective,
+        # not merely stricter. Vocabulary mismatch is systematic: it fails to
+        # match assertions uniformly and drives the score toward zero (Postcar
+        # 0/5, signtool 1/4). A genuine missing module is localised — most
+        # assertions still match and one does not (9/10, or the 1/2 case in
+        # test_deterministic_gap_shown_in_cli_output, a real uncovered
+        # module the LLM claimed was fine).
+        #
+        # Without this clause the rule would have disarmed the very Goodhart
+        # mitigation the deterministic scorer exists to provide: any gap the
+        # LLM word-smithed past would have been waved through as
+        # "disagreement". Below-majority means the scorer is not working here
+        # and cannot be trusted to BLOCK; at or above majority its misses are
+        # credible and still fail the check.
+        and det_score < credibility_floor
+    )
