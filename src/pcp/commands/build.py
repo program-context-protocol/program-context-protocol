@@ -14,7 +14,7 @@ import yaml
 from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, get_modules_dir, NoPCPDir
-from pcp.schema.validator import validate_file, load_yaml
+from pcp.schema.validator import MalformedSpecError, validate_file, load_yaml
 from pcp.llm import client as llm
 from pcp.llm.client import _claude_bin, _log_usage
 from pcp.pcp_status import write_pcp_md
@@ -3503,6 +3503,25 @@ def _mark_criterion_complete(mod: dict, criterion_id: str, verified_by: str = "p
 
 
 def _build_module_worker(
+    pcp_dir: Path, mod: dict, project_root: Path,
+    build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
+    yes: bool = False,
+) -> dict:
+    # A malformed spec must fail THIS module, not the run. On 2026-07-27 a build
+    # agent hand-edited an acceptance.yaml into invalid YAML and the raw
+    # ScannerError ended a run that had already completed two modules. Other
+    # modules had nothing to do with that file and should keep going.
+    try:
+        return _build_module_worker_inner(
+            pcp_dir, mod, project_root, build_model, build_model_explicit, budget, yes,
+        )
+    except MalformedSpecError as exc:
+        console.print(f"[red]✗ Module '{mod['name']}' has an unreadable spec:[/red] {exc}")
+        return {"module": mod["name"], "success": False,
+                "failed_criterion": None, "block_findings": [str(exc)]}
+
+
+def _build_module_worker_inner(
     pcp_dir: Path, mod: dict, project_root: Path,
     build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
     yes: bool = False,

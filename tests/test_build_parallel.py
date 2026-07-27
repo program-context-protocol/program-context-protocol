@@ -751,7 +751,9 @@ def test_merge_collision_triggers_rebuild_not_module_failure():
     handing a human a git conflict."""
     import inspect
     from pcp.commands import build
-    src = inspect.getsource(build._build_module_worker)
+    # the worker's body moved into _build_module_worker_inner when the
+    # malformed-spec guard was added; the collision logic lives there.
+    src = inspect.getsource(build._build_module_worker_inner)
     assert "collided on merge" in src
     assert "_build_one_criterion" in src, "must rebuild, not just report"
     # bounded: a second failure after rebuild still fails the module
@@ -874,3 +876,49 @@ def test_only_product_failures_block_a_criterion():
         assert f'gate_results["{paperwork}"]' not in blocking, (
             f"{paperwork} must not be able to fail a criterion"
         )
+
+
+# ── A malformed spec must not end the run (2026-07-27 signtool) ──
+
+def test_malformed_yaml_gives_an_actionable_error_not_a_traceback(tmp_path):
+    """A build agent hand-edited acceptance.yaml into invalid YAML — a
+    multi-line description written unquoted while containing ': '. PyYAML's
+    ScannerError escaped raw and ended a $41 run that had already completed two
+    modules, naming neither the file nor what to do."""
+    from pcp.schema.validator import load_yaml, MalformedSpecError
+
+    bad = tmp_path / "acceptance.yaml"
+    bad.write_text(
+        "version: '2.0'\n"
+        "criteria:\n"
+        "  - id: A001\n"
+        "    description: submit is enabled when required fields report\n"
+        "      non-empty. Excluded from this check: the optional ones\n"
+    )
+    try:
+        load_yaml(bad)
+        raise AssertionError("should have raised")
+    except MalformedSpecError as e:
+        msg = str(e)
+        assert "acceptance.yaml" in msg, "must name the file"
+        assert "line" in msg, "must name the line"
+        assert "': '" in msg or "block scalar" in msg, "must say how to fix it"
+
+
+def test_one_broken_spec_fails_its_module_not_the_run():
+    """Other modules had nothing to do with that file and must keep going."""
+    import inspect
+    from pcp.commands import build
+
+    src = inspect.getsource(build._build_module_worker)
+    assert "MalformedSpecError" in src, "the worker must catch it"
+    assert '"success": False' in src, "and turn it into a normal module failure"
+    # the real work moved to an inner function that the guard wraps
+    assert "_build_module_worker_inner" in src
+
+
+def test_valid_yaml_is_unaffected(tmp_path):
+    from pcp.schema.validator import load_yaml
+    good = tmp_path / "acceptance.yaml"
+    good.write_text("version: '2.0'\ncriteria:\n  - id: A001\n    description: 'has: a colon'\n")
+    assert load_yaml(good)["criteria"][0]["description"] == "has: a colon"

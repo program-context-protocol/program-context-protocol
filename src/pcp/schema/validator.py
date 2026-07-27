@@ -44,6 +44,34 @@ def validate_file(yaml_path: Path, schema_name: str) -> list[str]:
     ]
 
 
+class MalformedSpecError(Exception):
+    """A spec/acceptance file exists but is not parseable YAML."""
+
+
 def load_yaml(path: Path) -> Any:
-    with open(path) as f:
-        return yaml.safe_load(f)
+    """Parse a `.pcp/` YAML file, failing with an actionable error.
+
+    This used to let PyYAML's ScannerError escape raw. A build agent
+    hand-edited `signer-fill-sign-flow/acceptance.yaml` on 2026-07-27, writing
+    a multi-line description as a plain (unquoted) scalar containing ": ",
+    which is invalid YAML. The resulting traceback ended a 41-dollar run that
+    had already completed two modules -- with no message naming the file, the
+    line, or what to do about it, and no chance for the other modules to
+    survive.
+
+    A malformed spec is a normal, expected condition in a system where agents
+    write files: it must read as "this file is broken, here is where" and be
+    catchable per-module, not as an interpreter stack trace.
+    """
+    try:
+        with open(path) as f:
+            return yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        problem = getattr(exc, "problem", None) or str(exc).splitlines()[0]
+        raise MalformedSpecError(
+            f"{path} is not valid YAML{where}: {problem}. "
+            f"A common cause is a multi-line description written unquoted while "
+            f"containing ': ' -- quote the string or use a block scalar (|)."
+        ) from exc

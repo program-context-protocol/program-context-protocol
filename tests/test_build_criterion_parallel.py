@@ -394,6 +394,6 @@ def test_criterion_pool_is_capped(monkeypatch):
     monkeypatch.setenv("PCP_BUILD_MAX_PARALLEL_CRITERIA", "0")
     assert build._max_parallel_criteria() == 1, "must never be zero"
 
-    src = inspect.getsource(build._build_module_worker)
-    assert "max_workers=min(_max_parallel_criteria()" in src.replace("\n", "").replace(" ", "") \
-        or "_max_parallel_criteria()" in src, "criterion pool must consult the cap"
+    # body lives in _build_module_worker_inner since the malformed-spec guard
+    src = inspect.getsource(build._build_module_worker_inner)
+    assert "_max_parallel_criteria()" in src, "criterion pool must consult the cap"
