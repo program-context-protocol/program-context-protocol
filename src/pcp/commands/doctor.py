@@ -431,6 +431,23 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, yes: boo
         console.print("[dim]Agent-config audit: no secrets or suspicious commands in "
                       ".claude/settings*.json, .mcp.json, CLAUDE.md/AGENTS.md/GEMINI.md.[/dim]")
 
+    # Version drift (2026-07-27): PCP's own fixes reach frozen-wheel installs
+    # only when a human remembers to roll them, and nothing enumerated those
+    # installs. Surfaced four times in one session, including a served wheel
+    # that kept distributing a known-vulnerable version for two days, and two
+    # abandoned build worktrees whose own .venv sat at 0.8.6. Advisory: a
+    # project may legitimately pin an older PCP.
+    from pcp.version_drift import check as _version_drift_check
+    drift = _version_drift_check()
+    if drift["status"] == "behind":
+        console.print(f"\n[yellow bold]⚠ PCP version drift:[/yellow bold] {drift['message']}")
+        console.print(
+            f"[dim]This install will not have fixes made since {drift['installed']}. "
+            f"Reinstall from {drift.get('source_root')} to catch up.[/dim]"
+        )
+    elif drift["status"] == "stale_metadata":
+        console.print(f"[dim]PCP version string: {drift['message']}[/dim]")
+
     existing = load_integrations(pcp_dir)
     deploy = existing.get("deploy", {})
 
@@ -472,6 +489,7 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, yes: boo
         "browser_automation": {"assumed_available": True},
         "context7": context7,
         "agent_config_audit": {"findings": len(config_findings)},
+        "version_drift": drift,
     }
     out = pcp_dir / "integrations.yaml"
     out.write_text(yaml.dump(data, default_flow_style=False))
