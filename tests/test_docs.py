@@ -284,7 +284,14 @@ def test_ui_ux_flags_missing_design_justification(tmp_path):
 
     out_dir = write_module_docs(pcp_dir, mod_dir)
     ui_ux = (out_dir / "ui_ux.md").read_text()
-    assert "no `design_justification` declared" in ui_ux
+    # Corrected 2026-07-27: the rollup no longer calls an absent field
+    # "Built, Hidden". A missing design_justification is missing declaration
+    # coverage, not a hidden feature — conflating them produced 101 phantom
+    # "hidden" criteria on ontology-foundry. Discoverability is measured from
+    # the built UI now (nav_graph), not inferred from a field's absence.
+    assert "declare no `design_justification`" in ui_ux
+    assert "declaration coverage, not a" in ui_ux
+    assert "Built, Hidden" not in ui_ux
     assert "A001" in ui_ux
 
 

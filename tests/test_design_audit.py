@@ -11,26 +11,69 @@ def _write_module(pcp_dir, name, criteria):
     (mod_dir / "acceptance.yaml").write_text(yaml.dump({"module": name, "criteria": criteria}))
 
 
-def test_classify_rung_1_built_hidden():
-    assert _classify_rung({"id": "A001", "description": "Dashboard renders coverage"}) == 1
+# Rewritten 2026-07-27. These asserted the declaration-based contract: no
+# `design_justification` -> rung 1 "Built, Hidden". Measured on ontology-foundry
+# that produced 101 at rung 1, 24 at rung 4 and ZERO at rungs 2 and 3 — a binary
+# condition wearing a four-rung costume, reporting missing FIELDS as hidden
+# FEATURES. Rungs 1-3 now come from measured reachability in the built UI; only
+# rung 4 still consults the declaration.
+
+def _nav(tmp_path, entries, links):
+    """A real vite multi-page front end on disk, matching ontology-foundry's shape."""
+    from pcp import nav_graph
+    (tmp_path / "vite.config.ts").write_text(
+        "export default {build:{rollupOptions:{input:{"
+        + ",".join(f'{k}: resolve(__dirname, "{v}")' for k, v in entries.items())
+        + "}}}}"
+    )
+    for page in entries.values():
+        hrefs = "".join(f'<a href="./{t}">go</a>' for t in links.get(page, []))
+        (tmp_path / page).write_text(f"<html><body>{hrefs}</body></html>")
+    return nav_graph.analyse(tmp_path)
 
 
-def test_classify_rung_2_exposed_undiscoverable():
-    c = {"id": "A001", "description": "Dashboard renders coverage", "design_justification": {}}
-    assert _classify_rung(c) == 2
+def _ui(cid="A001", target=None, dj=None):
+    c = {"id": cid, "description": "Dashboard renders coverage"}
+    if target:
+        c["target"] = target
+    if dj is not None:
+        c["design_justification"] = dj
+    return c
 
 
-def test_classify_rung_3_exposed_discoverable():
-    c = {"id": "A001", "description": "Dashboard renders coverage",
-         "design_justification": {"checklist_passed": ["both-themes"], "jtbd_framing": "shows coverage"}}
-    assert _classify_rung(c) == 3
+def test_criterion_with_no_screen_is_not_measurable_not_rung_1(tmp_path):
+    """The defect being fixed: an absent measurement reported as a bad one."""
+    nav = _nav(tmp_path, {"main": "index.html"}, {})
+    assert _classify_rung(_ui(), nav) is None
 
 
-def test_classify_rung_4_exposed_enriched():
-    c = {"id": "A001", "description": "Dashboard renders coverage",
-         "design_justification": {"checklist_passed": ["both-themes"],
-                                   "jtbd_framing": "when a PM worries coverage is slipping, this screen shows the real number"}}
-    assert _classify_rung(c) == 4
+def test_rung_1_requires_a_measurably_unreachable_screen(tmp_path):
+    nav = _nav(tmp_path, {"main": "index.html", "s": "secret.html"}, {})
+    assert _classify_rung(_ui(target="secret.html"), nav) == 1
+
+
+def test_rung_2_is_reachable_but_buried(tmp_path):
+    nav = _nav(tmp_path, {"main": "index.html", "a": "a.html", "b": "b.html"},
+               {"index.html": ["a.html"], "a.html": ["b.html"]})
+    assert nav["depths"]["b.html"] == 2
+    assert _classify_rung(_ui(target="b.html"), nav, depth_threshold=1) == 2
+
+
+def test_rung_3_is_reachable_within_threshold(tmp_path):
+    nav = _nav(tmp_path, {"main": "index.html", "q": "query.html"},
+               {"index.html": ["query.html"]})
+    assert _classify_rung(_ui(target="query.html"), nav) == 3
+
+
+def test_rung_4_adds_real_jtbd_framing_on_a_reachable_screen(tmp_path):
+    nav = _nav(tmp_path, {"main": "index.html", "q": "query.html"},
+               {"index.html": ["query.html"]})
+    dj = {"checklist_passed": ["both-themes"],
+          "jtbd_framing": "when a PM worries coverage is slipping, this screen shows the real number"}
+    assert _classify_rung(_ui(target="query.html", dj=dj), nav) == 4
+    # A justification alone can no longer manufacture a rung — the artifact
+    # decides 1-3, so an unattributable criterion stays unmeasured.
+    assert _classify_rung(_ui(dj=dj), nav) is None
 
 
 def test_build_design_audit_empty_project(tmp_path):
@@ -62,13 +105,14 @@ def test_build_design_audit_aggregates_ui_criteria_by_rung(tmp_path):
     ])
     data = build_design_audit(pcp_dir)
     assert data["total_ui_criteria"] == 2
-    assert data["rung_counts"][1] == 1
-    assert data["rung_counts"][4] == 1
+    # No front end exists in this fixture, so neither criterion can be tied to a
+    # screen. Both are "not measured" — and critically NOT rung 1.
+    assert data["undetermined"] == 2
+    assert data["rung_counts"][1] == 0
+    assert data["nav_analysis"]["available"] is False
     mod = data["modules"][0]
     assert mod["module"] == "admin"
-    ids_by_rung = {c["id"]: c["rung"] for c in mod["criteria"]}
-    assert ids_by_rung["A001"] == 1
-    assert ids_by_rung["A002"] == 4
+    assert all(c["rung"] is None for c in mod["criteria"])
 
 
 def test_write_design_audit_renders_markdown(tmp_path):

@@ -24,6 +24,7 @@ import click
 import yaml
 from rich.console import Console
 
+from pcp import nav_graph
 from pcp.pcp_dir import find_pcp_dir, get_modules_dir, NoPCPDir
 from pcp.commands.build import _is_ui_facing_criterion
 
@@ -49,14 +50,39 @@ def _load_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
-def _classify_rung(criterion: dict) -> int:
-    dj = criterion.get("design_justification")
-    if dj is None:
-        return 1
+def _classify_rung(criterion: dict, nav: dict | None = None,
+                   depth_threshold: int = 3) -> int | None:
+    """Rung from the MEASURED artifact where possible, `None` when unknown.
+
+    This used to read one field: no `design_justification` -> rung 1. Measured
+    2026-07-27 on ontology-foundry that gave 101 at rung 1, 24 at rung 4, and
+    **zero** at rungs 2 and 3 -- a binary condition wearing a four-rung costume,
+    because nothing ever writes a partial justification. "101 Built, Hidden"
+    described 101 missing fields, not 101 hidden features.
+
+    Rungs 1-3 now come from `nav_graph`: is the criterion's screen reachable
+    from the app's entry page, and how deep. Only rung 4 still consults the
+    declaration, because "is this framed as a real job-to-be-done" is genuinely
+    a property of the writing, not of the artifact.
+
+    `None` means not determinable -- no front end, or a criterion that cannot be
+    tied to a screen. That is reported separately and is NOT rung 1. Reporting
+    an absent measurement as a bad measurement is the whole defect being fixed.
+    """
+    target = criterion.get("target") or ""
+    screen = nav_graph.screen_for_target(target, nav) if nav else None
+    if screen is None:
+        return None
+
+    depths = (nav or {}).get("depths", {})
+    if screen not in depths:
+        return 1                      # measured: genuinely unreachable from entry
+    if depths[screen] > depth_threshold:
+        return 2                      # reachable, but buried
+
+    dj = criterion.get("design_justification") or {}
     checklist = dj.get("checklist_passed") or []
     jtbd = (dj.get("jtbd_framing") or "").strip()
-    if not checklist and not jtbd:
-        return 2
     if jtbd and any(m in jtbd.lower() for m in _JTBD_MARKERS) and checklist:
         return 4
     return 3
@@ -72,6 +98,11 @@ def build_design_audit(pcp_dir: Path) -> dict:
     modules_dir = get_modules_dir(pcp_dir)
     modules = []
     rung_counts = {r: 0 for r in RUNG_LABEL}
+    # Criteria whose screen cannot be identified are counted here, NOT dumped
+    # into rung 1. "We could not measure this" and "this is hidden" are
+    # different facts and must not share a bucket.
+    undetermined = 0
+    nav = nav_graph.analyse(pcp_dir.parent)
     total_ui_criteria = 0
     nav_depths: list[int] = []
     nav_depth_missing = 0
@@ -84,8 +115,11 @@ def build_design_audit(pcp_dir: Path) -> dict:
             for c in acceptance.get("criteria", []):
                 if not _is_ui_facing_criterion(c):
                     continue
-                rung = _classify_rung(c)
-                rung_counts[rung] += 1
+                rung = _classify_rung(c, nav, _nav_depth_threshold())
+                if rung is None:
+                    undetermined += 1
+                else:
+                    rung_counts[rung] += 1
                 total_ui_criteria += 1
                 dj = c.get("design_justification") or {}
                 nav_depth = c.get("nav_depth")
@@ -133,6 +167,8 @@ def build_design_audit(pcp_dir: Path) -> dict:
     return {
         "modules": modules,
         "rung_counts": rung_counts,
+        "undetermined": undetermined,
+        "nav_analysis": nav,
         "total_ui_criteria": total_ui_criteria,
         "nav_depth": nav_depth_summary,
         "customization": customization_summary,
@@ -149,7 +185,10 @@ def _render_markdown(data: dict, timestamp: str) -> str:
         "rollup view, not a second place to author it._",
         "",
         "PCP Design lifecycle, stage 5 (Audit/rollup). Maps to Google HEART's Adoption "
-        "pillar, computed statically from declared intent, not live usage telemetry.",
+        "pillar. Rungs 1-3 are MEASURED from the built UI — pages discovered from the "
+        "front end's own entry config, edges from its links, depth by shortest path from "
+        "the entry page. Only rung 4 consults a declaration, because whether a screen is "
+        "framed as a real job-to-be-done is a property of the writing, not the artifact.",
         "",
         "## Rung Distribution",
         "",
@@ -159,6 +198,41 @@ def _render_markdown(data: dict, timestamp: str) -> str:
     for rung, label in RUNG_LABEL.items():
         lines.append(f"| {rung} | {label} | {data['rung_counts'].get(rung, 0)} |")
     lines.append("")
+
+    # "Could not measure" is its own row and never folded into rung 1. The
+    # previous version classified a missing `design_justification` as
+    # "Built, Hidden" and reported 101 of them on ontology-foundry -- a
+    # statement about absent paperwork dressed as a discoverability crisis.
+    nav = data.get("nav_analysis") or {}
+    undet = data.get("undetermined", 0)
+    if undet:
+        lines += [
+            f"**{undet} UI-facing criteria could not be placed on the ladder.** This is "
+            "NOT a finding about the product — it means the criterion could not be tied "
+            "to a screen, so its discoverability was never measured.",
+            "",
+        ]
+        if nav.get("available"):
+            lines += [
+                f"The app itself WAS measured: `{nav.get('ui_root')}` — "
+                f"{len(nav.get('pages', []))} page(s), entry `{nav.get('entry')}`, "
+                f"{len(nav.get('unreachable', []))} unreachable. What is missing is the "
+                "link from criterion to screen: declare `target` on a UI-facing criterion "
+                "and it becomes measurable.",
+                "",
+            ]
+        else:
+            lines += [
+                f"No front end could be measured either ({nav.get('reason', 'unknown')}), "
+                "so nothing here is a claim about discoverability.",
+                "",
+            ]
+    if nav.get("available") and nav.get("unreachable"):
+        lines += [
+            "**Unreachable pages** (exist in the build, no path from the entry page): "
+            + ", ".join(f"`{p}`" for p in nav["unreachable"]),
+            "",
+        ]
 
     nd = data["nav_depth"]
     lines += ["## Navigation Depth (clicks from entry point)", ""]
@@ -204,11 +278,16 @@ def _render_markdown(data: dict, timestamp: str) -> str:
         lines.append("| Criterion | Rung | JTBD Framing | Nav Depth | Customizable |")
         lines.append("|---|---|---|---|---|")
         for c in m["criteria"]:
-            flag = " ⚠" if c["rung"] == 1 else ""
+            # rung None = the criterion's screen could not be identified, so
+            # discoverability was never measured. It gets its own cell rather
+            # than borrowing rung 1's "Built, Hidden" label and its ⚠.
+            rung = c["rung"]
+            flag = " ⚠" if rung == 1 else ""
+            rung_cell = f"{rung} ({RUNG_LABEL[rung]})" if rung is not None else "— (not measured)"
             nav_depth_cell = c["nav_depth"] if c["nav_depth"] is not None else "—"
             customizable_cell = "✓" if c["customizable"] else "—"
             lines.append(
-                f"| {c['id']}: {c['description']}{flag} | {c['rung']} ({RUNG_LABEL[c['rung']]}) | "
+                f"| {c['id']}: {c['description']}{flag} | {rung_cell} | "
                 f"{c['jtbd_framing'] or '—'} | {nav_depth_cell} | {customizable_cell} |"
             )
         lines.append("")

@@ -420,10 +420,16 @@ def _render_ui_ux(data: dict) -> str:
 
     undeclared = [c for c in ui_criteria if not c.get("design_justification")]
     if undeclared:
+        # Deliberately no longer claims "Built, Hidden". A missing
+        # design_justification is a missing FIELD, not a hidden feature —
+        # conflating the two is what produced 101 phantom "hidden" criteria on
+        # ontology-foundry. Discoverability is measured from the built UI now
+        # (see nav_graph); this line reports declaration coverage and says so.
         lines += [
-            f"**⚠ {len(undeclared)}/{len(ui_criteria)} UI-facing criteria have no "
-            "`design_justification` declared** -- Built, Hidden rung per "
-            "`pcp design-audit`'s Feature Exposure Ladder: "
+            f"**{len(undeclared)}/{len(ui_criteria)} UI-facing criteria declare no "
+            "`design_justification`** -- this is declaration coverage, not a "
+            "discoverability finding; see `pcp design-audit` for measured "
+            "reachability: "
             + ", ".join(c["id"] for c in undeclared),
             "",
         ]
@@ -432,6 +438,9 @@ def _render_ui_ux(data: dict) -> str:
               "|---|---|---|---|---|---|---|"]
     for c in ui_criteria:
         dj = c.get("design_justification") or {}
+        # No nav analysis is threaded into this per-module rollup, so the
+        # classifier correctly returns None ("not measured") for every
+        # criterion. Rendering that as a rung would be inventing one.
         rung = _classify_rung(c)
         archetypes = ", ".join(c.get("screen_archetypes") or []) or "—"
         organisms = ", ".join(c.get("ui_organisms") or []) or "—"
@@ -439,7 +448,8 @@ def _render_ui_ux(data: dict) -> str:
         customizable = "✓" if dj.get("customizable") else "—"
         lines.append(
             f"| {c['id']}: {c['description']} | {archetypes} | {organisms} | "
-            f"{rung} ({RUNG_LABEL[rung]}) | {dj.get('jtbd_framing') or '—'} | "
+            f"{f'{rung} ({RUNG_LABEL[rung]})' if rung is not None else '— (not measured)'} | "
+            f"{dj.get('jtbd_framing') or '—'} | "
             f"{nav_depth} | {customizable} |"
         )
     return "\n".join(lines) + "\n"
