@@ -641,6 +641,63 @@ def _write_progress(pcp_dir: Path, module: str, criterion_id: str, attempt: int,
         pass
 
 
+def _reopen_wave_criteria(pcp_dir: Path, wave_modules: list[dict], wave_number: int,
+                          findings: list[str]) -> None:
+    """Un-complete the criteria a blocking wave gate just judged defective.
+
+    Deliberately reopens everything completed in the wave rather than guessing
+    which criterion caused it: attribution would need each criterion's declared
+    `target`, which real projects overwhelmingly do not populate (51 of 382 on
+    ontology-foundry). Reopening too much costs a rebuild; reopening too little
+    leaves a vulnerability marked verified. The failure directions are not
+    symmetric.
+
+    Also records one escalation per module so the finding outlives the console
+    line that reported it -- `pcp escalations` can show it, and it is no longer
+    possible for a wave BLOCK to leave zero trace in `.pcp/`."""
+    from pcp import escalations
+
+    reopened: list[str] = []
+    for mod in wave_modules:
+        acc_path = pcp_dir / "strategy" / "modules" / mod["name"] / "acceptance.yaml"
+        if not acc_path.exists():
+            continue
+        built_ids = {c["id"] for c in mod.get("pending_criteria", [])}
+        if not built_ids:
+            continue
+        try:
+            with _STATE_LOCK:
+                acc = load_yaml(acc_path) or {}
+                changed = False
+                for c in acc.get("criteria", []):
+                    if c.get("id") in built_ids and c.get("status") == "complete":
+                        c["status"] = "pending"
+                        c.pop("verified_by", None)
+                        reopened.append(f"{mod['name']}/{c['id']}")
+                        changed = True
+                if changed:
+                    acc_path.write_text(yaml.dump(acc, default_flow_style=False))
+        except MalformedSpecError as exc:
+            console.print(f"[yellow]Could not reopen '{mod['name']}' criteria: {exc}[/yellow]")
+            continue
+        with _STATE_LOCK:
+            escalations.record(
+                pcp_dir, mod["name"], f"wave_{wave_number}", route="wave-block",
+                findings=findings,
+            )
+
+    if reopened:
+        console.print(
+            f"[yellow]Reopened {len(reopened)} criteria judged defective by this wave "
+            f"(status complete -> pending): {', '.join(reopened[:8])}"
+            f"{'...' if len(reopened) > 8 else ''}[/yellow]"
+        )
+        console.print(
+            "[dim]The code stays merged; the criteria no longer claim to be verified. "
+            "The next `pcp build` rebuilds them with these findings as feedback.[/dim]"
+        )
+
+
 def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str, wave_number: int = 0) -> list[str]:
     """Per docs/greenfield.md Phase 4 — contract validation, full integration
     test suite, validate-strategy re-check, wave-level architect-review."""
@@ -3986,6 +4043,21 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
             console.print("[red bold]BLOCKED — wave merge findings:[/red bold]")
             for f in wave_findings:
                 console.print(f"  ✗ {f}")
+            # A wave BLOCK used to print this and exit, leaving every criterion
+            # in the wave marked `complete`. On 2026-07-27 the wave-level
+            # architect review found a path-traversal vulnerability -- arbitrary
+            # local file read through the one method named to keep that path
+            # narrow -- said "fix before the next wave proceeds", and the
+            # criteria that introduced it stayed complete. `pcp scan`,
+            # current_state.md and the dashboard all reported them done, and
+            # nothing recorded that the finding was ever raised.
+            #
+            # A gate that stops forward progress but leaves the defective work
+            # marked verified is advisory in practice. If the wave says the work
+            # is wrong, the work is not done: reopen it so the next run rebuilds
+            # it WITH the finding as feedback, and record an escalation so the
+            # finding survives the process that printed it.
+            _reopen_wave_criteria(pcp_dir, wave_modules, wave_number, wave_findings)
             console.print("[bold red]Fix these before the next wave proceeds.[/bold red]")
             sys.exit(1)
         elif num_waves > 1:

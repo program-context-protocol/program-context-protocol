@@ -922,3 +922,79 @@ def test_valid_yaml_is_unaffected(tmp_path):
     good = tmp_path / "acceptance.yaml"
     good.write_text("version: '2.0'\ncriteria:\n  - id: A001\n    description: 'has: a colon'\n")
     assert load_yaml(good)["criteria"][0]["description"] == "has: a colon"
+
+
+# ── A wave BLOCK must un-verify the work it judged defective (2026-07-27) ──
+
+def _wave_module(pcp_dir, name, ids, status="complete"):
+    import yaml as _y
+    d = pcp_dir / "strategy" / "modules" / name
+    d.mkdir(parents=True)
+    (d / "acceptance.yaml").write_text(_y.dump({
+        "version": "2.0", "module": name,
+        "criteria": [{"id": i, "description": "d", "check": "manual",
+                      "status": status, "verified_by": "pcp_build"} for i in ids],
+    }))
+    return {"name": name, "pending_criteria": [{"id": i} for i in ids]}
+
+
+def test_wave_block_reopens_the_criteria_it_judged_defective(tmp_path):
+    """The wave-level architect review found a path-traversal vulnerability —
+    arbitrary local file read — said "fix before the next wave proceeds", and
+    the criteria that introduced it stayed `complete`. scan/current_state/the
+    dashboard all reported them done. A gate that halts progress but leaves the
+    defective work marked verified is advisory in practice."""
+    import yaml as _y
+    from pcp.commands.build import _reopen_wave_criteria
+
+    pcp_dir = tmp_path / ".pcp"
+    (pcp_dir / "strategy" / "modules").mkdir(parents=True)
+    mod = _wave_module(pcp_dir, "storage", ["A001", "A002"])
+
+    _reopen_wave_criteria(pcp_dir, [mod], 0, ["path traversal: ../../etc/passwd escapes root"])
+
+    acc = _y.safe_load((pcp_dir / "strategy" / "modules" / "storage" / "acceptance.yaml").read_text())
+    assert {c["id"]: c["status"] for c in acc["criteria"]} == {"A001": "pending", "A002": "pending"}
+    assert all("verified_by" not in c for c in acc["criteria"]), \
+        "a reopened criterion must not still claim who verified it"
+
+
+def test_wave_block_records_an_escalation(tmp_path):
+    """The finding must outlive the console line that printed it."""
+    from pcp.commands.build import _reopen_wave_criteria
+    pcp_dir = tmp_path / ".pcp"
+    (pcp_dir / "strategy" / "modules").mkdir(parents=True)
+    mod = _wave_module(pcp_dir, "storage", ["A001"])
+
+    _reopen_wave_criteria(pcp_dir, [mod], 3, ["arbitrary file read via inspect_source_for_rung_check"])
+
+    esc = pcp_dir / "escalations.yaml"
+    assert esc.exists(), "a wave BLOCK must leave a trace in .pcp/"
+    text = esc.read_text()
+    assert "wave_3" in text
+    assert "arbitrary file read" in text
+
+
+def test_reopen_leaves_untouched_criteria_alone(tmp_path):
+    """Only criteria built in THIS wave are reopened."""
+    import yaml as _y
+    from pcp.commands.build import _reopen_wave_criteria
+    pcp_dir = tmp_path / ".pcp"
+    (pcp_dir / "strategy" / "modules").mkdir(parents=True)
+    mod = _wave_module(pcp_dir, "storage", ["A001", "A002"])
+    mod["pending_criteria"] = [{"id": "A001"}]          # only A001 built this wave
+
+    _reopen_wave_criteria(pcp_dir, [mod], 0, ["finding"])
+
+    acc = _y.safe_load((pcp_dir / "strategy" / "modules" / "storage" / "acceptance.yaml").read_text())
+    got = {c["id"]: c["status"] for c in acc["criteria"]}
+    assert got == {"A001": "pending", "A002": "complete"}
+
+
+def test_malformed_spec_during_reopen_does_not_crash(tmp_path):
+    from pcp.commands.build import _reopen_wave_criteria
+    pcp_dir = tmp_path / ".pcp"
+    d = pcp_dir / "strategy" / "modules" / "broken"
+    d.mkdir(parents=True)
+    (d / "acceptance.yaml").write_text("criteria:\n  - id: A1\n    description: bad\n      x: y\n")
+    _reopen_wave_criteria(pcp_dir, [{"name": "broken", "pending_criteria": [{"id": "A1"}]}], 0, ["f"])
