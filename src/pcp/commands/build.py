@@ -336,7 +336,27 @@ def _partition_wave_by_file_scope(wave_criteria: list[dict]) -> list[list[dict]]
     Order within the wave is preserved; this only decides what may run
     alongside what.
     """
-    optimistic = os.environ.get("PCP_CRITERIA_PARALLEL_UNDECLARED") == "1"
+    # OPTIMISTIC by default (corrected 2026-07-27, same day it shipped
+    # pessimistic). The first version ran two criteria together only when both
+    # declared a `target` and the targets differed -- "prove disjointness or
+    # run alone". On ontology-foundry that serialised 237 criteria that had
+    # explicitly opted into parallel builds via depends_on, because only 51 of
+    # 382 declare a target at all. A 15x throughput loss to prevent a collision
+    # class that had bitten once.
+    #
+    # The trade was wrong because the collision is RECOVERABLE and cheap:
+    # `_merge_module_branch` aborts cleanly (2026-07-25 fix), so a colliding
+    # criterion costs one rebuild, while blanket serialisation costs a
+    # multiple on every criterion in the project. Optimistic concurrency with
+    # conflict-triggered retry beats pessimistic locking whenever conflicts
+    # are rare and detection is exact -- and git merge is exact.
+    #
+    # Declared targets still buy something: two criteria that BOTH declare the
+    # SAME target are known to collide before either runs, so they are still
+    # separated up front rather than discovered at merge time.
+    # PCP_CRITERIA_PARALLEL_STRICT=1 restores prove-or-serialise.
+    strict = os.environ.get("PCP_CRITERIA_PARALLEL_STRICT") == "1"
+    optimistic = not strict
     sub_waves: list[list[dict]] = []
     current: list[dict] = []
     claimed: set[str] = set()
@@ -3310,20 +3330,39 @@ def _build_one_criterion(
             "criterion_description": c.get("description", ""),
             "attempt": attempt, "files": changed_files,
         }
+        # A criterion gate tests THE BUILT PRODUCT. Nothing here inspects PCP's
+        # own paperwork -- declarations about how the code was decided on.
+        #
+        # Measured on ontology-foundry 2026-07-27, 1,632 gate executions:
+        # 35% of them checked declarations rather than the product, and those
+        # produced 108 of 187 total blocks -- 58%. Of those, 97 were the scope
+        # guard reporting "agent modified N files outside the declared surface"
+        # against a surface derived from `target`, which 331 of 382 criteria
+        # never declared. PCP was blocking on its own missing metadata, then
+        # charging that check to every attempt of every criterion.
+        #
+        # Removed from this loop: scope (CTRL-018), build_vs_buy justification
+        # (CTRL-017), design justification (CTRL-015), customization (CTRL-026).
+        # All four grade declaration TEXT or declared file surfaces; none can
+        # tell you whether the thing works. If that reporting is wanted it
+        # belongs in `pcp audit` over a finished project, not in the build's
+        # hot path.
+        #
+        # What stays is exactly what can fail the product: does it pass its
+        # tests, is it clean (lint/SAST/ci_rules), does the diff hold up to
+        # review, does the UI actually render and meet a11y, and did the agent
+        # leave stubs behind (lazy_marker catches TODO/placeholder bodies
+        # shipped as complete -- a real defect, not paperwork).
         gate_calls = {
             "tests": lambda: _run_test_suite_check(pcp_dir, project_root, ctx),
             "lint": lambda: _run_lint_check(pcp_dir, project_root, changed_files, ctx, budget),
             "sast": lambda: _run_sast_check(pcp_dir, project_root, changed_files, ctx, budget),
             "l1": lambda: _run_layer1_check(pcp_dir, project_root, changed_files, ctx),
-            "scope": lambda: _run_scope_check(pcp_dir, mod, c, changed_files, ctx),
             "arch": lambda: _run_architect_review(pcp_dir, diff, changed_files, ctx),
             "gate": lambda: _run_gate_check(pcp_dir, diff, ctx),
             "design_consistency": lambda: _run_design_consistency_check(pcp_dir, project_root, c, ctx),
             "a11y": lambda: _run_a11y_check(pcp_dir, c, ctx),
             "visual_quality": lambda: _run_visual_quality_check(pcp_dir, project_root, c, ctx),
-            "design_justification": lambda: _run_design_justification_check(pcp_dir, mod, c, ctx),
-            "bvb_justification": lambda: _run_build_vs_buy_justification_check(pcp_dir, mod, c, ctx),
-            "customization": lambda: _run_customization_check(pcp_dir, mod, c, ctx),
             "lazy_marker": lambda: _run_lazy_marker_check(pcp_dir, project_root, changed_files, ctx),
         }
         with ThreadPoolExecutor(max_workers=len(gate_calls)) as pool:
@@ -3352,10 +3391,12 @@ def _build_one_criterion(
                     ],
                 )
 
+        # Blocking set = product failures only. `scope`, `design_justification`
+        # and `bvb_justification` used to block here; see the gate_calls comment
+        # above for why declaration-grading no longer stops a build.
         block_findings = (
             gate_results["tests"] + gate_results["lint"] + gate_results["sast"]
-            + gate_results["l1"] + gate_results["scope"] + gate_results["arch"] + gate_results["gate"]
-            + gate_results["design_justification"] + gate_results["bvb_justification"]
+            + gate_results["l1"] + gate_results["arch"] + gate_results["gate"]
         )
 
         if block_findings:
@@ -3548,9 +3589,44 @@ def _build_module_worker(
                     _mark_criterion_complete(mod, cid)
                     _write_progress(pcp_dir, mod["name"], cid, 0, "done")
                 else:
-                    any_failed, failed_id = True, cid
-                    console.print(f"[red]✗ Merge conflict bringing criterion '{cid}' back into '{mod['name']}':[/red]\n{merge_output}")
-                    console.print(f"[dim]Worktree left at {worktrees[cid]} for manual resolution.[/dim]")
+                    # A merge conflict here means two criteria in this wave
+                    # genuinely touched the same code -- the collision that
+                    # optimistic scheduling accepts as recoverable rather than
+                    # prevents by serialising everything (see
+                    # _partition_wave_by_file_scope). The merge already aborted
+                    # cleanly, so the correct move is to rebuild this criterion
+                    # against the now-updated main, not to stop the module and
+                    # hand a human a git conflict.
+                    #
+                    # Bounded to one retry: a second conflict on the same
+                    # criterion is not contention, it is something structural
+                    # that a human should look at.
+                    console.print(
+                        f"[yellow]Criterion '{cid}' collided on merge with work that landed "
+                        f"first in this wave — rebuilding it against the updated base.[/yellow]"
+                    )
+                    _cleanup_worktree(project_root, units[cid], worktrees[cid])
+                    retry_wt = _setup_worktree(project_root, units[cid])
+                    retry_ok, retry_findings = _build_one_criterion(
+                        pcp_dir, retry_wt, mod, c, build_model, build_model_explicit, budget, yes,
+                    )
+                    remerged = False
+                    if retry_ok:
+                        remerged, merge_output = _merge_module_branch(
+                            project_root, units[cid], pcp_dir=pcp_dir)
+                    if remerged:
+                        _cleanup_worktree(project_root, units[cid], retry_wt)
+                        console.print(f"[green]✓ Criterion [{cid}] passed all gates after collision rebuild![/green]")
+                        _mark_criterion_complete(mod, cid)
+                        _write_progress(pcp_dir, mod["name"], cid, 0, "done")
+                    else:
+                        any_failed, failed_id = True, cid
+                        failed_findings = retry_findings or [f"merge conflict after rebuild: {merge_output[-500:]}"]
+                        console.print(
+                            f"[red]✗ Criterion '{cid}' still could not be merged into "
+                            f"'{mod['name']}' after a rebuild:[/red]\n{merge_output}"
+                        )
+                        console.print(f"[dim]Worktree left at {retry_wt} for manual resolution.[/dim]")
             else:
                 any_failed, failed_id, failed_findings = True, cid, block_findings
                 console.print(f"[red]✗ Failed to build Criterion [{cid}] after 3 attempts.[/red]")

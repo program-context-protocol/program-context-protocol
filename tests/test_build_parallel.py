@@ -709,21 +709,59 @@ def _crit(cid, target=None, **kw):
     return c
 
 
-def test_undeclared_targets_never_run_together(monkeypatch):
-    """The signtool failure: A001 and A004 had no declared target, ran
-    concurrently, both created the same file, and the second merge died on
-    CONFLICT (add/add). Unknown blast radius means run alone."""
-    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_UNDECLARED", raising=False)
+def test_undeclared_criteria_run_in_parallel_optimistically(monkeypatch):
+    """Corrected the same day it shipped. The first version demanded proof of
+    disjointness via `target`, which serialised 237 ontology-foundry criteria
+    that had opted into parallelism -- only 51 of 382 declare a target. A 15x
+    throughput loss to prevent a collision that costs one rebuild and that
+    `git merge --abort` already makes clean."""
+    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_STRICT", raising=False)
     from pcp.commands.build import _partition_wave_by_file_scope
 
     waves = _partition_wave_by_file_scope([_crit("A001"), _crit("A002"), _crit("A004")])
-    assert [[c["id"] for c in w] for w in waves] == [["A001"], ["A002"], ["A004"]]
+    assert len(waves) == 1, "undeclared criteria must fan out, not serialise"
+    assert [c["id"] for c in waves[0]] == ["A001", "A002", "A004"]
+
+
+def test_strict_mode_restores_prove_or_serialise(monkeypatch):
+    monkeypatch.setenv("PCP_CRITERIA_PARALLEL_STRICT", "1")
+    from pcp.commands.build import _partition_wave_by_file_scope
+    waves = _partition_wave_by_file_scope([_crit("A001"), _crit("A002")])
+    assert len(waves) == 2
+
+
+def test_known_collisions_are_still_separated_up_front(monkeypatch):
+    """Declared targets still earn something: two criteria that both declare
+    the SAME file are known to collide before either runs, so they are split
+    rather than discovered at merge time."""
+    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_STRICT", raising=False)
+    from pcp.commands.build import _partition_wave_by_file_scope
+    waves = _partition_wave_by_file_scope([
+        _crit("A001", target="src/shared.py"),
+        _crit("A002", target="src/shared.py"),
+    ])
+    ids = [[c["id"] for c in w] for w in waves]
+    for w in ids:
+        assert not ("A001" in w and "A002" in w)
+
+
+def test_merge_collision_triggers_rebuild_not_module_failure():
+    """The collision is recoverable: the merge aborts cleanly, so the criterion
+    is rebuilt against the updated base rather than stopping the module and
+    handing a human a git conflict."""
+    import inspect
+    from pcp.commands import build
+    src = inspect.getsource(build._build_module_worker)
+    assert "collided on merge" in src
+    assert "_build_one_criterion" in src, "must rebuild, not just report"
+    # bounded: a second failure after rebuild still fails the module
+    assert "still could not be merged" in src
 
 
 def test_distinct_declared_targets_still_run_in_parallel(monkeypatch):
     """The fix must not kill parallelism outright — declaring distinct targets
     is what buys it back."""
-    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_UNDECLARED", raising=False)
+    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_STRICT", raising=False)
     from pcp.commands.build import _partition_wave_by_file_scope
 
     waves = _partition_wave_by_file_scope([
@@ -736,7 +774,7 @@ def test_distinct_declared_targets_still_run_in_parallel(monkeypatch):
 
 
 def test_same_declared_target_is_serialised(monkeypatch):
-    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_UNDECLARED", raising=False)
+    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_STRICT", raising=False)
     from pcp.commands.build import _partition_wave_by_file_scope
 
     waves = _partition_wave_by_file_scope([
@@ -752,7 +790,7 @@ def test_same_declared_target_is_serialised(monkeypatch):
 
 
 def test_no_criterion_is_ever_dropped_or_duplicated(monkeypatch):
-    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_UNDECLARED", raising=False)
+    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_STRICT", raising=False)
     from pcp.commands.build import _partition_wave_by_file_scope
 
     crits = [
@@ -766,12 +804,7 @@ def test_no_criterion_is_ever_dropped_or_duplicated(monkeypatch):
     assert len(flat) == len(set(flat))
 
 
-def test_optimistic_opt_out_restores_old_behaviour(monkeypatch):
-    monkeypatch.setenv("PCP_CRITERIA_PARALLEL_UNDECLARED", "1")
-    from pcp.commands.build import _partition_wave_by_file_scope
 
-    waves = _partition_wave_by_file_scope([_crit("A001"), _crit("A002"), _crit("A004")])
-    assert len(waves) == 1, "opt-out must let undeclared criteria run together again"
 
 
 def test_kickoff_prompt_no_longer_endorses_merge_time_collisions():
@@ -782,3 +815,62 @@ def test_kickoff_prompt_no_longer_endorses_merge_time_collisions():
     src = Path(kickoff.__file__).read_text()
     assert "surface at merge time" not in src
     assert "target" in src and "targets differ" in src
+
+
+# ── A criterion gate tests the PRODUCT, not PCP's paperwork (2026-07-27) ──
+
+def test_per_criterion_gates_do_not_grade_declarations():
+    """Measured on ontology-foundry: 35% of 1,632 gate executions checked
+    declarations rather than the product, and those produced 108 of 187 blocks
+    — 58%. 97 were the scope guard objecting that files fell outside a surface
+    derived from `target`, which 331 of 382 criteria never declared: PCP
+    blocking on its own missing metadata, charged to every attempt.
+
+    Nothing that grades declaration TEXT or declared file surfaces belongs in
+    the build's hot path. This test exists because removing them broke no
+    existing test — nothing pinned the gate set."""
+    import inspect
+    from pcp.commands import build
+
+    src = inspect.getsource(build._build_one_criterion)
+    gate_block = src[src.index("gate_calls = {"):src.index("with ThreadPoolExecutor")]
+
+    for paperwork in ('"scope"', '"design_justification"',
+                      '"bvb_justification"', '"customization"'):
+        assert paperwork not in gate_block, (
+            f"{paperwork} grades a declaration, not the product — it must not run "
+            f"per criterion. Put it in `pcp audit` if the reporting is wanted."
+        )
+
+
+def test_per_criterion_gates_still_cover_the_product():
+    """The removal must not take real product checks with it."""
+    import inspect
+    from pcp.commands import build
+
+    src = inspect.getsource(build._build_one_criterion)
+    gate_block = src[src.index("gate_calls = {"):src.index("with ThreadPoolExecutor")]
+
+    for product in ('"tests"', '"lint"', '"sast"', '"l1"', '"arch"', '"gate"',
+                    '"a11y"', '"visual_quality"', '"lazy_marker"',
+                    '"design_consistency"'):
+        assert product in gate_block, f"{product} tests the built product and must stay"
+
+
+def test_only_product_failures_block_a_criterion():
+    """A criterion fails on: tests, lint, SAST, ci_rules, or review of the diff.
+    Not on how well its build_vs_buy rationale reads."""
+    import inspect
+    from pcp.commands import build
+
+    src = inspect.getsource(build._build_one_criterion)
+    start = src.index("block_findings = (")
+    blocking = src[start:src.index(")", start)]
+
+    for product in ("tests", "lint", "sast", "l1", "arch", "gate"):
+        assert f'gate_results["{product}"]' in blocking
+
+    for paperwork in ("scope", "design_justification", "bvb_justification", "customization"):
+        assert f'gate_results["{paperwork}"]' not in blocking, (
+            f"{paperwork} must not be able to fail a criterion"
+        )

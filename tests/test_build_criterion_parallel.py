@@ -304,10 +304,13 @@ def test_opted_in_chain_dependency_still_runs_in_order(tmp_path, monkeypatch):
     assert events["A001"]["end"] <= events["A002"]["start"]
 
 
-def test_undeclared_targets_are_serialised_end_to_end(tmp_path, monkeypatch):
-    """The signtool regression, end to end: two independent criteria with no
-    declared target must NOT be fanned out into concurrent worktrees, because
-    nothing can prove they won't create the same file. Both must still build."""
+def test_undeclared_criteria_fan_out_end_to_end(tmp_path, monkeypatch):
+    """Two independent criteria with no declared target must still build
+    concurrently. Demanding a declared `target` as proof of disjointness
+    serialised 237 opted-in ontology-foundry criteria (only 51 of 382 declare
+    one) -- a 15x throughput loss to avoid a collision that costs one rebuild.
+    Optimistic concurrency + exact conflict detection beats pessimistic
+    locking when conflicts are rare."""
     repo = _init_repo(tmp_path / "repo")
     pcp_dir = repo / ".pcp"
     pcp_dir.mkdir()
@@ -316,6 +319,7 @@ def test_undeclared_targets_are_serialised_end_to_end(tmp_path, monkeypatch):
     _git(["add", "-A"], repo)
     _git(["commit", "-q", "-m", "scaffold"], repo)
 
+    monkeypatch.delenv("PCP_CRITERIA_PARALLEL_STRICT", raising=False)
     _fake_claude(tmp_path, monkeypatch, tmp_path / "timing.log")
 
     with patch("pcp.commands.build._run_test_suite_check", return_value=[]), \
@@ -328,9 +332,8 @@ def test_undeclared_targets_are_serialised_end_to_end(tmp_path, monkeypatch):
         result = runner.invoke(cli, ["build", "--module", "add", "--path", str(repo)])
 
     assert result.exit_code == 0, result.output
-    assert "building in parallel" not in result.output, \
-        "criteria with undeclared file surface must not be fanned out"
-    assert (repo / "A001.txt").exists() and (repo / "A002.txt").exists(), \
-        "serialising must not drop work"
+    assert "building in parallel" in result.output, \
+        "criteria that opted in must fan out even without declared targets"
+    assert (repo / "A001.txt").exists() and (repo / "A002.txt").exists()
     acc = yaml.safe_load((pcp_dir / "strategy" / "modules" / "add" / "acceptance.yaml").read_text())
     assert {c["id"]: c["status"] for c in acc["criteria"]} == {"A001": "complete", "A002": "complete"}
