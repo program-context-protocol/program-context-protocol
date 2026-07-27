@@ -542,3 +542,59 @@ def test_pcp_own_progress_file_is_not_agent_output():
     assert not _is_pcp_operational("src/app/main.py")
     # Module specs are deliberately NOT operational -- they are real deliverables.
     assert not _is_pcp_operational(".pcp/strategy/modules/api/spec.yaml")
+
+
+# ── Untracked work must be visible to the gates (2026-07-27 signtool dogfood) ──
+
+def test_working_diff_includes_brand_new_untracked_files(tmp_path):
+    """`git diff` never shows untracked files. An agent that creates only NEW
+    files and leaves them unstaged produced an empty diff, so the alignment
+    gate returned "No diff provided; cannot assess alignment" and blocked at
+    0% on work that plainly existed. Observed live on
+    pdf-document-storage/A004, where the scope guard listed 3 modified files
+    in the very same attempt."""
+    from pcp.commands.build import _get_working_diff, _get_changed_files_since
+
+    repo = _init_repo(tmp_path / "repo")
+    base = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+    (repo / "brand_new.py").write_text("def handler():\n    return 'implemented'\n")
+
+    files = _get_changed_files_since(repo, base)
+    diff = _get_working_diff(repo, base)
+
+    assert "brand_new.py" in files, "precondition: the file list already saw it"
+    assert "brand_new.py" in diff, "the diff the gates judge must see it too"
+    assert "implemented" in diff, "diff must carry the actual content, not just the path"
+
+
+def test_working_diff_still_covers_tracked_and_committed_changes(tmp_path):
+    from pcp.commands.build import _get_working_diff
+
+    repo = _init_repo(tmp_path / "repo")
+    base = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+    (repo / "committed.py").write_text("x = 1\n")
+    _git(["add", "-A"], repo)
+    _git(["commit", "-q", "-m", "agent committed its work"], repo)
+    (repo / "README.md").write_text("edited unstaged\n")
+
+    diff = _get_working_diff(repo, base)
+    assert "committed.py" in diff, "committed work must stay visible"
+    assert "edited unstaged" in diff, "unstaged edits must stay visible"
+
+
+def test_working_diff_excludes_pcp_operational_untracked_writes(tmp_path):
+    """PCP's own bookkeeping must not leak into the judge diff just because it
+    arrives untracked -- that was the 2026-07-17 token-ledger bug."""
+    from pcp.commands.build import _get_working_diff
+
+    repo = _init_repo(tmp_path / "repo")
+    base = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+    (repo / ".pcp").mkdir()
+    (repo / ".pcp" / "build_progress.yaml").write_text("step: coding\n")
+    (repo / "real_work.py").write_text("y = 2\n")
+
+    diff = _get_working_diff(repo, base)
+    assert "real_work.py" in diff
+    assert "build_progress" not in diff

@@ -998,7 +998,36 @@ def _get_working_diff(cwd: Path, since_ref: str | None = None) -> str:
             ["git", "diff", "--", ".", *excludes],
             capture_output=True, text=True, cwd=cwd,
         )
-    return result.stdout[:14000]
+    out = result.stdout
+
+    # `git diff` NEVER shows untracked files, so a criterion whose agent created
+    # only NEW files and left them unstaged produced an empty diff here while
+    # `_get_changed_files_since` (right above) correctly reported them. The
+    # gates then judged nothing and returned "No diff provided; cannot assess
+    # alignment" -- a guaranteed 0% BLOCK on work that plainly existed.
+    #
+    # Observed live 2026-07-27, signtool dogfood, pdf-document-storage/A004:
+    # scope guard listed 3 modified files in the same attempt the alignment
+    # gate reported no diff at all.
+    #
+    # This is the SAME bug the sibling function's docstring describes fixing on
+    # 2026-07-17 ("an agent must not be able to make its work invisible to the
+    # gates"). That fix taught the file LIST about all four states and left the
+    # DIFF beside it knowing only three. Read-only on purpose: `git add -N`
+    # would surface them too but mutates the index during what must stay a
+    # pure gate evaluation.
+    for path in _get_untracked_files(cwd):
+        if _is_pcp_operational(path):
+            continue
+        shown = subprocess.run(
+            ["git", "diff", "--no-index", "--", os.devnull, path],
+            capture_output=True, text=True, cwd=cwd,
+        )
+        # --no-index exits 1 when the files differ, which is the normal case here.
+        if shown.stdout:
+            out += shown.stdout
+
+    return out[:14000]
 
 
 UI_KEYWORDS = (
