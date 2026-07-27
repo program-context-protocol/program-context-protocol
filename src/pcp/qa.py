@@ -114,26 +114,41 @@ def _run_go_test(project_root: Path) -> dict | None:
     return {"tool": "go test", "passed": result.returncode == 0, "output": (result.stdout + result.stderr)[-3000:]}
 
 
-def test_selection_enabled() -> bool:
-    return os.environ.get("PCP_QA_TEST_SELECTION") == "impact"
+def full_suite_forced() -> bool:
+    """Escape hatch, not a feature flag.
+
+    Impact scoping used to be opt-in behind PCP_QA_TEST_SELECTION=impact, off
+    by default, while `_run_test_suite_check`'s own docstring already described
+    scoped-per-criterion + full-suite-at-wave-merge as the design. The design
+    was documented and disabled, so every criterion attempt ran the entire
+    suite -- 1,098 tests, ~7m46s, on ontology-foundry, re-running the same
+    tests up to three times per criterion.
+
+    Scoping is now the norm. PCP_QA_FULL_SUITE=1 forces the old behaviour for
+    anyone who wants it back.
+    """
+    return os.environ.get("PCP_QA_FULL_SUITE") == "1"
 
 
 def run_test_suite(project_root: Path, pcp_dir: Path | None = None, changed_files: list[str] | None = None) -> dict:
-    """Full regression suite by default — project-wide, not scoped to
-    changed files, so it catches regressions outside the files this
-    criterion touched.
+    """Scoped to the blast radius of the change when that can be determined,
+    full regression suite otherwise.
 
-    When PCP_QA_TEST_SELECTION=impact and pcp_dir/changed_files are given,
-    scopes pytest to the modules impacted by the change (see impact.py:
+    Given pcp_dir/changed_files, scopes pytest to the modules impacted by the
+    change plus the modularity drop-tests (see impact.py:
     the changed module(s) plus every module that transitively depends on
     them, via the same dependency graph coupling.py already trusts for
     coupling_score — not a separate ad hoc mechanism). Only pytest
-    supports scoping today; npm/go test always run in full regardless of
-    this flag, an honest scope limit, not a silent gap. Falls back to the
-    full suite whenever impact.py can't confidently narrow the scope —
-    never silently runs zero tests."""
+    supports scoping today; npm/go test always run in full, an honest scope
+    limit, not a silent gap. Falls back to the full suite whenever impact.py
+    can't confidently narrow the scope — never silently runs zero tests.
+
+    The unscoped full suite is the WAVE-MERGE gate's job (see
+    _run_wave_merge_gate), which is where cross-module regression risk is
+    genuinely resolved — not on every one of up to three attempts per
+    criterion. PCP_QA_FULL_SUITE=1 restores the old always-full behaviour."""
     test_paths = None
-    if test_selection_enabled() and pcp_dir is not None and changed_files:
+    if not full_suite_forced() and pcp_dir is not None and changed_files:
         from pcp.impact import blast_radius_test_paths
         try:
             test_paths = blast_radius_test_paths(pcp_dir, project_root, changed_files)

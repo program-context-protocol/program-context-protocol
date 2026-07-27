@@ -56,13 +56,45 @@ def _module_target_files(pcp_dir: Path, module_name: str) -> set[str]:
     return {c["target"] for c in data.get("criteria", []) if c.get("target")}
 
 
+def _name_variants(module_name: str) -> set[str]:
+    """`web-server` also appears on disk as `web_server`."""
+    return {module_name, module_name.replace("-", "_")}
+
+
+def _owns_by_path_convention(module_name: str, changed_files: list[str]) -> bool:
+    """Does a changed file sit under a directory named for this module?
+
+    Attribution used to rely solely on criteria declaring `target`. Measured
+    2026-07-27 on ontology-foundry: only 51 of 382 criteria declare one, so
+    attribution returned an empty set for real changed files, scoping resolved
+    to None, and the gate fell back to the full 1,098-test suite on EVERY
+    criterion attempt -- roughly 7m46s each, about 13 hours of pure test time
+    across the remaining work, re-running the same tests every time.
+
+    Path convention covers what declarations do not: 18 of that project's 27
+    modules have a matching directory. Deterministic and documented, not a
+    guess -- a path SEGMENT must equal the module name (or its underscored
+    form), so `web-server` matches `src/app/web_server/routes.py` and never
+    matches `src/web_server_helpers.py`.
+    """
+    variants = _name_variants(module_name)
+    for f in changed_files:
+        if variants & set(Path(f).parts):
+            return True
+    return False
+
+
 def changed_files_to_modules(pcp_dir: Path, modules: dict[str, dict], changed_files: list[str]) -> set[str]:
-    """Which module(s) own at least one of changed_files, by declared
-    target -- not a guess, a lookup against what the module itself claims."""
+    """Which module(s) own at least one of changed_files.
+
+    Two signals, both deterministic: a criterion's declared `target`, and the
+    directory convention above. Declared targets alone left this inert on real
+    projects (see _owns_by_path_convention)."""
     changed = set(changed_files)
     return {
         name for name in modules
-        if _module_target_files(pcp_dir, name) & changed
+        if (_module_target_files(pcp_dir, name) & changed)
+        or _owns_by_path_convention(name, changed_files)
     }
 
 
@@ -108,7 +140,25 @@ def blast_radius_test_paths(pcp_dir: Path, project_root: Path, changed_files: li
             if stem.startswith("test_") and (project_root / target).exists():
                 candidates.add(project_root / target)  # the agent wrote the test as the "target" itself
 
+    # Per-module test DIRECTORIES (`tests/web_server/`) are how real projects
+    # actually lay this out; the file patterns above only find
+    # `tests/test_<stem>.py`. Without this the function returned None on
+    # ontology-foundry despite 18 of 27 modules having exactly such a directory.
+    for name in radius:
+        for variant in _name_variants(name):
+            d = project_root / "tests" / variant
+            if d.is_dir():
+                candidates.add(d)
+
     if not candidates:
         return None  # narrowed to real modules but found no matching test files -- fall back, don't run zero
+
+    # Modularity drop-tests always run, whatever the radius. They are the
+    # module-boundary guarantee -- "every module is a guest, it can leave
+    # without drama" -- so a change that quietly couples two modules must fail
+    # HERE, at the criterion, not survive until the wave merge.
+    for d in (project_root / "tests" / "modularity", project_root / "tests" / "test_modularity"):
+        if d.is_dir():
+            candidates.add(d)
 
     return sorted(str(c.relative_to(project_root)) for c in candidates)

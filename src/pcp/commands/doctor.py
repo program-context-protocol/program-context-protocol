@@ -445,6 +445,8 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, yes: boo
             f"[dim]This install will not have fixes made since {drift['installed']}. "
             f"Reinstall from {drift.get('source_root')} to catch up.[/dim]"
         )
+    elif drift["status"] == "code_drift":
+        console.print(f"\n[yellow bold]⚠ PCP code drift:[/yellow bold] {drift['message']}")
     elif drift["status"] == "stale_metadata":
         console.print(f"[dim]PCP version string: {drift['message']}[/dim]")
 

@@ -17,7 +17,7 @@ def test_run_pytest_passed_on_zero_exit(tmp_path):
     assert result["tool"] == "pytest"
     assert result["passed"] is True
     assert result["output"] == "1 passed"
-    assert result.get("scoped_to") is None  # PCP_QA_TEST_SELECTION not set -- full suite, unscoped
+    assert result.get("scoped_to") is None  # no pcp_dir/changed_files given -- nothing to scope to
 
 
 def test_run_pytest_no_tests_collected_counts_as_passed(tmp_path):
@@ -149,17 +149,20 @@ def test_run_pytest_passes_overridden_timeout_to_subprocess(tmp_path, monkeypatc
     assert mock_run.call_args.kwargs["timeout"] == 900
 
 
-def test_test_selection_enabled_reads_env_flag(monkeypatch):
-    monkeypatch.delenv("PCP_QA_TEST_SELECTION", raising=False)
-    assert qa.test_selection_enabled() is False
-    monkeypatch.setenv("PCP_QA_TEST_SELECTION", "impact")
-    assert qa.test_selection_enabled() is True
+def test_scoping_is_the_default_not_an_opt_in(monkeypatch):
+    """It used to be opt-in behind PCP_QA_TEST_SELECTION=impact and defaulted
+    OFF, while the code's own docstrings described scoped-per-criterion as the
+    design. Documented and disabled: every attempt ran the whole suite."""
+    monkeypatch.delenv("PCP_QA_FULL_SUITE", raising=False)
+    assert qa.full_suite_forced() is False
+    monkeypatch.setenv("PCP_QA_FULL_SUITE", "1")
+    assert qa.full_suite_forced() is True
+    assert not hasattr(qa, "test_selection_enabled"), "the old opt-in must be gone, not renamed"
 
 
-def test_run_test_suite_ignores_selection_when_flag_unset(tmp_path, monkeypatch):
-    """Default behavior is unchanged -- full suite, no scoping -- unless the
-    flag is explicitly set. No silent behavior change for existing projects."""
-    monkeypatch.delenv("PCP_QA_TEST_SELECTION", raising=False)
+def test_full_suite_escape_hatch_disables_scoping(tmp_path, monkeypatch):
+    """PCP_QA_FULL_SUITE=1 restores the pre-2026-07-27 always-full behaviour."""
+    monkeypatch.setenv("PCP_QA_FULL_SUITE", "1")
     with patch("shutil.which", return_value="/usr/bin/pytest"), \
             patch("pcp.qa.subprocess.run") as mock_run, \
             patch("pcp.impact.blast_radius_test_paths") as mock_scope:
@@ -170,7 +173,7 @@ def test_run_test_suite_ignores_selection_when_flag_unset(tmp_path, monkeypatch)
 
 
 def test_run_test_suite_scopes_pytest_args_when_enabled_and_paths_found(tmp_path, monkeypatch):
-    monkeypatch.setenv("PCP_QA_TEST_SELECTION", "impact")
+    monkeypatch.delenv("PCP_QA_FULL_SUITE", raising=False)
     with patch("shutil.which", return_value="/usr/bin/pytest"), \
             patch("pcp.qa.subprocess.run") as mock_run, \
             patch("pcp.impact.blast_radius_test_paths", return_value=["tests/test_x.py"]):
@@ -183,7 +186,7 @@ def test_run_test_suite_scopes_pytest_args_when_enabled_and_paths_found(tmp_path
 def test_run_test_suite_falls_back_to_full_when_scoping_returns_none(tmp_path, monkeypatch):
     """impact.py returning None means it couldn't confidently narrow the
     scope -- must run the full suite, never silently run zero tests."""
-    monkeypatch.setenv("PCP_QA_TEST_SELECTION", "impact")
+    monkeypatch.delenv("PCP_QA_FULL_SUITE", raising=False)
     with patch("shutil.which", return_value="/usr/bin/pytest"), \
             patch("pcp.qa.subprocess.run") as mock_run, \
             patch("pcp.impact.blast_radius_test_paths", return_value=None):
@@ -194,7 +197,7 @@ def test_run_test_suite_falls_back_to_full_when_scoping_returns_none(tmp_path, m
 
 
 def test_run_test_suite_falls_back_to_full_when_scoping_raises(tmp_path, monkeypatch):
-    monkeypatch.setenv("PCP_QA_TEST_SELECTION", "impact")
+    monkeypatch.delenv("PCP_QA_FULL_SUITE", raising=False)
     with patch("shutil.which", return_value="/usr/bin/pytest"), \
             patch("pcp.qa.subprocess.run") as mock_run, \
             patch("pcp.impact.blast_radius_test_paths", side_effect=RuntimeError("boom")):

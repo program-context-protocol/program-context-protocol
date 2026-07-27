@@ -19,6 +19,7 @@ Advisory, never fatal: a project can legitimately pin an older PCP, and a tool
 that hard-blocks on its own version would be worse than the drift it reports.
 """
 
+import hashlib
 import importlib.metadata as md
 import os
 import re
@@ -99,6 +100,49 @@ def source_version(root: Path) -> str | None:
     return m.group(1) if m else None
 
 
+def _package_fingerprint(pkg_dir: Path) -> str | None:
+    """Content hash of every .py under a package directory.
+
+    Version strings are not evidence of code. Found 2026-07-27 minutes after
+    shipping this module: ontology-foundry's venv and the source tree both
+    declared 0.9.14 while the venv's copy was missing a function added to
+    source under that same version. The check reported "ok". Comparing declared
+    versions cannot see unreleased source changes, which is the single most
+    common way an install goes stale between releases.
+    """
+    if not pkg_dir.is_dir():
+        return None
+    h = hashlib.sha256()
+    for f in sorted(pkg_dir.rglob("*.py")):
+        if "__pycache__" in f.parts:
+            continue
+        try:
+            h.update(f.relative_to(pkg_dir).as_posix().encode())
+            h.update(f.read_bytes())
+        except OSError:
+            return None
+    return h.hexdigest()
+
+
+def code_differs(root: Path) -> bool | None:
+    """Does the installed package's CODE differ from the source tree's?
+
+    None when either side cannot be fingerprinted -- unknown, never "fine".
+    """
+    try:
+        installed = Path(pcp.__file__).resolve().parent
+    except Exception:
+        return None
+    for candidate in (root / "src" / "pcp", root / "pcp"):
+        if candidate.is_dir():
+            src_fp = _package_fingerprint(candidate)
+            inst_fp = _package_fingerprint(installed)
+            if src_fp is None or inst_fp is None:
+                return None
+            return src_fp != inst_fp
+    return None
+
+
 def _as_tuple(v: str) -> tuple:
     parts = []
     for chunk in v.split("."):
@@ -136,6 +180,18 @@ def check() -> dict:
                 "message": f"Could not read a version from {root / 'pyproject.toml'}."}
 
     if inst == src:
+        # Same version string is NOT the same code -- see _package_fingerprint.
+        if code_differs(root) is True:
+            return {
+                "status": "code_drift", "installed": inst, "source": src,
+                "source_root": str(root), "editable": is_editable(),
+                "message": (
+                    f"PCP {inst} matches the source version string, but the INSTALLED CODE "
+                    f"differs from {root}. The source has changes not present in this "
+                    f"install -- unreleased edits under the same version number. Rebuild "
+                    f"and reinstall to pick them up."
+                ),
+            }
         return {"status": "ok", "installed": inst, "source": src, "source_root": str(root),
                 "message": f"PCP {inst} matches its source tree."}
 

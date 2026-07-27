@@ -1489,11 +1489,16 @@ def _run_layer1_check(pcp_dir: Path, project_root: Path, changed_files: list[str
 
 
 def _run_test_suite_check(pcp_dir: Path, project_root: Path, ctx: dict) -> list[str]:
-    """Project-wide by default. Under PCP_QA_TEST_SELECTION=impact, scoped
-    to the modules impacted by this attempt's changed files (see
-    impact.py) -- the full suite stays the rare safety net at wave-merge
-    (_run_wave_merge_gate's own qa.run_test_suite call, never scoped) and
-    isn't run here on every one of up to 3 attempts per criterion."""
+    """Scoped to the blast radius of this attempt's changed files (impact.py):
+    the changed module(s), every module that transitively depends on them, and
+    the modularity drop-tests. The unscoped full suite is the wave-merge gate's
+    job (_run_wave_merge_gate's own qa.run_test_suite call) -- it is not run
+    here on every one of up to 3 attempts per criterion.
+
+    This was the documented design from the start but sat behind an opt-in flag
+    that defaulted off, so the full suite ran every time regardless. Measured
+    2026-07-27 on ontology-foundry: 1,098 tests / ~7m46s per attempt, versus 478
+    scoped. PCP_QA_FULL_SUITE=1 restores the old behaviour."""
     result = qa.run_test_suite(project_root, pcp_dir=pcp_dir, changed_files=ctx.get("files"))
     if result.get("scoped_to"):
         console.print(f"[dim]Test suite scoped to impacted modules: {', '.join(result['scoped_to'])}[/dim]")
