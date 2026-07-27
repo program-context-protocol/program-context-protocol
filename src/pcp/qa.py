@@ -65,21 +65,84 @@ def _timeout_sast() -> int:
     return int(os.environ.get("PCP_QA_SAST_TIMEOUT_SEC", "120"))
 
 
-def _run_pytest(project_root: Path, test_paths: list[str] | None = None) -> dict | None:
+def testmon_available(project_root: Path) -> bool:
+    """Is pytest-testmon installed in the environment pytest will run from?
+
+    Detected, never depended on -- the same contract this module already has
+    with ruff and semgrep, so PCP neither vendors it nor inherits its
+    packaging. Checked by asking pytest itself rather than importing testmon
+    here, because the interpreter running PCP is frequently not the one running
+    the project's tests (PCP is commonly installed globally while the project
+    has its own venv).
+
+    PCP_QA_NO_TESTMON=1 turns it off.
+    """
+    if os.environ.get("PCP_QA_NO_TESTMON") == "1":
+        return False
+    try:
+        r = subprocess.run(["pytest", "--help"], capture_output=True, text=True,
+                           cwd=project_root, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--testmon" in (r.stdout + r.stderr)
+
+
+def _run_pytest(project_root: Path, test_paths: list[str] | None = None,
+                incremental: bool = False) -> dict | None:
+    """Run pytest, optionally letting testmon skip tests it knows are unaffected.
+
+    Path scoping (impact.py) reduces BREADTH -- which tests are eligible. It
+    does nothing about REPETITION, which is the larger term: between one
+    criterion and the next a handful of files change and nearly every eligible
+    test re-executes against identical code, up to 3 attempts per criterion.
+    Measured 2026-07-27 on ontology-foundry, scoping alone still left an
+    average of 37% of a 1,279-test suite per run, and 99% for the hub module
+    every other module depends on.
+
+    testmon tracks per-test dependencies from actual coverage, so it also fixes
+    the two cases scoping structurally cannot: a hub module whose declared
+    blast radius really is the whole project, and a greenfield module with no
+    source yet to attribute changed files to. It derives dependencies from
+    execution rather than from the declared module graph -- which this project's
+    own telemetry showed to be fiction (`standards_interop` broke in 69% of
+    blocking runs while nothing declared a dependency on it).
+
+    `incremental` is only ever set for the per-criterion gate. The wave-merge
+    gate deliberately runs the full suite with NO testmon: an incremental
+    runner is a cache, and the wave boundary is exactly where a cache should be
+    distrusted and the real answer computed.
+    """
     if not shutil.which("pytest"):
         return None
-    args = ["pytest", "-q", *(test_paths or [])]
+    use_testmon = incremental and testmon_available(project_root)
+    args = ["pytest", "-q"] + (["--testmon"] if use_testmon else []) + list(test_paths or [])
     try:
         result = subprocess.run(
             args, capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
     except subprocess.TimeoutExpired:
         return {"tool": "pytest", "passed": False, "output": _timeout_message("pytest")}
-    # Exit code 5 = no tests collected yet — not a failure, just nothing to run.
+
+    # Exit code 5 = no tests collected. Under testmon that is the SUCCESS case
+    # -- "nothing this change touches" -- and it is also what a broken testmon
+    # database looks like. Re-run without it rather than reporting a pass on
+    # zero tests from a cache PCP cannot verify.
+    if use_testmon and result.returncode not in (0, 1):
+        plain = subprocess.run(
+            ["pytest", "-q", *(test_paths or [])],
+            capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
+        )
+        return {
+            "tool": "pytest", "passed": plain.returncode in (0, 5),
+            "output": (plain.stdout + plain.stderr)[-3000:],
+            "scoped_to": test_paths or None, "incremental": False,
+            "testmon_fallback": f"testmon exited {result.returncode}; re-ran full scope",
+        }
+
     passed = result.returncode == 0 or result.returncode == 5
     return {
         "tool": "pytest", "passed": passed, "output": (result.stdout + result.stderr)[-3000:],
-        "scoped_to": test_paths or None,
+        "scoped_to": test_paths or None, "incremental": use_testmon,
     }
 
 
@@ -156,7 +219,7 @@ def run_test_suite(project_root: Path, pcp_dir: Path | None = None, changed_file
             test_paths = None  # scoping failed -- fall back to the full suite, don't propagate
 
     if test_paths and shutil.which("pytest"):
-        out = _run_pytest(project_root, test_paths)
+        out = _run_pytest(project_root, test_paths, incremental=True)
         if out is not None:
             return out
 

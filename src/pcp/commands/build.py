@@ -1122,7 +1122,15 @@ _PCP_OPERATIONAL_DIRS = (".pcp/evidence/", ".pcp/transcripts/")
 # the point: those tuples already define "PCP's own bookkeeping, not agent
 # output", and every consumer of that idea should read the same source. Naming
 # one offending file at a time is what let the identical bug return twice.
-_AGENT_LOCAL_CONFIG = (".claude/settings.json", ".claude/settings.local.json")
+_AGENT_LOCAL_CONFIG = (
+    ".claude/settings.json", ".claude/settings.local.json",
+    # testmon's per-test dependency cache. Written on every build, differs
+    # per worktree, and is not an agent deliverable -- precisely the shape
+    # that broke wave merges twice on 2026-07-27 (.claude/settings.json as
+    # an add/add conflict, .pcp/token_ledger.yaml as "your local changes
+    # would be overwritten by merge"). Excluded before it can do it again.
+    ".testmondata", ".testmondata-journal",
+)
 
 _AUTO_COMMIT_EXCLUDES = tuple(
     f":!{p}" for p in (*_AGENT_LOCAL_CONFIG, *_PCP_OPERATIONAL_PATHS)

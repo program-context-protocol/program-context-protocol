@@ -778,6 +778,10 @@ venv/
 .pcp/brd_items.yaml
 .pcp/evidence/
 .pcp/transcripts/
+
+# pytest-testmon's per-test dependency cache — a build artifact, per-worktree.
+.testmondata
+.testmondata-journal
 """
 
 SDLC_PHASE_TEMPLATE = """\

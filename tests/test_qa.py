@@ -205,3 +205,83 @@ def test_run_test_suite_falls_back_to_full_when_scoping_raises(tmp_path, monkeyp
         result = qa.run_test_suite(tmp_path, pcp_dir=tmp_path / ".pcp", changed_files=["src/x.py"])
     assert mock_run.call_args.args[0] == ["pytest", "-q"]
     assert result.get("scoped_to") is None
+
+
+# ── testmon: incremental test selection, detected not depended on (2026-07-27) ──
+
+def test_testmon_detected_by_asking_pytest_not_by_importing(tmp_path):
+    """The interpreter running PCP is frequently not the one running the
+    project's tests — PCP is commonly installed globally while the project has
+    its own venv. Importing testmon here would answer the wrong question."""
+    import inspect
+    src = inspect.getsource(qa.testmon_available)
+    assert '"pytest", "--help"' in src or "'pytest', '--help'" in src
+    assert "import testmon" not in src
+
+
+def test_testmon_can_be_switched_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("PCP_QA_NO_TESTMON", "1")
+    assert qa.testmon_available(tmp_path) is False
+
+
+def test_incremental_run_passes_testmon_flag(tmp_path, monkeypatch):
+    monkeypatch.delenv("PCP_QA_NO_TESTMON", raising=False)
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+         patch.object(qa, "testmon_available", return_value=True), \
+         patch("pcp.qa.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="3 passed", stderr="")
+        out = qa._run_pytest(tmp_path, ["tests/mod"], incremental=True)
+    assert "--testmon" in run.call_args.args[0]
+    assert out["incremental"] is True
+
+
+def test_non_incremental_run_never_uses_testmon(tmp_path):
+    """The wave-merge gate computes the real answer — an incremental runner is
+    a cache, and the wave boundary is exactly where a cache must be distrusted."""
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+         patch.object(qa, "testmon_available", return_value=True), \
+         patch("pcp.qa.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="900 passed", stderr="")
+        out = qa._run_pytest(tmp_path, None, incremental=False)
+    assert "--testmon" not in run.call_args.args[0]
+    assert out["incremental"] is False
+
+
+def test_wave_merge_path_stays_full_and_unscoped(tmp_path):
+    """run_test_suite with no pcp_dir/changed_files must never scope or cache."""
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+         patch.object(qa, "testmon_available", return_value=True), \
+         patch("pcp.qa.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="1279 passed", stderr="")
+        qa.run_test_suite(tmp_path)
+    assert run.call_args.args[0] == ["pytest", "-q"]
+
+
+def test_broken_testmon_db_falls_back_to_a_real_run(tmp_path):
+    """A corrupt testmon database and "nothing was affected" look alike from
+    outside. Never report a pass on zero tests from a cache PCP cannot verify."""
+    calls = []
+
+    def fake(args, **kw):
+        calls.append(args)
+        if "--testmon" in args:
+            return MagicMock(returncode=3, stdout="INTERNALERROR", stderr="")
+        return MagicMock(returncode=0, stdout="42 passed", stderr="")
+
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+         patch.object(qa, "testmon_available", return_value=True), \
+         patch("pcp.qa.subprocess.run", side_effect=fake):
+        out = qa._run_pytest(tmp_path, ["tests/mod"], incremental=True)
+
+    assert len(calls) == 2, "must re-run without testmon"
+    assert "--testmon" not in calls[1]
+    assert out["passed"] is True
+    assert out["incremental"] is False
+    assert "testmon_fallback" in out
+
+
+def test_testmon_cache_is_never_auto_committed():
+    """Written every build, differs per worktree, not a deliverable — the exact
+    shape that broke wave merges twice today."""
+    from pcp.commands.build import _AUTO_COMMIT_EXCLUDES
+    assert ":!.testmondata" in _AUTO_COMMIT_EXCLUDES
