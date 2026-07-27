@@ -438,6 +438,56 @@ def _normalize_ci_rules(ci_rules: dict) -> list[str]:
     return warnings
 
 
+def _report_orphaned_modules(pcp_dir: Path, generated: set[str]) -> list[str]:
+    """Surface module directories left behind by a PREVIOUS kickoff.
+
+    `--force` only suppresses the overwrite confirm (see the `if pcp_dir.exists()
+    and not force` check below); it has never removed prior module directories,
+    while its help text says "Force overwrite existing .pcp/ directory". So a
+    second kickoff against a re-scoped vision writes its new modules ALONGSIDE
+    the old ones. Found live 2026-07-27 in the signtool dogfood: two kickoffs
+    produced 14 module directories from two incompatible decompositions, while
+    decomposition.md described only the 6 newest.
+
+    That is the exact drift PCP exists to prevent, and it is worse than a merely
+    stale file, because `pcp build` gathers modules from DISK, not from
+    decomposition.md — so the next build would have built features the current
+    objective explicitly rules out, with a wave order computed across a
+    dependency graph spanning two generations. It also silently corrupts
+    validate-strategy's coverage verdict, which judges the new decomposition
+    while the orphans sit there covering things it reports as gaps.
+
+    Deliberately reports rather than deletes: these are protected-path spec
+    files that a human may have authored or amended, and destroying them to
+    tidy up a scaffold would be a far worse failure than leaving them. Returns
+    the orphan names so callers/tests can assert on them."""
+    modules_dir = pcp_dir / "strategy" / "modules"
+    if not modules_dir.exists():
+        return []
+    on_disk = {d.name for d in modules_dir.iterdir() if d.is_dir() and (d / "spec.yaml").exists()}
+    orphans = sorted(on_disk - generated)
+    if not orphans:
+        return []
+
+    console.print(
+        f"\n[bold yellow]⚠ {len(orphans)} module director(ies) on disk are NOT in this "
+        f"decomposition[/bold yellow] — left over from an earlier kickoff:"
+    )
+    for name in orphans:
+        console.print(f"    [yellow]{name}[/yellow]")
+    console.print(
+        "[dim]`pcp build` gathers modules from disk, not from decomposition.md, so these "
+        "WILL be built unless you remove them. They also distort `pcp validate-strategy`'s "
+        "coverage verdict. Review and delete the directories you no longer want:[/dim]"
+    )
+    console.print(f"[dim]    rm -rf {modules_dir}/<name>[/dim]")
+    console.print(
+        "[dim]Not removed automatically — module spec.yaml/acceptance.yaml are "
+        "protected-path files that may carry human-authored changes.[/dim]\n"
+    )
+    return orphans
+
+
 @click.command()
 @click.argument("vision_file", type=click.Path(exists=True))
 @click.option("--path", "project_path", type=click.Path(), default=".",
@@ -536,6 +586,8 @@ def kickoff(vision_file: str, project_path: str, force: bool):
 
         _write_file(mod_dir / "spec.yaml", yaml.dump(m["spec"], default_flow_style=False))
         _write_file(mod_dir / "acceptance.yaml", yaml.dump(m["acceptance"], default_flow_style=False))
+
+    _report_orphaned_modules(pcp_dir, {m["name"] for m in result.get("modules", [])})
 
     console.print("[green]✓[/green] Generated PCP files under [cyan].pcp/[/cyan]")
 
