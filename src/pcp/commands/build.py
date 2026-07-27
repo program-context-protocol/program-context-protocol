@@ -439,8 +439,7 @@ def _auto_commit_criterion(project_root: Path, module_name: str, criterion: dict
     # projects; this covers every project that already had a .gitignore, which
     # init deliberately never modifies.
     subprocess.run(
-        ["git", "add", "-A", "--",
-         ":!.claude/settings.json", ":!.claude/settings.local.json"],
+        ["git", "add", "-A", "--", *_AUTO_COMMIT_EXCLUDES],
         cwd=project_root, capture_output=True,
     )
     message = f"{module_name}/{criterion['id']}: {criterion.get('description', '')}".strip()
@@ -918,6 +917,36 @@ _PCP_OPERATIONAL_PATHS = (
     ".pcp/build_progress.yaml",
 )
 _PCP_OPERATIONAL_DIRS = (".pcp/evidence/", ".pcp/transcripts/")
+
+
+# Paths `_auto_commit_criterion` must never stage. Two distinct hazards, one
+# rule: any file that (a) is written continuously by PCP or the agent harness
+# during a build and (b) is not an agent deliverable will, if committed by a
+# worktree branch, break the merge that brings that branch home.
+#
+# 2026-07-25 was the `.claude/settings.json` case: every worktree wrote a
+# DIFFERENT version of the same new path, so merging two branches was an
+# add/add conflict. That got patched by naming those two files here.
+#
+# 2026-07-27 (signtool dogfood) was the same shape through the other door:
+# `.pcp/token_ledger.yaml` and friends are TRACKED, and PCP appends to them in
+# the main pcp_dir throughout the run by design. So at merge time the main
+# repo has uncommitted changes to a tracked file the incoming branch also
+# committed, and git refuses before it even starts:
+#     "Your local changes to the following files would be overwritten by
+#      merge: .pcp/token_ledger.yaml"
+# Criterion A001 halted the build on exactly this, after A002 and A004 had
+# already merged cleanly.
+#
+# Deriving this from _PCP_OPERATIONAL_PATHS rather than listing files again is
+# the point: those tuples already define "PCP's own bookkeeping, not agent
+# output", and every consumer of that idea should read the same source. Naming
+# one offending file at a time is what let the identical bug return twice.
+_AGENT_LOCAL_CONFIG = (".claude/settings.json", ".claude/settings.local.json")
+
+_AUTO_COMMIT_EXCLUDES = tuple(
+    f":!{p}" for p in (*_AGENT_LOCAL_CONFIG, *_PCP_OPERATIONAL_PATHS)
+) + tuple(f":!{d.rstrip('/')}" for d in _PCP_OPERATIONAL_DIRS)
 
 
 def _is_pcp_operational(path: str) -> bool:

@@ -598,3 +598,43 @@ def test_working_diff_excludes_pcp_operational_untracked_writes(tmp_path):
     diff = _get_working_diff(repo, base)
     assert "real_work.py" in diff
     assert "build_progress" not in diff
+
+
+def test_auto_commit_never_stages_pcp_operational_writes(tmp_path):
+    """PCP appends to token_ledger/telemetry in the MAIN .pcp/ throughout a
+    build. If a worktree branch commits them, the merge home fails with "your
+    local changes would be overwritten by merge" — main has uncommitted edits
+    to a tracked file the branch also committed. Halted the signtool dogfood
+    on criterion A001 after A002/A004 had already merged cleanly."""
+    repo = _init_repo(tmp_path / "repo")
+    pcp = repo / ".pcp"
+    (pcp / "evidence" / "mod" / "A1").mkdir(parents=True)
+    (pcp / "token_ledger.yaml").write_text("calls: []\n")
+    (pcp / "telemetry.jsonl").write_text('{"x":1}\n')
+    (pcp / "build_progress.yaml").write_text("step: coding\n")
+    (pcp / "evidence" / "mod" / "A1" / "gate.txt").write_text("raw\n")
+    (pcp / "objective.md").write_text("# Objective\n")   # a governance SPEC
+    (repo / "real_work.py").write_text("def f(): return 1\n")
+
+    _auto_commit_criterion(repo, "mod", {"id": "A001", "description": "d"})
+
+    tracked = _git(["ls-files"], repo).stdout.split()
+    assert "real_work.py" in tracked
+    assert ".pcp/objective.md" in tracked, "governance specs must still be committed"
+    for path in (".pcp/token_ledger.yaml", ".pcp/telemetry.jsonl",
+                 ".pcp/build_progress.yaml", ".pcp/evidence/mod/A1/gate.txt"):
+        assert path not in tracked, f"{path} must never be auto-committed"
+
+
+def test_auto_commit_excludes_derive_from_the_operational_tuples(tmp_path):
+    """Naming offending files one at a time is what let this bug return twice.
+    The exclude list must stay derived from _PCP_OPERATIONAL_PATHS so a file
+    added there is covered here automatically."""
+    from pcp.commands.build import (
+        _AUTO_COMMIT_EXCLUDES, _PCP_OPERATIONAL_PATHS, _PCP_OPERATIONAL_DIRS,
+    )
+    for p in _PCP_OPERATIONAL_PATHS:
+        assert f":!{p}" in _AUTO_COMMIT_EXCLUDES
+    for d in _PCP_OPERATIONAL_DIRS:
+        assert f":!{d.rstrip('/')}" in _AUTO_COMMIT_EXCLUDES
+    assert ":!.claude/settings.json" in _AUTO_COMMIT_EXCLUDES

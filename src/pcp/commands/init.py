@@ -757,6 +757,26 @@ venv/
 # where three criteria that had all passed their gates could not be merged.
 .claude/settings.json
 .claude/settings.local.json
+
+# PCP's own operational writes. These are auto-generated audit artifacts, and
+# PCP appends to them in the MAIN .pcp/ throughout a build by design. Tracking
+# them means a parallel-build merge hits "your local changes would be
+# overwritten by merge" and refuses — 2026-07-27 signtool dogfood, where a
+# criterion that had passed every gate could not be merged because the token
+# ledger had moved underneath it. Governance SPECS (objective, strategy/,
+# ci_rules, controls) stay tracked deliberately; only the run-time logs go.
+.pcp/token_ledger.yaml
+.pcp/telemetry.jsonl
+.pcp/decision_log.jsonl
+.pcp/coverage_audit.jsonl
+.pcp/build_progress.yaml
+.pcp/notify_heartbeat.yaml
+.pcp/escalations.yaml
+.pcp/prune_log.yaml
+.pcp/brd.md
+.pcp/brd_items.yaml
+.pcp/evidence/
+.pcp/transcripts/
 """
 
 SDLC_PHASE_TEMPLATE = """\
