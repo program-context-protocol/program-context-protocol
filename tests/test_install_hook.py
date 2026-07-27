@@ -1,3 +1,5 @@
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -17,7 +19,7 @@ def _init_git_repo(tmp_path):
 def test_install_hook_not_a_git_repo_exits_2(tmp_path):
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()
-    with patch("pcp.commands.install_hook._install_cron_scripts"):
+    with patch("pcp.commands.install_hook._remove_legacy_cron_jobs"):
         runner = CliRunner()
         result = runner.invoke(cli, ["install-hook", "--path", str(tmp_path)])
     assert result.exit_code == 2
@@ -26,7 +28,7 @@ def test_install_hook_not_a_git_repo_exits_2(tmp_path):
 
 def test_install_hook_writes_commit_msg_hook(tmp_path):
     _init_git_repo(tmp_path)
-    with patch("pcp.commands.install_hook._install_cron_scripts") as mock_cron:
+    with patch("pcp.commands.install_hook._remove_legacy_cron_jobs") as mock_cron:
         runner = CliRunner()
         result = runner.invoke(cli, ["install-hook", "--path", str(tmp_path)])
     assert result.exit_code == 0
@@ -42,7 +44,7 @@ def test_install_hook_refuses_overwrite_without_force(tmp_path):
     hook_path = tmp_path / ".git" / "hooks" / "commit-msg"
     hook_path.parent.mkdir(exist_ok=True)
     hook_path.write_text("#!/bin/sh\necho existing\n")
-    with patch("pcp.commands.install_hook._install_cron_scripts"):
+    with patch("pcp.commands.install_hook._remove_legacy_cron_jobs"):
         runner = CliRunner()
         result = runner.invoke(cli, ["install-hook", "--path", str(tmp_path)])
     assert result.exit_code == 1
@@ -64,7 +66,7 @@ def test_install_hook_installs_missing_post_commit_even_when_commit_msg_exists(t
     post_commit_path = tmp_path / ".git" / "hooks" / "post-commit"
     assert not post_commit_path.exists()
 
-    with patch("pcp.commands.install_hook._install_cron_scripts"):
+    with patch("pcp.commands.install_hook._remove_legacy_cron_jobs"):
         runner = CliRunner()
         result = runner.invoke(cli, ["install-hook", "--path", str(tmp_path)])
 
@@ -85,7 +87,7 @@ def test_install_hook_force_overwrites(tmp_path):
     hook_path = tmp_path / ".git" / "hooks" / "commit-msg"
     hook_path.parent.mkdir(exist_ok=True)
     hook_path.write_text("#!/bin/sh\necho existing\n")
-    with patch("pcp.commands.install_hook._install_cron_scripts"):
+    with patch("pcp.commands.install_hook._remove_legacy_cron_jobs"):
         runner = CliRunner()
         result = runner.invoke(cli, ["install-hook", "--path", str(tmp_path), "--force"])
     assert result.exit_code == 0
@@ -94,7 +96,7 @@ def test_install_hook_force_overwrites(tmp_path):
 
 def test_install_hook_pre_commit_framework_creates_config(tmp_path):
     _init_git_repo(tmp_path)
-    with patch("pcp.commands.install_hook._install_cron_scripts"):
+    with patch("pcp.commands.install_hook._remove_legacy_cron_jobs"):
         runner = CliRunner()
         result = runner.invoke(cli, ["install-hook", "--path", str(tmp_path), "--pre-commit-framework"])
     assert result.exit_code == 0
@@ -105,18 +107,18 @@ def test_install_hook_pre_commit_framework_creates_config(tmp_path):
 def test_install_hook_pre_commit_framework_skips_if_already_present(tmp_path):
     _init_git_repo(tmp_path)
     (tmp_path / ".pre-commit-config.yaml").write_text("repos:\n  - repo: local\n    hooks:\n      - id: pcp-check\n")
-    with patch("pcp.commands.install_hook._install_cron_scripts"):
+    with patch("pcp.commands.install_hook._remove_legacy_cron_jobs"):
         runner = CliRunner()
         result = runner.invoke(cli, ["install-hook", "--path", str(tmp_path), "--pre-commit-framework"])
     assert result.exit_code == 0
     assert "already in" in result.output
 
 
-# ── install_git_hook() -- the pure, no-cron-side-effect function pcp init calls ──
+# ── install_git_hook() -- the pure, no-crontab-side-effect function pcp init calls ──
 
-def test_install_git_hook_writes_hook_no_cron(tmp_path):
+def test_install_git_hook_never_touches_crontab(tmp_path):
     _init_git_repo(tmp_path)
-    with patch("pcp.commands.install_hook._install_cron_scripts") as mock_cron:
+    with patch("pcp.commands.install_hook._remove_legacy_cron_jobs") as mock_cron:
         installed, msg = install_git_hook(tmp_path)
     assert installed
     assert "installed" in msg
@@ -181,3 +183,74 @@ def test_installed_hook_strips_claude_and_anthropic_coauthor_lines(tmp_path):
     assert "Claude <noreply@anthropic.com>" not in result
     assert "anthropic-bot" not in result
     assert "Real Person <real@example.com>" in result
+
+
+# ── Legacy cron removal (2026-07-27 pre-launch security fix) ──
+
+def test_pcp_never_installs_cron_jobs_anymore():
+    """The installer is gone, not disabled. A daily unverified `curl` that
+    overwrites an agent INSTRUCTION file has no safe configuration."""
+    from pcp.commands import install_hook as ih
+    assert not hasattr(ih, "_install_cron_scripts")
+    # Strip comments: the removal is deliberately documented in a comment that
+    # names what was deleted, so a naive substring check would match its own
+    # explanation. What must be gone is executable code.
+    code = "\n".join(
+        ln for ln in Path(ih.__file__).read_text().splitlines()
+        if not ln.lstrip().startswith("#")
+    )
+    assert "raw.githubusercontent.com" not in code
+    assert "upgrade_skill.sh" not in code
+    assert "aggregate_interventions.sh" not in code
+
+
+def test_remove_legacy_cron_jobs_strips_only_pcp_lines():
+    from pcp.commands.install_hook import _remove_legacy_cron_jobs
+
+    existing = (
+        "0 6 * * * /Users/someone/backup.sh\n"
+        "47 8 * * * /Users/someone/.pcp/cron/aggregate_interventions.sh >> log 2>&1\n"
+        "13 9 * * * /Users/someone/.pcp/cron/upgrade_skill.sh >> log 2>&1\n"
+        "30 2 * * * /Users/someone/other-job.sh\n"
+    )
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs.get("input")))
+        if cmd == ["crontab", "-l"]:
+            return SimpleNamespace(returncode=0, stdout=existing, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        _remove_legacy_cron_jobs()
+
+    written = [inp for cmd, inp in calls if cmd == ["crontab", "-"]]
+    assert len(written) == 1, "should rewrite the crontab exactly once"
+    result = written[0]
+    assert "/.pcp/cron/" not in result
+    assert "/Users/someone/backup.sh" in result
+    assert "/Users/someone/other-job.sh" in result
+
+
+def test_remove_legacy_cron_jobs_no_write_when_nothing_to_remove():
+    from pcp.commands.install_hook import _remove_legacy_cron_jobs
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd == ["crontab", "-l"]:
+            return SimpleNamespace(returncode=0, stdout="0 6 * * * /backup.sh\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        _remove_legacy_cron_jobs()
+
+    assert ["crontab", "-"] not in calls, "must not rewrite an untouched crontab"
+
+
+def test_remove_legacy_cron_jobs_survives_missing_crontab():
+    """No crontab binary (common in containers) must not break hook install."""
+    from pcp.commands.install_hook import _remove_legacy_cron_jobs
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        _remove_legacy_cron_jobs()  # must not raise

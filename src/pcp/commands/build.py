@@ -380,6 +380,19 @@ def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | N
         cwd=project_root, capture_output=True, text=True,
     )
     ok = result.returncode == 0
+    if not ok:
+        # Leave NO half-merged state behind. Without this, a conflicting merge
+        # leaves project_root mid-MERGE with conflict markers in the tree, and
+        # every subsequent git command in that repo fails on unmerged paths --
+        # so one conflicted criterion takes down the whole run and everything
+        # after it, including criteria that had already passed their gates.
+        # That is what made 2026-07-25's `.claude/settings.json` add/add
+        # conflict so destructive: that fix removed one CAUSE of a conflict,
+        # this handles the CONSEQUENCE of any conflict at all. The caller
+        # already treats `ok=False` as a failure and leaves the worktree up
+        # for manual resolution -- aborting here only cleans the main repo,
+        # it does not discard the branch or the agent's work.
+        subprocess.run(["git", "merge", "--abort"], cwd=project_root, capture_output=True)
     # Conflict-rate telemetry (2026-07-17): AgenticFlict (arXiv:2604.03551)
     # measured a 27.67% merge-conflict baseline for agent-authored PRs; PCP's
     # worktree-isolated wave merges should beat that, and now the data to
@@ -1591,6 +1604,42 @@ def _criterion_scope_framing(ctx: dict) -> str:
     )
 
 
+def _gate_infrastructure_failure(check: str, exc: Exception) -> list[str]:
+    """A gate that COULD NOT RUN is not a gate that PASSED.
+
+    Both LLM gates used to `return []` when `llm.call_json` raised -- a rate
+    limit, a timeout, an unauthenticated CLI. An empty finding list means "no
+    problems found", so a criterion whose review never actually happened was
+    marked complete, committed and merged. In an unattended run nobody reads
+    the console warning that was the only signal.
+
+    This is the exact bug class already fixed twice in `qa.py` (the semgrep
+    phantom block, the QA timeout masking): conflating "the tool could not
+    run" with "the tool found nothing". Those fixes were made file-locally
+    instead of as a rule, which is why the same shape survived here.
+
+    Returning a blocking finding is the honest answer, and it composes
+    correctly with the retry loop: a transient failure clears on attempt 2 or
+    3, a persistent one exhausts the attempts and escalates -- which is right,
+    because PCP genuinely could not verify the work and must not claim it did.
+
+    PCP_ALLOW_UNVERIFIED_GATES=1 restores the old advisory behavior for anyone
+    deliberately running without LLM budget. Opt-in and loud, never default --
+    it means completed criteria carry no LLM review at all."""
+    if os.environ.get("PCP_ALLOW_UNVERIFIED_GATES") == "1":
+        console.print(
+            f"[yellow]{check}: gate could not run, and PCP_ALLOW_UNVERIFIED_GATES=1 "
+            f"is set — treating as advisory. This criterion carries NO {check} review.[/yellow]"
+        )
+        return []
+    return [
+        f"{check}: gate could not be evaluated ({exc}). This is an infrastructure "
+        f"failure, not a code finding — the review never ran, so the criterion "
+        f"cannot be marked verified. Retrying may clear it; set "
+        f"PCP_ALLOW_UNVERIFIED_GATES=1 to proceed without this gate."
+    ]
+
+
 def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ctx: dict) -> list[str]:
     """Run architect review and return BLOCK findings that survive adversarial verification."""
     from pcp.commands.architect_review import SYSTEM_PROMPT, _build_prompt, _load_persona, _load_kb
@@ -1605,12 +1654,12 @@ def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ct
             command="build-architect-review", return_meta=True,
         )
     except Exception as e:
-        console.print(f"[yellow]Warning: Architect review call failed: {e}[/yellow]")
+        console.print(f"[red]Architect review call failed: {e}[/red]")
         _qa_record(
             pcp_dir, ctx, "architect-review", [f"call failed: {e}"],
             control_id="CTRL-005", files=changed_files, result="error",
         )
-        return []
+        return _gate_infrastructure_failure("architect-review", e)
 
     blocks = []
     for f in res.get("findings", []):
@@ -1639,9 +1688,9 @@ def _run_gate_check(pcp_dir: Path, diff: str, ctx: dict) -> list[str]:
             command="build-gate-check", return_meta=True,
         )
     except Exception as e:
-        console.print(f"[yellow]Warning: Gate check call failed: {e}[/yellow]")
+        console.print(f"[red]Gate check call failed: {e}[/red]")
         _qa_record(pcp_dir, ctx, "gate", [f"call failed: {e}"], control_id="CTRL-006", result="error")
-        return []
+        return _gate_infrastructure_failure("gate", e)
 
     rec = res.get("recommendation", "merge")
     score = res.get("alignment_score", 1.0)

@@ -405,3 +405,60 @@ def test_auto_commit_never_commits_agent_session_local_config(tmp_path):
     assert "real_work.py" in tracked
     assert ".claude/settings.json" not in tracked
     assert ".claude/settings.local.json" not in tracked
+
+
+# ── Gates must fail closed, merges must leave no wreckage (2026-07-27) ──
+
+def test_gate_infrastructure_failure_blocks_by_default():
+    """A gate that could not run is not a gate that passed. Returning [] here
+    marked un-reviewed criteria complete and merged them."""
+    from pcp.commands.build import _gate_infrastructure_failure
+    findings = _gate_infrastructure_failure("gate", RuntimeError("429 rate limited"))
+    assert findings, "an un-runnable gate must produce a blocking finding"
+    assert "429 rate limited" in findings[0]
+    assert "infrastructure failure" in findings[0].lower()
+
+
+def test_gate_infrastructure_failure_opt_out_is_explicit(monkeypatch):
+    from pcp.commands.build import _gate_infrastructure_failure
+    monkeypatch.setenv("PCP_ALLOW_UNVERIFIED_GATES", "1")
+    assert _gate_infrastructure_failure("gate", RuntimeError("boom")) == []
+
+
+def test_gate_infrastructure_failure_opt_out_requires_exactly_1(monkeypatch):
+    """A truthy-looking value must not silently disable a gate."""
+    from pcp.commands.build import _gate_infrastructure_failure
+    for value in ("0", "true", "yes", ""):
+        monkeypatch.setenv("PCP_ALLOW_UNVERIFIED_GATES", value)
+        assert _gate_infrastructure_failure("gate", RuntimeError("boom")), \
+            f"value {value!r} must not disable the gate"
+
+
+def test_failed_merge_leaves_no_half_merged_repo(tmp_path):
+    """Without `git merge --abort`, one conflicted criterion left project_root
+    mid-MERGE with conflict markers, and every later git operation in the run
+    failed on unmerged paths -- taking down criteria that had already passed."""
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "shared.txt").write_text("base\n")
+    _git(["add", "-A"], repo)
+    _git(["commit", "-q", "-m", "base"], repo)
+
+    # A branch and main both edit the same line -> guaranteed conflict.
+    _git(["checkout", "-q", "-b", "feat/conflicting"], repo)
+    (repo / "shared.txt").write_text("from branch\n")
+    _git(["commit", "-qam", "branch edit"], repo)
+    _git(["checkout", "-q", "main"], repo)
+    (repo / "shared.txt").write_text("from main\n")
+    _git(["commit", "-qam", "main edit"], repo)
+
+    ok, _output = _merge_module_branch(repo, "conflicting")
+    assert ok is False
+
+    # The repo must be usable afterwards, not stuck mid-merge.
+    assert not (repo / ".git" / "MERGE_HEAD").exists(), "left mid-MERGE"
+    assert "<<<<<<<" not in (repo / "shared.txt").read_text(), "conflict markers left in tree"
+    status = _git(["status", "--porcelain"], repo).stdout
+    assert not [ln for ln in status.splitlines() if ln.startswith(("UU", "AA", "DD"))], \
+        f"unmerged paths remain: {status}"
+    # main's own commit must be intact -- aborting cleans up, it does not revert.
+    assert (repo / "shared.txt").read_text() == "from main\n"

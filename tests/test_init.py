@@ -69,14 +69,15 @@ def test_init_skips_hook_gracefully_outside_a_git_repo(tmp_path):
 
 
 def test_init_does_not_duplicate_cron_side_effects(tmp_path):
-    """install_git_hook() (used by pcp init) must never touch crontab --
-    that's install_hook.py's own _install_cron_scripts(), deliberately
-    scoped to the explicit `pcp install-hook` CLI command only."""
+    """install_git_hook() (used by pcp init) must never touch crontab.
+    PCP no longer INSTALLS any cron job at all (removed 2026-07-27); the only
+    crontab code left is `pcp install-hook`'s removal of jobs older versions
+    installed, and init must not invoke even that."""
     import subprocess
     from unittest.mock import patch
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
 
-    with patch("pcp.commands.install_hook._install_cron_scripts") as mock_cron:
+    with patch("pcp.commands.install_hook._remove_legacy_cron_jobs") as mock_cron:
         runner = CliRunner()
         runner.invoke(cli, ["init", "--path", str(tmp_path)])
     mock_cron.assert_not_called()

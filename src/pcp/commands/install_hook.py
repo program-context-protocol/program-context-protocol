@@ -94,12 +94,9 @@ def _find_git_dir(project_root: Path) -> Path | None:
 
 
 def install_git_hook(project_root: Path, force: bool = False) -> tuple[bool, str]:
-    """Just the commit-msg hook file -- no cron side effects. Pulled out of
-    the CLI command so `pcp init` can call this directly and get a project
-    under real Layer-1 enforcement the moment it's scaffolded, without also
-    silently registering global crontab jobs every time `pcp init` runs
-    (that's `install_hook`'s own `_install_cron_scripts()`, deliberately
-    scoped to the explicit `pcp install-hook` CLI path only).
+    """Just the commit-msg hook file. Pulled out of the CLI command so `pcp
+    init` can call this directly and get a project under real Layer-1
+    enforcement the moment it's scaffolded.
 
     Returns (installed: bool, message: str) -- never raises, so callers
     that want this to be a best-effort side effect (like init.py) can just
@@ -201,7 +198,7 @@ def install_hook(project_path: str | None, pre_commit_framework: bool, force: bo
         console.print(f"[green]installed[/green] {post_commit_path}")
         console.print("[dim]current_state.md + diff.md refresh after every commit.[/dim]")
 
-    _install_cron_scripts()
+    _remove_legacy_cron_jobs()
 
     # commit-msg is the primary hook this command exists for -- preserve the
     # original exit-1-on-refusal contract for it specifically, even though
@@ -210,154 +207,77 @@ def install_hook(project_path: str | None, pre_commit_framework: bool, force: bo
         sys.exit(1)
 
 
-def _install_cron_scripts():
-    """Install daily cron scripts for intervention aggregation and skill upgrade."""
+# Removed 2026-07-27, pre-launch review. This command used to also install two
+# global crontab jobs via `_install_cron_scripts()`, unconditionally and with no
+# prompt:
+#
+#   1. `upgrade_skill.sh` — daily `curl` of SKILL.md from a hardcoded personal
+#      GitHub raw URL, overwriting ~/.claude/skills/pcp/SKILL.md with no
+#      signature or hash check. That file is an AGENT INSTRUCTION file: whatever
+#      the fetched content says, the next `/pcp` session executes. A remote,
+#      unverified, self-updating instruction channel is the single worst thing
+#      to ship in a tool whose entire purpose is governing what agents do. It
+#      was dormant only because the origin repo is private (`curl -sf` on a
+#      private URL returns empty, so the upgrader no-opped) -- making the repo
+#      PUBLIC is what would have armed it.
+#   2. `aggregate_interventions.sh` — scanned a hardcoded `~/Claude-code` across
+#      every project on the machine and posted a summary to a hardcoded Slack
+#      channel. Personal-workflow plumbing with no place in a public tool, and
+#      it interpolated each discovered path straight into a `python3 -c` string,
+#      so a directory name containing a quote executed arbitrary code daily.
+#
+# Neither was ever a documented feature of `pcp install-hook`, whose stated job
+# is installing git hooks. Deleted outright rather than fixed: skill updates
+# belong in the package (`pcp install-skill`, versioned via PyPI), not in an
+# out-of-band self-updater.
+_LEGACY_CRON_MARKER = "/.pcp/cron/"
+
+
+def _remove_legacy_cron_jobs() -> None:
+    """Uninstall the cron jobs older PCP versions installed silently.
+
+    Deleting the installer does nothing for machines that already ran it --
+    those crontab entries keep firing forever. `pcp install-hook` is the
+    command that put them there, so it is the right place to take them back
+    out. Removes only lines this tool wrote (matched on the `~/.pcp/cron/`
+    path it always used) and reports what went; never touches any other
+    crontab line, and never fails the hook install if crontab is unavailable."""
     import subprocess
-    scripts_dir = Path.home() / ".pcp" / "cron"
-    scripts_dir.mkdir(parents=True, exist_ok=True)
 
-    aggregator = scripts_dir / "aggregate_interventions.sh"
-    aggregator.write_text("""\
-#!/bin/bash
-# PCP daily intervention aggregation — installed by pcp install-hook
-set -euo pipefail
-
-LEARNING_DIR="$HOME/.pcp"
-mkdir -p "$LEARNING_DIR"
-OUTFILE="$LEARNING_DIR/global_learning.yaml"
-TMPFILE="$(mktemp)"
-
-echo "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TMPFILE"
-echo "projects_scanned: 0" >> "$TMPFILE"
-echo "interventions: []" >> "$TMPFILE"
-
-COUNT=0
-TOTAL=0
-while IFS= read -r log; do
-  COUNT=$((COUNT + 1))
-  ENTRIES=$(python3 -c "
-import yaml, sys
-data = yaml.safe_load(open('$log')) or {}
-items = data.get('interventions', [])
-print(len(items))
-" 2>/dev/null || echo 0)
-  TOTAL=$((TOTAL + ENTRIES))
-done < <(find ~/Claude-code -name "intervention_log.yaml" -path "*/.pcp/*" 2>/dev/null)
-
-python3 - "$TMPFILE" "$OUTFILE" "$COUNT" "$TOTAL" << 'PYEOF'
-import yaml, sys
-from pathlib import Path
-from collections import defaultdict
-
-tmpfile, outfile, projects, total = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
-from datetime import datetime, timezone
-
-all_entries = []
-import subprocess, os
-result = subprocess.run(
-    ["find", os.path.expanduser("~/Claude-code"), "-name", "intervention_log.yaml", "-path", "*/.pcp/*"],
-    capture_output=True, text=True
-)
-for log_path in result.stdout.strip().splitlines():
-    try:
-        data = yaml.safe_load(open(log_path)) or {}
-        all_entries.extend(data.get("interventions", []))
-    except Exception:
-        pass
-
-by_type = defaultdict(lambda: {"count": 0, "times": []})
-for e in all_entries:
-    t = e.get("type", "unknown")
-    by_type[t]["count"] += 1
-    mins = e.get("time_to_resolve_minutes")
-    if mins:
-        by_type[t]["times"].append(mins)
-
-summary = {
-    "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "projects_scanned": projects,
-    "total_interventions": len(all_entries),
-    "by_type": {
-        k: {
-            "count": v["count"],
-            "avg_minutes": round(sum(v["times"]) / len(v["times"]), 1) if v["times"] else None
-        }
-        for k, v in sorted(by_type.items(), key=lambda x: -x[1]["count"])
-    },
-}
-Path(outfile).write_text(yaml.dump(summary, default_flow_style=False))
-print(f"Written: {outfile}")
-PYEOF
-
-# Slack notification
-if command -v slack-notify &>/dev/null; then
-  TOTAL_INT=$(python3 -c "import yaml; d=yaml.safe_load(open('$OUTFILE')); print(d.get('total_interventions',0))" 2>/dev/null || echo "?")
-  slack-notify -c "#pcp-learning" "PCP Daily Learning — $(date +%Y-%m-%d)
-Projects scanned: $COUNT | Total interventions: $TOTAL_INT
-See: ~/.pcp/global_learning.yaml"
-fi
-""")
-    aggregator.chmod(0o755)
-
-    upgrader = scripts_dir / "upgrade_skill.sh"
-    upgrader.write_text("""\
-#!/bin/bash
-# PCP skill upgrade check — installed by pcp install-hook
-set -euo pipefail
-
-SKILL_PATH="$HOME/.claude/skills/pcp/SKILL.md"
-[ -f "$SKILL_PATH" ] || exit 0
-
-LOCAL_VERSION=$(grep "^version:" "$SKILL_PATH" | head -1 | awk '{print $2}' | tr -d '"')
-
-# Try GitHub first (once repo is live)
-REMOTE_URL="https://raw.githubusercontent.com/ganeshnallasivam-cell/program-context-protocol/main/SKILL.md"
-REMOTE_SKILL=$(curl -sf "$REMOTE_URL" 2>/dev/null || echo "")
-
-if [ -n "$REMOTE_SKILL" ]; then
-  REMOTE_VERSION=$(echo "$REMOTE_SKILL" | grep "^version:" | head -1 | awk '{print $2}' | tr -d '"')
-  if [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ] && [ -n "$REMOTE_VERSION" ]; then
-    cp "$SKILL_PATH" "${SKILL_PATH}.bak"
-    echo "$REMOTE_SKILL" > "$SKILL_PATH"
-    slack-notify "PCP skill upgraded: v${LOCAL_VERSION} → v${REMOTE_VERSION}. Changes active on next /pcp." 2>/dev/null || true
-    echo "Upgraded: $LOCAL_VERSION → $REMOTE_VERSION"
-  fi
-else
-  echo "No remote version available — skipping upgrade check."
-fi
-""")
-    upgrader.chmod(0o755)
-
-    # Register in crontab
     try:
         existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        crontab = existing.stdout if existing.returncode == 0 else ""
-        changed = False
-
-        agg_line = f"47 8 * * * {aggregator} >> $HOME/.pcp/cron_aggregator.log 2>&1"
-        upg_line = f"13 9 * * * {upgrader} >> $HOME/.pcp/cron_upgrader.log 2>&1"
-
-        if str(aggregator) not in crontab:
-            crontab += f"\n{agg_line}\n"
-            changed = True
-        if str(upgrader) not in crontab:
-            crontab += f"\n{upg_line}\n"
-            changed = True
-
-        if changed:
-            proc = subprocess.run(["crontab", "-"], input=crontab, text=True)
-            if proc.returncode == 0:
-                console.print("[green]installed[/green] daily cron jobs:")
-                console.print(f"  [dim]8:47am — intervention aggregation → ~/.pcp/global_learning.yaml[/dim]")
-                console.print(f"  [dim]9:13am — skill upgrade check[/dim]")
-            else:
-                console.print("[yellow]crontab write failed — scripts written but not scheduled:[/yellow]")
-                console.print(f"  {aggregator}")
-                console.print(f"  {upgrader}")
-        else:
-            console.print("[dim]cron jobs already installed[/dim]")
     except FileNotFoundError:
-        console.print("[yellow]crontab not available — scripts written to:[/yellow]")
-        console.print(f"  {aggregator}")
-        console.print(f"  {upgrader}")
-        console.print("  Add them to your scheduler manually.")
+        return
+    if existing.returncode != 0:
+        return
+
+    lines = existing.stdout.splitlines()
+    keep = [ln for ln in lines if _LEGACY_CRON_MARKER not in ln]
+    if len(keep) == len(lines):
+        return
+
+    removed = [ln for ln in lines if _LEGACY_CRON_MARKER in ln]
+    body = "\n".join(keep).strip("\n")
+    proc = subprocess.run(
+        ["crontab", "-"], input=(body + "\n") if body else "", text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        console.print(
+            "[yellow]Found legacy PCP cron jobs but could not remove them "
+            "automatically. Remove these lines with `crontab -e`:[/yellow]"
+        )
+        for ln in removed:
+            console.print(f"  [dim]{ln}[/dim]")
+        return
+
+    console.print(f"[green]removed[/green] {len(removed)} legacy PCP cron job(s):")
+    for ln in removed:
+        console.print(f"  [dim]{ln}[/dim]")
+    console.print(
+        "[dim]These were installed by an older `pcp install-hook` and included a "
+        "daily unverified remote overwrite of your PCP skill file. The scripts "
+        "themselves are still on disk at ~/.pcp/cron/ — delete them yourself.[/dim]"
+    )
+
+
