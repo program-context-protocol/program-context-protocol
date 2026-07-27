@@ -638,3 +638,62 @@ def test_auto_commit_excludes_derive_from_the_operational_tuples(tmp_path):
     for d in _PCP_OPERATIONAL_DIRS:
         assert f":!{d.rstrip('/')}" in _AUTO_COMMIT_EXCLUDES
     assert ":!.claude/settings.json" in _AUTO_COMMIT_EXCLUDES
+
+
+def test_no_unregistered_pcp_runtime_writer():
+    """Structural guard, not a spot fix.
+
+    Five separate bugs this session traced to one shape: a fix applied to a
+    call site instead of to the rule. The .pcp/ runtime-writer case bit twice
+    in an hour — build_progress.yaml (added 07-24) and run_ledger.jsonl (added
+    07-23) were each written on every build while missing from
+    _PCP_OPERATIONAL_PATHS, so they polluted the judge diff, drew scope-guard
+    findings against the agent, and got committed by worktree branches where
+    they broke the merge home.
+
+    So: scan the source for anything writing a file into pcp_dir, and require
+    it to be either registered as operational or an allowlisted governance
+    spec. A new writer added without a decision fails here instead of in
+    someone's build weeks later."""
+    import re
+    from pcp.commands.build import _PCP_OPERATIONAL_PATHS, _PCP_OPERATIONAL_DIRS
+
+    # Files NOT written during a build, so correctly absent from the
+    # operational set. Two groups: human-authorized specs / scaffolded config,
+    # and artifacts produced by one-time or explicitly-invoked commands
+    # (`pcp import`, `pcp provenance --attest`) that no build ever touches.
+    # Verified 2026-07-27: none of the second group is reachable from build.py.
+    NOT_BUILD_TIME = {
+        "baseline_violations.yaml",   # pcp import scaffold + pcp check --baseline
+        "discovery_graph.json",       # pcp import, one-time
+        "attestations.meta.json",     # pcp provenance --attest
+        "ontology_state.yaml",        # pcp_dir path helper, ontology-foundry integration
+        "objective.md", "target_state.md", "architecture.md", "ci_rules.yaml",
+        "controls.yaml", "SDLC_phase.yaml", "context_map.yaml", "design_system.md",
+        "design_conventions.yaml", "ui_kit_recipes.yaml", "logic_tier_guide.md",
+        "architect_persona.md", "RECOMMENDED_PERMISSIONS.md", "bypass_log.yaml",
+        "install_approvals.yaml", "attestations.jsonl", "audit_trend.jsonl",
+        "pressure_test_log.jsonl", "symbol_fingerprints.json", "integrations.yaml",
+        "deploy_log.yaml", "narrative_lint.md", "audit.md", "provenance.md",
+        "architecture_justification.md", "design_audit.md", "control_audit.md",
+        "build_report.md", "dashboard.html", "pcp.md",
+    }
+    registered = {p.removeprefix(".pcp/") for p in _PCP_OPERATIONAL_PATHS}
+    registered_dirs = {d.removeprefix(".pcp/").rstrip("/") for d in _PCP_OPERATIONAL_DIRS}
+
+    pattern = re.compile(r'pcp_dir\s*/\s*"([A-Za-z0-9_.-]+\.(?:jsonl|yaml|md|json))"')
+    unregistered = {}
+    for src in Path("src/pcp").rglob("*.py"):
+        for name in pattern.findall(src.read_text()):
+            if name in registered or name in NOT_BUILD_TIME:
+                continue
+            if any(name.startswith(d) for d in registered_dirs):
+                continue
+            unregistered.setdefault(name, []).append(str(src))
+
+    assert not unregistered, (
+        "New .pcp/ file(s) written by PCP but neither registered in "
+        "_PCP_OPERATIONAL_PATHS nor allowlisted as a governance spec: "
+        f"{unregistered}. Decide which it is — an operational write must be "
+        "registered or it will pollute the judge diff and break wave merges."
+    )

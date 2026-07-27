@@ -915,6 +915,11 @@ _PCP_OPERATIONAL_PATHS = (
     # agent. Any NEW file PCP writes under .pcp/ during a build attempt must be
     # added here at the same time it is introduced.
     ".pcp/build_progress.yaml",
+    # run_log.py's pre/post audit bracket, added 2026-07-23 and never
+    # registered here — found 2026-07-27 the same hour the rule above was
+    # written, which is the point: the rule is not self-enforcing, so
+    # test_no_unregistered_pcp_runtime_writer() now checks it mechanically.
+    ".pcp/run_ledger.jsonl",
 )
 _PCP_OPERATIONAL_DIRS = (".pcp/evidence/", ".pcp/transcripts/")
 
