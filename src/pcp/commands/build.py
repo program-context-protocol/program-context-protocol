@@ -1922,11 +1922,24 @@ def _gate_infrastructure_failure(check: str, exc: Exception) -> list[str]:
             f"is set — treating as advisory. This criterion carries NO {check} review.[/yellow]"
         )
         return []
+    # Deliberately does NOT lead with the escape hatch. Reported from
+    # ontology-foundry 2026-07-27: a transient malformed-JSON response cost
+    # three attempts on one criterion, and the remedy this message offered was
+    # "turn the gate off" -- for the same review that had caught a real
+    # path-traversal vulnerability an hour earlier. Offering "skip the check"
+    # as the cure for a flaky check points at the wrong lever, so the mechanical
+    # causes come first and the opt-out is named last, with what it costs.
     return [
         f"{check}: gate could not be evaluated ({exc}). This is an infrastructure "
         f"failure, not a code finding — the review never ran, so the criterion "
-        f"cannot be marked verified. Retrying may clear it; set "
-        f"PCP_ALLOW_UNVERIFIED_GATES=1 to proceed without this gate."
+        f"cannot be marked verified.\n"
+        f"  Most likely: a transient LLM/CLI failure — re-run, malformed JSON is "
+        f"already retried {os.environ.get('PCP_LLM_JSON_RETRIES', '2')}x internally.\n"
+        f"  Then check: is `claude` authenticated, is a rate limit active, is "
+        f"PCP_LLM_TIMEOUT (default 300s) too low for this diff?\n"
+        f"  Last resort: PCP_ALLOW_UNVERIFIED_GATES=1 completes criteria with NO "
+        f"{check} review at all — this gate catches real defects, so disabling it "
+        f"to get past a flaky run trades a correctness check for a convenience."
     ]
 
 

@@ -158,21 +158,66 @@ def call(system: str, user: str, model: str | None = None, pcp_dir: Path | None 
     return text, meta
 
 
+def _json_retries() -> int:
+    return max(0, int(os.environ.get("PCP_LLM_JSON_RETRIES", "2")))
+
+
 def call_json(system: str, user: str, model: str | None = None, pcp_dir: Path | None = None,
               command: str = "llm.call_json", return_meta: bool = False) -> Any:
-    """Call claude CLI, parse response as JSON."""
-    out = call(
-        system, user + "\n\nRespond with valid JSON only. No markdown fences.",
-        model=model, pcp_dir=pcp_dir, command=command, return_meta=return_meta,
+    """Call claude CLI, parse response as JSON, retrying a malformed response.
+
+    A response that is not parseable JSON is the single most retryable failure
+    an LLM call has: the model answered, it just answered in the wrong shape.
+    Asking again is the rung-1 response.
+
+    Without a retry, one transient `Extra data: line 15 column 1` propagated as
+    an exception, became a blocking gate finding, consumed a criterion attempt,
+    and after three of them the remedy PCP offered was
+    PCP_ALLOW_UNVERIFIED_GATES=1 -- turn the gate off. Reported from
+    ontology-foundry 2026-07-27, where it cost three attempts on one criterion
+    and where the same architect review had caught a real path-traversal
+    vulnerability an hour earlier. Offering "skip the check" as the cure for a
+    flaky check points at exactly the wrong lever.
+
+    Retries ONLY on a JSON parse failure. A RuntimeError from the CLI (rate
+    limit, timeout, not authenticated) is a different condition with its own
+    handling -- retrying that here would just multiply the wait.
+    """
+    prompt = user + "\n\nRespond with valid JSON only. No markdown fences."
+    attempts = _json_retries() + 1
+    last_exc: Exception | None = None
+
+    for attempt in range(attempts):
+        out = call(
+            system, prompt, model=model, pcp_dir=pcp_dir, command=command,
+            return_meta=return_meta,
+        )
+        text, meta = out if return_meta else (out, None)
+        text = text.strip()
+        # Strip markdown fences if model adds them anyway
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1])
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                break
+            # Say what went wrong -- a blind re-ask tends to reproduce the same
+            # malformed shape.
+            prompt = (
+                user
+                + "\n\nYour previous response could not be parsed as JSON: "
+                + f"{exc}. Respond with ONE valid JSON object and nothing else -- "
+                + "no prose before or after it, no markdown fences."
+            )
+            continue
+        return (parsed, meta) if return_meta else parsed
+
+    raise ValueError(
+        f"{command}: response was not valid JSON after {attempts} attempt(s): {last_exc}"
     )
-    text, meta = out if return_meta else (out, None)
-    text = text.strip()
-    # Strip markdown fences if model adds them anyway
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1])
-    parsed = json.loads(text)
-    return (parsed, meta) if return_meta else parsed
 
 
 _MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}

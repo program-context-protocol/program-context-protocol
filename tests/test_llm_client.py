@@ -196,3 +196,68 @@ def test_log_usage_concurrent_calls_do_not_drop_entries(tmp_path):
     assert len(data["calls"]) == n
     logged_commands = {c["command"] for c in data["calls"]}
     assert logged_commands == {f"call-{i}" for i in range(n)}
+
+
+# ── Malformed JSON is retried, not escalated into "turn the gate off" ──
+
+def test_call_json_retries_a_malformed_response(monkeypatch):
+    """Reported from ontology-foundry: one transient `Extra data: line 15
+    column 1` became a blocking gate finding, consumed three criterion
+    attempts, and the remedy PCP offered was PCP_ALLOW_UNVERIFIED_GATES=1 — for
+    the same review that had caught a path-traversal vulnerability an hour
+    earlier."""
+    from unittest.mock import patch
+    from pcp.llm import client
+
+    responses = ['{"ok": true} trailing garbage', '{"ok": true}']
+    calls = []
+
+    def fake_call(system, user, **kw):
+        calls.append(user)
+        return responses[len(calls) - 1]
+
+    monkeypatch.delenv("PCP_LLM_JSON_RETRIES", raising=False)
+    with patch.object(client, "call", side_effect=fake_call):
+        out = client.call_json("sys", "user")
+    assert out == {"ok": True}
+    assert len(calls) == 2, "must re-ask"
+    assert "could not be parsed as JSON" in calls[1], "the retry must say what was wrong"
+
+
+def test_call_json_gives_up_after_the_configured_retries(monkeypatch):
+    from unittest.mock import patch
+    from pcp.llm import client
+    monkeypatch.setenv("PCP_LLM_JSON_RETRIES", "1")
+    with patch.object(client, "call", return_value="not json at all"):
+        try:
+            client.call_json("sys", "user")
+            raise AssertionError("should have raised")
+        except ValueError as e:
+            assert "2 attempt" in str(e)
+
+
+def test_call_json_does_not_retry_cli_failures(monkeypatch):
+    """A RuntimeError from the CLI (rate limit, timeout, unauthenticated) is a
+    different condition — retrying here would just multiply the wait."""
+    from unittest.mock import patch
+    from pcp.llm import client
+    calls = []
+
+    def boom(*a, **kw):
+        calls.append(1)
+        raise RuntimeError("claude CLI exited 1: rate limited")
+
+    with patch.object(client, "call", side_effect=boom):
+        try:
+            client.call_json("sys", "user")
+        except RuntimeError:
+            pass
+    assert len(calls) == 1, "CLI failures must not be retried here"
+
+
+def test_gate_failure_message_does_not_lead_with_the_escape_hatch():
+    from pcp.commands.build import _gate_infrastructure_failure
+    msg = _gate_infrastructure_failure("architect-review", RuntimeError("boom"))[0]
+    assert msg.index("re-run") < msg.index("PCP_ALLOW_UNVERIFIED_GATES"), \
+        "mechanical causes must come before the opt-out"
+    assert "catches real defects" in msg, "the opt-out must state what it costs"
