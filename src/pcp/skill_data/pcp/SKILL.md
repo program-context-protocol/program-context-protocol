@@ -626,7 +626,12 @@ export const meta = {
 }
 
 // allCriteria = [{module, id, description, check, prevCommit, ...}, ...]
-// Criteria from same module are ordered — pipeline handles sequencing
+// Flatten ACROSS modules AND across criteria within a module — pipeline() runs
+// every item independently and gives no ordering guarantee between them, so do
+// not read this as "same-module criteria are sequenced". Ordering comes only
+// from `depends_on`: compute criterion waves first (mirroring
+// _compute_criterion_waves) and pass one wave's criteria per pipeline() call.
+// Criteria with no depends_on are all wave 0 and belong in the same call.
 const results = await pipeline(
   allCriteria,
   // Stage 1: build (one agent per criterion, minimal context brief)
