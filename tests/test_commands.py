@@ -142,6 +142,79 @@ def test_pm_rejects_oversized_project_context(temp_project, monkeypatch):
     assert "over the 100-char pm limit" in result.output
 
 
+def test_pm_context_projects_out_fields_it_never_reads():
+    """`pcp pm` pasted every module's acceptance.yaml verbatim, so a healthy
+    27-module project assembled 396k chars and hit the guard -- pm was dead on
+    4 of 8 local PCP-managed projects. The fix is a by-name field projection,
+    not a truncation: existing criteria's build_vs_buy/design_justification/QA
+    evidence go, ids/descriptions/scheduling fields stay."""
+    from pcp.commands.pm import _slim_acceptance
+
+    raw = yaml.dump({
+        "version": "2.0", "module": "billing",
+        "criteria": [{
+            "id": "A001", "description": "keep me", "check": "manual",
+            "status": "complete", "logic_tier": 1, "depends_on": [],
+            "target": "src/billing/charge.py", "pattern": "def charge",
+            "build_vs_buy": {"decision": "build_fresh", "rationale": "z" * 500,
+                             "candidates_considered": []},
+            "design_justification": {"jtbd_framing": "y" * 500,
+                                     "checklist_passed": ["both-themes"]},
+            "test": "t" * 500, "notes": "n" * 500, "verified_by": "v" * 100,
+        }],
+    })
+    slim = _slim_acceptance(raw)
+    parsed = yaml.safe_load(slim)
+    c = parsed["criteria"][0]
+
+    assert len(slim) < len(raw) / 3
+    assert parsed["module"] == "billing"
+    # every field pm actually uses survives, untruncated
+    assert c["id"] == "A001" and c["description"] == "keep me"
+    assert c["check"] == "manual" and c["status"] == "complete"
+    assert c["logic_tier"] == 1 and c["depends_on"] == []
+    assert c["target"] == "src/billing/charge.py" and c["pattern"] == "def charge"
+    # and only those
+    for gone in ("build_vs_buy", "design_justification", "test", "notes", "verified_by"):
+        assert gone not in c
+
+
+def test_pm_context_projection_fails_open_on_unparseable_acceptance():
+    """A mangled spec handed to the LLM is worse than a large one."""
+    from pcp.commands.pm import _slim_acceptance
+
+    assert _slim_acceptance("criteria: [unclosed") == "criteria: [unclosed"
+    assert _slim_acceptance("criteria: not-a-list\n") == "criteria: not-a-list\n"
+
+
+def test_pm_reports_how_much_the_projection_dropped(temp_project):
+    """The projection must be visible. The whole reason the old code pasted
+    everything was a refusal to cut silently; an invisible projection would
+    repeat that mistake in reverse."""
+    pcp_dir = temp_project / ".pcp"
+    mod = pcp_dir / "strategy" / "modules" / "billing"
+    mod.mkdir(parents=True)
+    (pcp_dir / "objective.md").write_text("# Objective")
+    (mod / "spec.yaml").write_text(yaml.dump({"version": "2.0", "module": "billing"}))
+    (mod / "acceptance.yaml").write_text(yaml.dump({
+        "version": "2.0", "module": "billing",
+        "criteria": [{"id": "A001", "description": "d", "check": "manual",
+                      "status": "pending", "notes": "q" * 5000}],
+    }))
+
+    runner = CliRunner()
+    # limit set below the *projected* size so it still exits on the guard,
+    # after having printed the projection line
+    with patch("pcp.commands.pm.llm.call_json") as mock_llm:
+        mock_llm.side_effect = AssertionError("must not reach the LLM")
+        result = runner.invoke(cli, ["pm", "add refunds", "--path", str(temp_project)],
+                               env={"PCP_PM_MAX_CONTEXT_CHARS": "50"})
+
+    assert "Context projection:" in result.output
+    assert "chars of existing criteria" in result.output
+    assert result.exit_code == 2
+
+
 def test_kickoff_coerces_invalid_check_and_status_values(temp_project):
     """Real bug found dogfooding kickoff against a real, complex vision doc:
     the LLM invented plausible-but-invalid enum values ('automated', 'done')

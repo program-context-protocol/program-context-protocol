@@ -597,12 +597,19 @@ Prior criterion note  — 1 line: "<module>/<prev-id> done. commit: <hash>. adde
 
 Do NOT manually spawn Agent tool calls in a loop. Use the `Workflow` tool — it provides native parallel execution, concurrency management, progress tracking, and resume capability.
 
-**Max parallel agents: 25.** The Workflow runtime queues excess calls and runs them as slots free — pass all criteria at once.
+**Max parallel agents: 25.** The Workflow runtime queues excess calls and runs them as slots free — pass all criteria at once. Note this is the *skill-side* ceiling; `pcp build`'s own pools are 5 modules × 5 criteria (`PCP_BUILD_MAX_PARALLEL` / `PCP_BUILD_MAX_PARALLEL_CRITERIA`, both default 5), bounded overall by `PCP_MAX_BUILD_SESSIONS`. Do not advertise a concurrency this skill can't actually deliver through the CLI.
 
-**Within a module: criteria are sequential by default** (each builds on the prior commit).
 **Across modules in the same wave: fully parallel.**
+**Within a module: criteria are ALSO parallel by default** — up to `PCP_BUILD_MAX_PARALLEL_CRITERIA` (default 5), each in its own git worktree. A single-module run (`pcp build --module X`) is *not* one-criterion-at-a-time; never report it that way in a build plan.
 
-**Opt-in exception, 2026-07-16:** if — and only if — a criterion in `acceptance.yaml` declares `depends_on: [<criterion_id>, ...]` (an empty list still counts as the opt-in signal; the *presence* of the key is what matters, same as `design_justification`/`build_vs_buy` elsewhere), criteria in that module are grouped into dependency waves and independent criteria within a wave build concurrently, each in its own git worktree (mirrors module-level worktree isolation one level down — reference-pattern borrowed from Grok Build's per-task worktree-isolated subagents, not module-shaped like PCP's existing pattern). A module where no criterion declares `depends_on` behaves exactly as before — this is additive, never a default-behavior change. The Python CLI's `pcp build` implements this in `build.py`'s `_criteria_parallel_enabled`/`_compute_criterion_waves`; mirror the same opt-in check here before parallelizing criteria within a `pipeline()` call.
+**Corrected 2026-07-27 — this used to be opt-in and read exactly backwards.** Criterion parallelism required a module to have ANY criterion declaring `depends_on` (presence as the signal, empty list counted). But a module whose criteria declare NO dependencies is stating they are mutually independent — the *best* case for fanning out — and PCP treated that as "not opted in" and ran it serially. Measured on ontology-foundry: 145 of 382 criteria sat in modules with no `depends_on` anywhere, all serial for want of a field whose absence already meant "independent".
+
+Current behaviour, implemented in `build.py`'s `_criteria_parallel_enabled` / `_compute_criterion_waves` / `_partition_wave_by_file_scope` — mirror it here, do not re-derive it:
+
+- `depends_on` does ORDER only. Declared → later wave. Absent/empty → wave 0, runs concurrently.
+- Same-file collisions are handled by **optimistic scheduling**: two criteria declaring the *same* `target` are separated up front; an undeclared `target` still runs alongside others, and a genuine collision costs one clean rebuild (`_merge_module_branch` aborts cleanly). Prove-or-serialise was tried and reverted — it serialised 237 criteria to prevent a collision class that had bitten once.
+- `PCP_CRITERIA_SERIAL=1` forces the old one-at-a-time behaviour. `PCP_CRITERIA_PARALLEL_STRICT=1` restores prove-or-serialise. Neither is the default.
+- Raise `PCP_BUILD_MAX_PARALLEL_CRITERIA` above 5 for a single-module run, where no module-level fan-out is competing for the same database.
 
 Use `pipeline()` — not `parallel()`. Pipeline lets criterion A of module X stream into gate while criterion A of module Y is still being built. No barrier between stages.
 

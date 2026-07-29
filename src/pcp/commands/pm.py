@@ -26,11 +26,63 @@ console = Console()
 def _max_context_chars() -> int:
     """Reject-loud, not truncate-silent -- same posture as kickoff.py's
     vision-doc guard. Bounds _load_project_context's assembled prompt (every
-    existing module's full spec.yaml + acceptance.yaml, pasted verbatim,
-    unbounded before this). A function, not a module-level constant, so
-    PCP_PM_MAX_CONTEXT_CHARS is read live at call time rather than frozen at
-    import time."""
-    return int(os.environ.get("PCP_PM_MAX_CONTEXT_CHARS", "60000"))
+    existing module's spec.yaml + acceptance.yaml). A function, not a
+    module-level constant, so PCP_PM_MAX_CONTEXT_CHARS is read live at call
+    time rather than frozen at import time.
+
+    Default raised 60,000 -> 400,000 (2026-07-29). 60k chars is ~15k tokens --
+    that guard was not measuring "this project no longer fits in a context
+    window", it was firing on ordinary project size. Measured across the 8
+    local PCP-managed projects, 4 of 8 exceeded it (ontology-foundry 392k,
+    win2mac 94k, atacamaMDM 68k, geek-squad 43k), so `pcp pm` was dead on half
+    the fleet with an error suggesting the fix was to "split into smaller
+    modules" -- i.e. restructure a healthy 27-module project to satisfy an
+    arbitrary constant. 400k chars is ~100k tokens, half a 200k window, which
+    is what the guard should actually be protecting."""
+    return int(os.environ.get("PCP_PM_MAX_CONTEXT_CHARS", "400000"))
+
+
+# Fields on an EXISTING criterion that pm demonstrably never reads.
+# pm's job is: route an intent to module(s), then emit new criteria. It needs
+# the existing IDs (collision avoidance), descriptions (don't re-add what
+# exists), and the scheduling fields it must itself populate. It does not need
+# other criteria's build_vs_buy rationales, design_justification memos, QA
+# evidence, or verifier notes -- and on ontology-foundry those four fields
+# alone were 111k of the 341k spec+acceptance payload (build_vs_buy 74k,
+# design_justification 28k, test 8.7k, notes/verified_by/pattern 3.5k).
+#
+# This is a projection, not a truncation: whole fields are dropped by name, so
+# nothing is cut mid-sentence and no module's constraints or dependencies are
+# lost. Module-level spec.yaml stays verbatim for every module, which is where
+# the cross-module constraints the old error message worried about actually
+# live.
+_PM_CRITERION_KEEP_FIELDS = (
+    "id", "description", "check", "status",
+    "logic_tier", "depends_on", "target", "pattern",
+)
+
+
+def _slim_acceptance(acc_text: str) -> str:
+    """Project an acceptance.yaml down to the fields pm uses.
+
+    Fails OPEN: any parse problem returns the original text unchanged rather
+    than risk handing the LLM a mangled spec."""
+    try:
+        data = yaml.safe_load(acc_text) or {}
+        criteria = data.get("criteria")
+        if not isinstance(criteria, list):
+            return acc_text
+        slim = {
+            "version": data.get("version"),
+            "module": data.get("module"),
+            "criteria": [
+                {k: c[k] for k in _PM_CRITERION_KEEP_FIELDS if k in c}
+                for c in criteria if isinstance(c, dict)
+            ],
+        }
+        return yaml.dump(slim, default_flow_style=False, sort_keys=False)
+    except Exception:
+        return acc_text
 
 SYSTEM_PROMPT = """\
 You are an expert product manager.
@@ -103,7 +155,12 @@ Every criterion SHOULD also declare `target`: the single primary file path it wi
 """
 
 
-def _load_project_context(pcp_dir: Path) -> str:
+def _load_project_context(pcp_dir: Path) -> tuple[str, int]:
+    """Returns (context_string, chars_dropped_by_projection).
+
+    The second value exists so the projection is *visible* -- the whole reason
+    the old code pasted everything verbatim was a refusal to cut silently, and
+    a projection nobody is told about would repeat that mistake in reverse."""
     objective = (pcp_dir / "objective.md").read_text() if (pcp_dir / "objective.md").exists() else ""
     decomposition = (pcp_dir / "strategy" / "decomposition.md").read_text() if (pcp_dir / "strategy" / "decomposition.md").exists() else ""
 
@@ -111,8 +168,14 @@ def _load_project_context(pcp_dir: Path) -> str:
         f"## Program Objective\n{objective}\n",
         f"## Strategy Decomposition\n{decomposition}\n",
         "## Existing Modules Specs\n"
+        "Each module's spec.yaml is verbatim. Each acceptance.yaml lists every "
+        "existing criterion, projected to the fields relevant here "
+        f"({', '.join(_PM_CRITERION_KEEP_FIELDS)}) -- other criteria's "
+        "build_vs_buy/design_justification/QA-evidence fields are omitted as "
+        "irrelevant to routing this intent, not because they are absent.\n"
     ]
 
+    dropped = 0
     modules_dir = pcp_dir / "strategy" / "modules"
     if modules_dir.exists():
         for spec_path in sorted(modules_dir.glob("*/spec.yaml")):
@@ -121,14 +184,16 @@ def _load_project_context(pcp_dir: Path) -> str:
             acc_content = ""
             acc_path = spec_path.parent / "acceptance.yaml"
             if acc_path.exists():
-                acc_content = acc_path.read_text()
+                raw = acc_path.read_text()
+                acc_content = _slim_acceptance(raw)
+                dropped += max(0, len(raw) - len(acc_content))
             parts.append(
                 f"### Module: {mod_name}\n"
                 f"#### spec.yaml:\n```yaml\n{spec_content}```\n"
                 f"#### acceptance.yaml:\n```yaml\n{acc_content}```\n"
             )
 
-    return "\n".join(parts)
+    return "\n".join(parts), dropped
 
 
 def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
@@ -209,20 +274,31 @@ def pm(intent: str, project_path: str | None):
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(2)
 
-    context_str = _load_project_context(pcp_dir)
+    context_str, dropped = _load_project_context(pcp_dir)
     user_prompt = f"## Intent\n{intent}\n\n{context_str}"
+
+    if dropped:
+        console.print(
+            f"[dim]Context projection: {dropped:,} chars of existing criteria's "
+            f"build_vs_buy/design_justification/QA-evidence fields omitted "
+            f"(whole fields by name, nothing truncated mid-value). "
+            f"Assembled prompt: {len(user_prompt):,} chars.[/dim]"
+        )
 
     max_context_chars = _max_context_chars()
     if len(user_prompt) > max_context_chars:
         console.print(
             f"[red]Error:[/red] assembled project context is {len(user_prompt):,} chars, "
-            f"over the {max_context_chars:,}-char pm limit."
+            f"over the {max_context_chars:,}-char pm limit (~{max_context_chars // 4:,} tokens)."
         )
         console.print(
-            "[dim]This project's specs have grown too large to paste in full on every `pcp pm` call. "
-            "Not truncated automatically -- a silent cut could drop an unrelated module's constraints "
-            "the new intent actually depends on. Consider splitting into smaller modules, or raise "
-            "PCP_PM_MAX_CONTEXT_CHARS if you've confirmed the full context is genuinely needed.[/dim]"
+            "[dim]Already projected down to the fields pm uses and still over the limit -- this "
+            "project's spec surface no longer fits in a single context window with room to answer. "
+            "Not truncated automatically: a silent cut could drop an unrelated module's constraints "
+            "the new intent actually depends on. Either raise PCP_PM_MAX_CONTEXT_CHARS (the model's "
+            "real ceiling, not this default, is the binding constraint), or run `pcp pm` against a "
+            "narrower project -- a program this size is a candidate for splitting into separate "
+            "PCP-managed programs, not just smaller modules.[/dim]"
         )
         sys.exit(2)
 
