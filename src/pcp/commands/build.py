@@ -679,21 +679,83 @@ def _write_progress(pcp_dir: Path, module: str, criterion_id: str, attempt: int,
         pass
 
 
+_DEP_IN_FINDING = re.compile(r"depends on '([^']+)'")
+
+
+def _finding_blames_outside_wave(finding: str, wave_mod_names: set[str]) -> bool:
+    """Is this finding a statement about a module the wave did not build?
+
+    CTRL-007 (see _run_wave_merge step 1) fires when a wave module's declared
+    dependency has incomplete criteria. That is a fact about the DEPENDENCY, and
+    the dependency is routinely not in this wave at all -- waves exist precisely
+    to build dependencies first. Nothing the wave's own agents wrote caused it
+    and nothing they could write would fix it.
+
+    Deterministic, rung 1: read the dependency name out of the finding (producer
+    and consumer are both in this file, so the format is not a guess) and ask
+    whether it was in the wave. No LLM, no `target` field required -- which is
+    what made per-criterion attribution impractical."""
+    m = _DEP_IN_FINDING.search(finding)
+    return bool(m) and m.group(1) not in wave_mod_names
+
+
 def _reopen_wave_criteria(pcp_dir: Path, wave_modules: list[dict], wave_number: int,
                           findings: list[str]) -> None:
     """Un-complete the criteria a blocking wave gate just judged defective.
 
-    Deliberately reopens everything completed in the wave rather than guessing
-    which criterion caused it: attribution would need each criterion's declared
+    Reopens everything completed in the wave rather than guessing WHICH criterion
+    caused it: per-criterion attribution would need each criterion's declared
     `target`, which real projects overwhelmingly do not populate (51 of 382 on
     ontology-foundry). Reopening too much costs a rebuild; reopening too little
-    leaves a vulnerability marked verified. The failure directions are not
-    symmetric.
+    leaves a vulnerability marked verified. Those failure directions are not
+    symmetric, so the coarse choice is right.
+
+    But "which criterion" and "was this the wave's work at all" are different
+    questions, and only the first one needs `target`. Reopening on a finding that
+    is purely about pre-existing state elsewhere is not conservative, it is a
+    deadlock: the wave gate requires dependencies 100% complete, so a module
+    downstream of an incomplete dependency can never pass, and every attempt
+    reverts work that was merged and correct.
+
+    Measured twice on ontology-foundry. A036-A039 (agent-query-interface) were
+    reverted on five blockers, none from that build. Then on 2026-07-30,
+    core-data-model A022/A030/A033/A038 -- **$30.04 spent, all four branches
+    merged into main, all four marked `pending`**. They were the four most
+    expensive criteria in the run and the four with nothing to show for it.
+
+    So: if EVERY finding is about a module outside the wave, the wave's own work
+    is not implicated and nothing is reopened. The gate still blocks, and the
+    escalation is still recorded either way -- the finding is real and forward
+    progress still stops. Only the false claim "this criterion is not built" is
+    withdrawn.
 
     Also records one escalation per module so the finding outlives the console
     line that reported it -- `pcp escalations` can show it, and it is no longer
     possible for a wave BLOCK to leave zero trace in `.pcp/`."""
     from pcp import escalations
+
+    wave_mod_names = {m["name"] for m in wave_modules}
+    external = [f for f in findings if _finding_blames_outside_wave(f, wave_mod_names)]
+    attributable = [f for f in findings if f not in external]
+    if findings and not attributable:
+        console.print(
+            f"[yellow]Wave {wave_number} blocked by {len(external)} finding(s) about "
+            "module(s) outside this wave — criteria NOT reopened, because this wave's "
+            "own work is not what the gate objected to.[/yellow]"
+        )
+        for f in external:
+            console.print(f"[dim]   external: {f}[/dim]")
+        console.print(
+            "[dim]The block stands and an escalation is recorded. Build the named "
+            "dependency first; these criteria stay complete because they are.[/dim]"
+        )
+        for mod in wave_modules:
+            with _STATE_LOCK:
+                escalations.record(
+                    pcp_dir, mod["name"], f"wave_{wave_number}", route="wave-block",
+                    findings=findings,
+                )
+        return
 
     reopened: list[str] = []
     for mod in wave_modules:
@@ -2500,9 +2562,19 @@ def _run_scope_check(pcp_dir: Path, mod: dict, criterion: dict, changed_files: l
         pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "build-scope",
         "\n".join(out_of_scope) if out_of_scope else "all changed files within declared scope",
     )
+    # In warn mode a finding here does NOT block, so recording it as `block`
+    # makes the audit trail claim something that never happened. Measured on
+    # ontology-foundry 2026-07-30: 110 of the project's 259 `block` records were
+    # this check in warn mode -- **42.5% of every block PCP had ever recorded
+    # there never blocked anything**, so any provenance or block-rate reading of
+    # that project was wrong by nearly half. `advisory` already exists as a
+    # result value for exactly this (CTRL-025/030/033/036 use it); this check
+    # simply wasn't using it. Same invariant _qa_record and _wave_record already
+    # state: a result must describe what happened, not what the check found.
     _qa_record(
         pcp_dir, ctx, "build-scope", findings, control_id="CTRL-018", tool="git-diff",
         evidence_path=evidence_path,
+        result=("advisory" if findings and mode == "warn" else None),
     )
     if findings and mode == "warn":
         console.print(f"[yellow]Scope guard (advisory):[/yellow] {findings[0]}")
