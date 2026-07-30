@@ -277,6 +277,102 @@ def load_integrations(pcp_dir: Path) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
+def check_git_hooks_reachable(project_root: Path) -> dict | None:
+    """Are the hooks `pcp init` installed actually reachable by git?
+
+    `pcp init` writes `commit-msg` and `post-commit` into `.git/hooks/`. If
+    `core.hooksPath` points somewhere else, git never looks in `.git/hooks/` at
+    all -- the files are present, executable, and dead. Nothing reported this, so
+    the failure is completely silent: `pcp scan` never re-runs after a commit and
+    `current_state.md` quietly ages while the project moves.
+
+    Measured across the local fleet 2026-07-30: **6 of 8 PCP-managed projects had
+    `core.hooksPath = ~/.git-hooks`**, a directory containing a single `commit-msg`
+    with no PCP reference. So PCP's Layer 1 commit-msg gate and its post-commit
+    scan had never fired in any of them. agentberg is the clearest case --
+    `current_state.md` generated 2026-07-24, then 26 more commits landed and it
+    was never regenerated.
+
+    This is a recurrence: the same `core.hooksPath` shadowing was found and fixed
+    once before (see the control-catalog work), on one project, by hand. Nothing
+    was added to detect it, so it came back everywhere.
+
+    Note `core.hooksPath = .git/hooks` is FINE -- it resolves to the directory git
+    would use anyway. Only a path pointing elsewhere is a problem, which is why
+    this compares resolved paths rather than testing whether the config is set.
+
+    Returns None when there is nothing to say (not a git repo, or hooks are
+    reachable). Advisory -- never blocks.
+    """
+    git_dir = project_root / ".git"
+    if not git_dir.exists():
+        return None
+    installed = [h for h in ("commit-msg", "post-commit") if (git_dir / "hooks" / h).is_file()]
+    if not installed:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--get", "core.hooksPath"],
+            cwd=project_root, capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    configured = proc.stdout.strip()
+    if not configured:
+        return None  # git default — .git/hooks is used
+    effective = (project_root / configured).resolve() if not Path(configured).is_absolute() \
+        else Path(configured).resolve()
+    if effective == (git_dir / "hooks").resolve():
+        return None  # explicitly set to the default — still fires
+    # Every PCP hook is unreachable once hooksPath points elsewhere -- git reads
+    # only that directory. A same-NAMED file there does not rescue the hook, it
+    # REPLACES it: PCP's commit-msg carries the `[pcp-bypass: reason]` capture and
+    # the co-author-trailer strip, so an unrelated commit-msg running in its place
+    # is worse than none at all, and silent either way. That distinction is called
+    # out separately rather than being scored as "fine" -- an earlier version of
+    # this check reported such hooks as reachable, which is exactly the
+    # absence-vs-clean conflation this codebase keeps finding.
+    return {
+        "hooks_path": configured,
+        "installed": installed,
+        "unreachable": installed,
+        "replaced_by_other_file": [h for h in installed if (effective / h).is_file()],
+    }
+
+
+def report_dead_git_hooks(project_root: Path) -> bool:
+    """Print the hooks-unreachable warning if there is one. Returns whether it fired.
+
+    Shared by `pcp doctor` and the automatic preflight so the two cannot drift --
+    the whole point of this check is catching a silent gap, and having it live in
+    only one of the two entry points would recreate one.
+    """
+    hooks = check_git_hooks_reachable(project_root)
+    if not hooks:
+        return False
+    console.print(
+        f"[yellow bold]⚠ PCP git hooks are installed but unreachable:[/yellow bold] "
+        f"core.hooksPath = '{hooks['hooks_path']}', so git never reads .git/hooks/ — "
+        f"{', '.join(hooks['unreachable'])} never fire. Layer 1's commit-msg gate and the "
+        f"post-commit `pcp scan` are both silently inactive, so current_state.md ages "
+        f"without warning."
+    )
+    if hooks["replaced_by_other_file"]:
+        console.print(
+            f"[yellow]   {', '.join(hooks['replaced_by_other_file'])}: a DIFFERENT file of "
+            f"the same name runs from that directory instead. PCP's commit-msg carries the "
+            f"\\[pcp-bypass: reason] capture and the co-author-trailer strip, so a substitute "
+            f"is worse than none — it looks installed and enforces nothing.[/yellow]"
+        )
+    console.print(
+        "[dim]   Fix: copy PCP's hooks into that directory (chaining any existing ones), "
+        "or `git config --unset core.hooksPath` if the override is not deliberate. Note a "
+        "GLOBAL core.hooksPath is inherited by every new repo, so `pcp init` in a fresh "
+        "project starts with its hooks already shadowed.[/dim]"
+    )
+    return True
+
+
 def check_environment(pcp_dir: Path, fatal_on_missing_required: bool = True) -> dict:
     """Non-interactive preflight — called automatically at the start of
     pcp build/watch/deploy. Reports, never prompts. Fatal only on git/claude."""
@@ -297,6 +393,8 @@ def check_environment(pcp_dir: Path, fatal_on_missing_required: bool = True) -> 
             f"[dim]Preflight: no {', '.join(optional_missing)} tool detected — those QA steps will skip. "
             f"Run `pcp doctor` to review.[/dim]"
         )
+
+    report_dead_git_hooks(pcp_dir.parent)
 
     bloat = check_schema_bloat()
     if bloat and bloat["bloated"]:
@@ -366,6 +464,9 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, yes: boo
     from pcp import build_loop_bypass
     for f in build_loop_bypass.check(pcp_dir, project_root):
         console.print(f"[yellow bold]⚠ Build-loop bypass:[/yellow bold] {f}\n")
+
+    if report_dead_git_hooks(project_root):
+        console.print("")
 
     table = Table(title="PCP Environment Check")
     table.add_column("Integration")
