@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import sys
 import subprocess
 import threading
@@ -471,6 +472,41 @@ def _sync_worktree_to_base(wt_path: Path, base_sha: str, module_name: str) -> No
         )
 
 
+def _seed_testmon_cache(project_root: Path, wt_path: Path) -> None:
+    """Copy the main checkout's `.testmondata` into a fresh worktree.
+
+    `pytest-testmon` was adopted (2026-07-24) so a per-criterion QA gate runs
+    only the tests a change actually affects. It delivered **zero** benefit
+    inside `pcp build`, because its cache is gitignored and `git worktree add`
+    does not carry gitignored files across -- verified empirically on
+    ontology-foundry, where a 448K `.testmondata` sits in the main checkout and
+    a fresh worktree has none.
+
+    Cold testmon is not merely "no speedup", it is *slower than plain pytest*:
+    with no prior coverage DB it must trace coverage across the whole scoped set
+    to build one, then the worktree is deleted and the warm cache dies with it.
+    So parallel builds paid tracing overhead on every criterion and never once
+    collected the selection benefit.
+
+    Seed-only, deliberately never copied back. N concurrent worktrees each write
+    their own sqlite DB reflecting only the subset they ran; merging those back
+    would either corrupt the selection state or overwrite a broader baseline
+    with a narrower one. The main checkout's DB stays the single baseline, and
+    each worktree starts from the same base_sha it was cut from, which is
+    exactly the state that DB describes.
+
+    Best-effort: any failure here leaves testmon cold, which is the current
+    behaviour, so it must never break a build."""
+    src = project_root / ".testmondata"
+    dst = wt_path / ".testmondata"
+    if not src.is_file() or dst.exists():
+        return
+    try:
+        shutil.copy2(src, dst)
+    except OSError:
+        pass
+
+
 def _setup_worktree(project_root: Path, module_name: str) -> Path:
     wt_path = _worktree_dir(project_root, module_name)
     base_sha = subprocess.run(
@@ -479,6 +515,7 @@ def _setup_worktree(project_root: Path, module_name: str) -> Path:
     if wt_path.exists():
         # Reuse from a prior interrupted run — but not its stale base.
         _sync_worktree_to_base(wt_path, base_sha, module_name)
+        _seed_testmon_cache(project_root, wt_path)
         return wt_path
     branch = f"feat/{module_name}"
     branch_exists = subprocess.run(
@@ -488,6 +525,7 @@ def _setup_worktree(project_root: Path, module_name: str) -> Path:
     subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
     if branch_exists:
         _sync_worktree_to_base(wt_path, base_sha, module_name)
+    _seed_testmon_cache(project_root, wt_path)
     return wt_path
 
 
