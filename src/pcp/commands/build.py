@@ -4059,6 +4059,58 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
 
     modules_to_build = gather_modules_to_build(pcp_dir, module_name)
 
+    # Refuse to rebuild work that already landed. `pcp build` picks its work from
+    # `status: pending`, so a criterion whose status was never written back gets
+    # built again from scratch -- paying full agent cost to reproduce code that is
+    # already in `main`, and risking a conflicting second implementation of it.
+    #
+    # Observed live on ontology-foundry 2026-07-30: a run was rebuilding
+    # query-eval-harness A001, A008 and MOD_A002 thirteen minutes and $6.27 in,
+    # all three already merged. Twelve criteria across three modules were in that
+    # state at the time.
+    #
+    # The window is real and narrow in the parallel path: `_merge_module_branch`
+    # runs, and only then `_mark_criterion_complete`. An interruption between
+    # those two leaves exactly this footprint -- merged, still pending. Rather
+    # than only shrinking the window, this refuses to act on the bad state at all,
+    # which also covers the wave-reopen path and any future cause.
+    #
+    # Escape hatch is explicit, because a legitimate reason exists: a criterion
+    # genuinely reworked after its first landing.
+    if os.environ.get("PCP_ALLOW_REBUILD_LANDED") != "1":
+        from pcp import orphaned_work
+        try:
+            landed = orphaned_work.find_orphaned_work(pcp_dir, project_root)
+        except Exception:
+            landed = []
+        wanted = {(m["name"], c["id"]) for m in modules_to_build for c in m["pending_criteria"]}
+        clashing = [f for f in landed if (f["module"], f["criterion_id"]) in wanted]
+        if clashing:
+            telemetry.record(
+                pcp_dir, cycle="build", check="landed-work-guard", control_id="CTRL-038",
+                result="blocked", error_count=len(clashing),
+                errors=[f"{f['module']}/{f['criterion_id']} <- {f['evidence']}" for f in clashing],
+            )
+            console.print(
+                f"[bold red]Build blocked -- {len(clashing)} criterion(s) this run would build "
+                f"are already merged:[/bold red]"
+            )
+            for f in clashing[:12]:
+                console.print(f"  [red]{f['module']}/{f['criterion_id']}[/red] "
+                              f"[dim]<- commit: {f['evidence']}[/dim]")
+            if len(clashing) > 12:
+                console.print(f"  [dim]... and {len(clashing) - 12} more[/dim]")
+            console.print(
+                "\n[yellow]Their status says pending but the work landed — building them again "
+                "pays full agent cost to reproduce code that already exists.[/yellow]"
+            )
+            console.print(
+                "  Verify, then mark complete:  [dim]pcp pm \"...\"[/dim]  "
+                "[dim](acceptance.yaml is human-approved; PCP will not flip status itself)[/dim]\n"
+                "  Genuinely rebuilding them:   [dim]PCP_ALLOW_REBUILD_LANDED=1 pcp build[/dim]"
+            )
+            sys.exit(2)
+
     if not modules_to_build:
         console.print("[green]All acceptance criteria are complete. Nothing to build![/green]")
         sys.exit(0)
