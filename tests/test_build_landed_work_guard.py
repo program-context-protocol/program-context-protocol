@@ -9,11 +9,30 @@ written back is rebuilt from scratch: full agent cost to reproduce existing code
 plus the risk of a second conflicting implementation.
 """
 import subprocess
+from unittest.mock import patch
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
 from pcp.cli import cli
+
+
+@pytest.fixture
+def build_runner():
+    """Invoke `pcp build` with the environment preflight stubbed out.
+
+    `check_environment` runs before the landed-work guard and exits 2 when a
+    REQUIRED tool is missing. CI has no `claude` binary, so without this the
+    command never reaches the guard and asserts against "Missing required
+    tool(s): claude" instead — which is exactly how these tests passed locally
+    and failed in CI on first push. The tests are about the guard, so the
+    environment must not decide their outcome.
+    """
+    def _invoke(root):
+        with patch("pcp.commands.doctor.check_environment", return_value={}):
+            return CliRunner().invoke(cli, ["build", "--path", str(root)])
+    return _invoke
 
 
 def _project(tmp_path, status="pending", commit_subject="Merge feat/billing-A001"):
@@ -42,24 +61,24 @@ def _project(tmp_path, status="pending", commit_subject="Merge feat/billing-A001
     return root
 
 
-def test_build_blocks_when_a_pending_criterion_already_landed(tmp_path):
+def test_build_blocks_when_a_pending_criterion_already_landed(tmp_path, build_runner):
     root = _project(tmp_path)
-    result = CliRunner().invoke(cli, ["build", "--path", str(root)])
+    result = build_runner(root)
     assert result.exit_code == 2
     assert "already merged" in result.output
     assert "billing/A001" in result.output
 
 
-def test_the_block_names_the_commit_that_proves_it(tmp_path):
+def test_the_block_names_the_commit_that_proves_it(tmp_path, build_runner):
     """A guard that says 'blocked' without evidence is unactionable."""
     root = _project(tmp_path)
-    out = CliRunner().invoke(cli, ["build", "--path", str(root)]).output
+    out = build_runner(root).output
     assert "Merge feat/billing-A001" in out
 
 
-def test_the_block_points_at_the_approved_write_path_not_hand_editing(tmp_path):
+def test_the_block_points_at_the_approved_write_path_not_hand_editing(tmp_path, build_runner):
     root = _project(tmp_path)
-    out = CliRunner().invoke(cli, ["build", "--path", str(root)]).output
+    out = build_runner(root).output
     assert "pcp pm" in out
     assert "human-approved" in out
 
