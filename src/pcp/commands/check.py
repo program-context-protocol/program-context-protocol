@@ -18,17 +18,40 @@ BYPASS_MARKER = re.compile(r"\[pcp-bypass:\s*(.+?)\]", re.IGNORECASE)
 BYPASS_LOG = "bypass_log.yaml"
 
 
-def _read_bypass_reason(commit_msg_file: Path | None) -> str | None:
-    """Only recognizes the marker when it occupies an ENTIRE line by itself
-    (any line in the message, not just the last one). Confirmed bug, twice:
-    a paragraph-scoped version of this still self-triggered on a commit
-    message whose body was one unbroken multi-line block (no blank line
-    inside it) that merely *mentioned* the marker mid-sentence while
-    describing this exact fix. Requiring a full-line match is both simpler
-    and tighter: prose like "...scope the [pcp-bypass: reason] match to..."
-    shares its line with other text and can never match, while genuine usage
-    -- the marker alone on its own line, anywhere in the message -- always
-    does, matching the documented convention."""
+# Rule ID shape is the schema's own constraint (ci_rules.schema.json:
+# "^[A-Z]+_?[0-9]+$") -- R001, SEC_002, MOD_A003, etc. Matching only "R\d+"
+# would silently fail to scope a bypass for any project using the SEC_/MOD_
+# convention, which real ci_rules.yaml files do.
+_SCOPED_BYPASS_PREFIX = re.compile(
+    r"^((?:[A-Z]+_?[0-9]+)(?:\s*,\s*[A-Z]+_?[0-9]+)*)\s*:\s*(.+)$", re.DOTALL,
+)
+
+
+def _read_bypass_reason(commit_msg_file: Path | None) -> tuple[str, list[str] | None] | None:
+    """(reason, scoped_rule_ids) or None. scoped_rule_ids is None for a blanket
+    bypass (skips every rule -- the original, still-default behaviour) or a list
+    for `[pcp-bypass: R008: reason]` / `[pcp-bypass: R003,R008: reason]`, which
+    skips ONLY the named rule(s) and still runs everything else.
+
+    Scoping added 2026-07-30 after a real incident: an `ast_pattern` rule
+    (R008) matched its own text inside PCP's generated telemetry.jsonl -- a
+    false positive against a file that was never supposed to be scanned (see
+    pcp/operational.py) -- and because bypass was all-or-nothing, the one
+    genuine false positive silently disabled R001 through R010 together for
+    that commit. A human writing `[pcp-bypass: R008: ...]` almost always means
+    "this one rule is wrong here", not "skip Layer 1 entirely" -- the blanket
+    form remains available for when that IS what's meant, but is no longer the
+    only option.
+
+    Only recognizes the marker when it occupies an ENTIRE line by itself (any
+    line in the message, not just the last one). Confirmed bug, twice: a
+    paragraph-scoped version of this still self-triggered on a commit message
+    whose body was one unbroken multi-line block (no blank line inside it)
+    that merely *mentioned* the marker mid-sentence while describing this
+    exact fix. Requiring a full-line match is both simpler and tighter: prose
+    like "...scope the [pcp-bypass: reason] match to..." shares its line with
+    other text and can never match, while genuine usage -- the marker alone
+    on its own line, anywhere in the message -- always does."""
     if not commit_msg_file or not commit_msg_file.exists():
         return None
     msg = commit_msg_file.read_text()
@@ -36,8 +59,14 @@ def _read_bypass_reason(commit_msg_file: Path | None) -> str | None:
         if line.lstrip().startswith("#"):
             continue
         m = BYPASS_MARKER.fullmatch(line.strip())
-        if m:
-            return m.group(1).strip()
+        if not m:
+            continue
+        body = m.group(1).strip()
+        scoped = _SCOPED_BYPASS_PREFIX.match(body)
+        if scoped:
+            rule_ids = [r.strip().upper() for r in scoped.group(1).split(",")]
+            return scoped.group(2).strip(), rule_ids
+        return body, None
     return None
 
 
@@ -358,8 +387,9 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
 
     # Check for bypass
     msg_file = Path(commit_msg_file) if commit_msg_file else None
-    bypass_reason = _read_bypass_reason(msg_file)
-    if bypass_reason:
+    bypass_parsed = _read_bypass_reason(msg_file)
+    if bypass_parsed:
+        bypass_reason, scoped_rule_ids = bypass_parsed
         from pcp import policy
         decision = policy.evaluate(pcp_dir, "data.pcp.bypass.approved", {"reason": bypass_reason})
         if decision.get("available") and not decision.get("undefined") and decision.get("value") is False:
@@ -370,21 +400,47 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
             console.print("[dim]Give a specific, verifiable reason — not \"reason\"/\"todo\"/\"test\"/\"fixme\".[/dim]")
             sys.exit(1)
 
-        rule_ids = [r["id"] for r in rules + required_rules + file_rules + protected_rules]
+        all_rules = rules + required_rules + file_rules + protected_rules
+        all_ids = {r["id"] for r in all_rules}
+        if scoped_rule_ids is None:
+            bypassed_ids = [r["id"] for r in all_rules]
+        else:
+            unknown = [r for r in scoped_rule_ids if r not in all_ids]
+            if unknown:
+                console.print(
+                    f"[yellow]pcp-bypass warning:[/yellow] {', '.join(unknown)} not found in "
+                    f"ci_rules.yaml — nothing to bypass for {'that id' if len(unknown) == 1 else 'those ids'}."
+                )
+            bypassed_ids = [r for r in scoped_rule_ids if r in all_ids]
+
         bypass_files = file_list.split(",") if file_list else _get_staged_files()
         bypass_modules = _attributed_modules(project_root, pcp_dir, bypass_files, module_names)
-        _log_bypass(pcp_dir, bypass_reason, rule_ids, files=bypass_files, modules=bypass_modules)
+        _log_bypass(pcp_dir, bypass_reason, bypassed_ids, files=bypass_files, modules=bypass_modules)
         from pcp import telemetry
         telemetry.record(
             pcp_dir, cycle="qa", cycle_number=None, check="layer1-bypass",
             control_id="CTRL-004", module=(bypass_modules[0] if bypass_modules else None),
             submodule=None, criterion_id=None,
             files=bypass_files,
-            result="bypassed", errors=[f"reason: {bypass_reason}"] + [f"rule bypassed: {r}" for r in rule_ids],
-            error_count=len(rule_ids),
+            result="bypassed", errors=[f"reason: {bypass_reason}"] + [f"rule bypassed: {r}" for r in bypassed_ids],
+            error_count=len(bypassed_ids),
         )
-        console.print(f"[yellow]pcp-bypass:[/yellow] {bypass_reason} (logged to bypass_log.yaml)")
-        sys.exit(0)
+
+        if scoped_rule_ids is None:
+            console.print(f"[yellow]pcp-bypass:[/yellow] {bypass_reason} (logged to bypass_log.yaml)")
+            sys.exit(0)
+
+        # Scoped: drop only the named rule(s) and keep going -- everything else
+        # in this commit is still checked normally. This is the whole point of
+        # scoping; exiting here would silently re-create the all-or-nothing bug.
+        console.print(
+            f"[yellow]pcp-bypass ({', '.join(bypassed_ids)}):[/yellow] {bypass_reason} "
+            "(logged to bypass_log.yaml — other rules still run)"
+        )
+        rules = [r for r in rules if r["id"] not in bypassed_ids]
+        required_rules = [r for r in required_rules if r["id"] not in bypassed_ids]
+        file_rules = [r for r in file_rules if r["id"] not in bypassed_ids]
+        protected_rules = [r for r in protected_rules if r["id"] not in bypassed_ids]
 
     # Get files to check
     if file_list:

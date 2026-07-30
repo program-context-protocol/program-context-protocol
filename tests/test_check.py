@@ -21,7 +21,7 @@ def _write_commit_msg(tmp_path, text):
 
 def test_bypass_marker_recognized_on_its_own_line(tmp_path):
     msg = _write_commit_msg(tmp_path, "Fix the thing\n\n[pcp-bypass: known false positive]\n")
-    assert _read_bypass_reason(msg) == "known false positive"
+    assert _read_bypass_reason(msg) == ("known false positive", None)
 
 
 def test_bypass_marker_not_recognized_mid_sentence(tmp_path):
@@ -46,7 +46,7 @@ def test_bypass_marker_recognized_anywhere_in_multiline_unbroken_body(tmp_path):
         "[pcp-bypass: SEC_002 self-match on rule description text]\n"
         "- did Y\n",
     )
-    assert _read_bypass_reason(msg) == "SEC_002 self-match on rule description text"
+    assert _read_bypass_reason(msg) == ("SEC_002 self-match on rule description text", None)
 
 
 def test_bypass_marker_none_when_no_commit_msg_file():
@@ -60,6 +60,51 @@ def test_bypass_marker_none_when_file_missing(tmp_path):
 def test_bypass_marker_ignores_comment_lines(tmp_path):
     msg = _write_commit_msg(tmp_path, "# [pcp-bypass: should not count, this is a comment]\n")
     assert _read_bypass_reason(msg) is None
+
+
+# ── scoped bypass — real incident, 2026-07-30 ──────────────────────────────
+#
+# An ast_pattern rule (R008) matched its own text inside PCP's generated
+# telemetry.jsonl -- a false positive against a file that was never supposed
+# to be scanned. Bypass was all-or-nothing, so the one genuine false positive
+# silently disabled R001 through R010 together for that commit. Scoping means
+# `[pcp-bypass: R008: reason]` skips only R008 and everything else still runs.
+
+def test_scoped_bypass_returns_the_rule_id_and_reason_separately(tmp_path):
+    msg = _write_commit_msg(
+        tmp_path, "Fix thing\n\n[pcp-bypass: R008: matched its own rule text in telemetry.jsonl]\n",
+    )
+    assert _read_bypass_reason(msg) == (
+        "matched its own rule text in telemetry.jsonl", ["R008"],
+    )
+
+
+def test_scoped_bypass_accepts_multiple_comma_separated_ids(tmp_path):
+    msg = _write_commit_msg(tmp_path, "[pcp-bypass: R003,R008: both false positives on generated files]\n")
+    reason, ids = _read_bypass_reason(msg)
+    assert ids == ["R003", "R008"]
+    assert reason == "both false positives on generated files"
+
+
+def test_scoped_bypass_recognizes_the_projects_real_id_convention(tmp_path):
+    """Rule IDs aren't always R\\d+ -- ci_rules.schema.json allows any
+    [A-Z]+_?[0-9]+, and real projects use SEC_/MOD_ prefixes."""
+    msg = _write_commit_msg(tmp_path, "[pcp-bypass: SEC_002: known false positive on this file]\n")
+    assert _read_bypass_reason(msg) == ("known false positive on this file", ["SEC_002"])
+
+
+def test_unscoped_bypass_still_works_exactly_as_before(tmp_path):
+    """No colon-prefixed rule id -- the original, still-default behaviour."""
+    msg = _write_commit_msg(tmp_path, "[pcp-bypass: this is a normal blanket bypass]\n")
+    assert _read_bypass_reason(msg) == ("this is a normal blanket bypass", None)
+
+
+def test_a_reason_that_merely_contains_a_colon_is_not_mistaken_for_scoping(tmp_path):
+    """'note: something' must not be parsed as rule-id 'note'."""
+    msg = _write_commit_msg(tmp_path, "[pcp-bypass: note: this legacy path is intentionally unchecked]\n")
+    reason, ids = _read_bypass_reason(msg)
+    assert ids is None
+    assert reason == "note: this legacy path is intentionally unchecked"
 
 
 # ── ast_pattern rule ──
@@ -324,6 +369,66 @@ def test_check_cli_bypass_logs_and_exits_zero(tmp_path):
     assert bypass_log["bypasses"][0]["reason"] == "known false positive, verified safe"
     assert bypass_log["bypasses"][0]["prev_hash"] == "genesis"
     assert "entry_hash" in bypass_log["bypasses"][0]
+
+
+def test_check_cli_scoped_bypass_skips_only_the_named_rule_others_still_block(tmp_path):
+    """The actual incident: two rules fire, one is a false positive. Scoped
+    bypass must skip only that one and still block on the real violation --
+    proving the fix is not just parse-level but changes runtime behaviour."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "R008", "name": "false-positive-prone rule", "check": "ast_pattern",
+         "pattern": r"FALSE_POSITIVE_MARKER", "severity": "hard_block", "scope": ["*.py"]},
+        {"id": "SEC_001", "name": "No hardcoded secrets", "check": "ast_pattern",
+         "pattern": r"password\s*=\s*['\"]", "severity": "hard_block", "scope": ["*.py"]},
+    ])
+    (tmp_path / "bad.py").write_text("FALSE_POSITIVE_MARKER\npassword = 'hunter2'\n")
+    msg_file = _write_commit_msg(
+        tmp_path, "Fix\n\n[pcp-bypass: R008: matched its own generated text, not a real finding]\n",
+    )
+
+    result = CliRunner().invoke(cli, [
+        "check", "--path", str(tmp_path), "--files", "bad.py", "--commit-msg-file", str(msg_file),
+    ])
+    assert result.exit_code != 0             # SEC_001 still blocks -- not silently skipped
+    assert "SEC_001" in result.output or "No hardcoded secrets" in result.output
+
+    bypass_log = yaml.safe_load((pcp_dir / "bypass_log.yaml").read_text())
+    assert bypass_log["bypasses"][0]["rules_bypassed"] == ["R008"]   # not SEC_001 too
+
+
+def test_check_cli_scoped_bypass_exits_clean_when_the_only_violation_is_bypassed(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "R008", "name": "false-positive-prone rule", "check": "ast_pattern",
+         "pattern": r"FALSE_POSITIVE_MARKER", "severity": "hard_block", "scope": ["*.py"]},
+    ])
+    (tmp_path / "bad.py").write_text("FALSE_POSITIVE_MARKER\n")
+    msg_file = _write_commit_msg(tmp_path, "[pcp-bypass: R008: known false positive]\n")
+
+    result = CliRunner().invoke(cli, [
+        "check", "--path", str(tmp_path), "--files", "bad.py", "--commit-msg-file", str(msg_file),
+    ])
+    assert result.exit_code == 0
+
+
+def test_check_cli_scoped_bypass_warns_on_an_unknown_rule_id_but_still_runs(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_ci_rules(pcp_dir, [
+        {"id": "SEC_001", "name": "No hardcoded secrets", "check": "ast_pattern",
+         "pattern": r"password\s*=\s*['\"]", "severity": "hard_block", "scope": ["*.py"]},
+    ])
+    (tmp_path / "bad.py").write_text("password = 'hunter2'\n")
+    msg_file = _write_commit_msg(tmp_path, "[pcp-bypass: R999: typo'd rule id]\n")
+
+    result = CliRunner().invoke(cli, [
+        "check", "--path", str(tmp_path), "--files", "bad.py", "--commit-msg-file", str(msg_file),
+    ])
+    assert "R999" in result.output and "not found" in result.output
+    assert result.exit_code != 0     # SEC_001 was never actually bypassed
 
 
 def test_bypass_log_entries_chain_across_multiple_bypasses(tmp_path):
