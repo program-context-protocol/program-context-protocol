@@ -1363,6 +1363,59 @@ def _is_ui_facing_criterion(criterion: dict) -> bool:
     return any(kw in text for kw in UI_KEYWORDS)
 
 
+_QA_TAIL = (
+    "The full test suite, lint, and a SAST/secret scan will run against your changes "
+    "after you finish — fix anything those would flag before considering the criterion done."
+)
+
+# Checks PCP already evaluates deterministically at Layer 1, for free, on every
+# run. A pytest that re-asserts one of these buys nothing and costs forever.
+_SELF_VERIFYING_CHECKS = {"file_exists", "ast_pattern"}
+
+
+def _tdd_instruction(criterion: dict) -> str:
+    """The TDD line, conditioned on whether PCP already verifies this criterion.
+
+    "Follow TDD: write a failing test for this criterion first" was unconditional,
+    so a criterion declaring `check: file_exists` got a pytest asserting that the
+    file exists -- duplicating, at permanent runtime cost, a check PCP performs
+    deterministically for free.
+
+    The agents were not being lazy; they were being obedient, and one of them said
+    so in a docstring: "Mirrors the file_exists check declared in
+    .pcp/strategy/modules/agent-query-interface/acceptance.yaml."
+
+    Measured on ontology-foundry 2026-07-30: `test_interface_file_exists` and
+    `test_feature_flag_file_exists` each appear **20 times**, once per module, ~40
+    tests asserting only that a path exists. They are not free. `core-data-model`'s
+    blast radius is 99% of the suite (every module depends on it), so every one of
+    these runs on essentially every scoped test run, on a suite that hit the 900s
+    timeout three times that day.
+
+    Behaviour still gets tested. A feature flag's *content* ("defaults to false"),
+    an interface's *shape* (abstract, uninstantiable, fully typed), a registry
+    *not* registering a dark module -- those are real assertions and are asked for
+    explicitly. Only "the file is on disk" is dropped, because that sentence is
+    already in acceptance.yaml as machine-checked data."""
+    check = (criterion.get("check") or "").strip()
+    if check not in _SELF_VERIFYING_CHECKS:
+        return (
+            "Follow TDD: write a failing test for this criterion first, confirm it fails, "
+            "then write the implementation and confirm the test passes. " + _QA_TAIL
+        )
+    what = "the file exists" if check == "file_exists" else "the pattern is present"
+    return (
+        f"This criterion declares `check: {check}`, which PCP evaluates deterministically "
+        f"at Layer 1 on every run. Do NOT write a test that asserts {what} — that "
+        f"duplicates a free check and adds permanent runtime to every future test run. "
+        "Write tests only for BEHAVIOUR the deterministic check cannot see (what the file "
+        "must contain, what the interface must guarantee, what must happen at runtime), "
+        "and write none if this criterion genuinely has no behaviour beyond existence. "
+        "Follow TDD for whatever behavioural tests you do write: failing first, then the "
+        "implementation. " + _QA_TAIL
+    )
+
+
 def _build_agent_prompt(
     pcp_dir: Path,
     module_name: str,
@@ -1507,10 +1560,7 @@ def _build_agent_prompt(
         "## Module Specification",
         yaml.dump(spec, default_flow_style=False),
         "",
-        "Follow TDD: write a failing test for this criterion first, confirm it fails, "
-        "then write the implementation and confirm the test passes. The full test suite, "
-        "lint, and a SAST/secret scan will run against your changes after you finish — "
-        "fix anything those would flag before considering the criterion done.",
+        _tdd_instruction(criterion),
         "Use editing tools to modify files and run tests to verify your implementation.",
         "Git rules: stay on the current branch — never create or switch branches. "
         "You may commit your work or leave it uncommitted; the build loop measures "
