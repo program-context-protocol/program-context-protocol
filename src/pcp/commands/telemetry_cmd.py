@@ -80,6 +80,86 @@ def telemetry_cmd(project_path: str | None, output_json: bool):
             f"({conflicts / len(merges):.0%}) — agentic-PR literature baseline 27.67% (AgenticFlict)[/dim]"
         )
 
+    # Output per dollar over time. Nothing reported this, so a real ~6x
+    # degradation on ontology-foundry went unseen for a week while commits/day
+    # rose — the flattering metric was the only visible one.
+    weeks = telemetry_lib.productivity_by_week(records)
+    if len(weeks) > 1:
+        # Written vs landed, side by side. Telemetry alone reads healthy — on
+        # ontology-foundry it called 2026-W31 the most productive week of the run
+        # (+12,342 lines, $0.018/line) while git says non-test code grew by 599.
+        # The ratio between them is the signal; neither number is, alone.
+        repo = telemetry_lib.repo_net_lines_by_week(pcp_dir.parent)
+        landed = repo["by_week"]
+        wt = Table(title="Output per dollar — by week")
+        wt.add_column("Week")
+        wt.add_column("Attempts", justify="right")
+        wt.add_column("Spend", justify="right")
+        wt.add_column("Lines written", justify="right")
+        if landed:
+            wt.add_column("Landed (non-test)", justify="right")
+            wt.add_column("Survived", justify="right")
+            wt.add_column("$/landed line", justify="right")
+        else:
+            wt.add_column("$/written line", justify="right")
+
+        for w in weeks:
+            row = [w["week"], str(w["attempts"]), f"${w['cost_usd']:.2f}",
+                   f"{w['net_lines']:+,}"]
+            if landed:
+                net = landed.get(w["week"])
+                if net is None:
+                    row += ["—", "—", "—"]
+                else:
+                    row.append(f"{net:+,}")
+                    written = w["net_lines"]
+                    if net > written:
+                        # More landed than the build loop recorded writing, so code
+                        # arrived by some other path — an ad-hoc agent, a hand edit,
+                        # a bulk merge. That is CTRL-037's story showing up in the
+                        # numbers, and printing it as "5185% survived" would bury it.
+                        row.append("[yellow]outside loop[/yellow]")
+                    elif written > 0:
+                        row.append(f"{net / written:.0%}")
+                    else:
+                        row.append("—")
+                    # A week that spent money and landed nothing is the single most
+                    # important row to see — never render it as a tidy $0.00.
+                    row.append(f"${w['cost_usd'] / net:.2f}" if net > 0
+                               else "[red]nothing landed[/red]")
+            else:
+                per = w["usd_per_net_line"]
+                row.append(f"${per:.3f}" if per is not None
+                           else ("[red]no net output[/red]" if w["cost_usd"] > 0 else "—"))
+            wt.add_row(*row)
+        console.print(wt)
+
+        if landed:
+            console.print(
+                "[dim]`Lines written` is every attempt's diff, so it includes superseded "
+                "attempts, reverts and test code. `Landed` is net authored non-test source "
+                "that survived in git. `Survived` is the ratio — the number actually worth "
+                "watching, since a high written count with a low survival rate is churn, "
+                "not velocity. `outside loop` means more landed than the build loop recorded "
+                "writing, i.e. code arrived by some other path.[/dim]"
+            )
+            # No silent caps: say what was excluded and why.
+            skipped = repo["bulk_commits_skipped"]
+            if skipped:
+                detail = ", ".join(f"{w} ({n})" for w, n in sorted(skipped.items()))
+                console.print(
+                    f"[dim]Excluded {sum(skipped.values())} bulk commit(s) over "
+                    f"{repo['bulk_threshold']:,} changed source lines — {detail}. Those are "
+                    "vendor imports, bulk moves or generated dumps, not one criterion's "
+                    "work; counting them made survival read 107372% on a real project.[/dim]"
+                )
+        else:
+            console.print(
+                "[dim]git unavailable — showing written lines only. These count every "
+                "attempt's diff including superseded work, so treat $/written line as a "
+                "trend, not an accounting figure.[/dim]"
+            )
+
     console.print(
         f"\n[dim]{len(records)} total records — {len(agg['build_records'])} build, "
         f"{len(agg['qa_records'])} qa — total cost ~${total_cost:.2f}[/dim]"
