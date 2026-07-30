@@ -667,12 +667,27 @@ def _write_progress(pcp_dir: Path, module: str, criterion_id: str, attempt: int,
     `pcp build-status`. A backgrounded/parallel-worktree build with no way
     to see what's currently running is exactly what triggered a real
     ontology-foundry incident (07-21: 'i want to see whats happening').
-    Advisory/UX only -- a write failure here must never fail a real build."""
+    Advisory/UX only -- a write failure here must never fail a real build.
+
+    `pid` added 2026-07-30, real incident: a human hand-checking whether a
+    build was stuck had to piece together `ps`/`date` output themselves and
+    misjudged an 18-minute step (well inside the 30-min default agent
+    timeout) as a 7-hour hang from misreading `ps aux`'s clock-only START
+    column, then told the agent to kill a process that was not stuck at all.
+    Without a recorded PID, `pcp build-status` could report elapsed time but
+    never actually confirm whether the process behind that elapsed time was
+    still alive or long gone -- the exact ambiguity that produced the wrong
+    call. `os.getpid()` here is `pcp build`'s own process; that's the one
+    whose death actually means "this run stopped", not the transient `claude
+    -p` child it spawns per attempt (which comes and goes across attempts
+    and retries, but the parent build loop's lifetime is the real signal)."""
     try:
+        import os as _os
         from datetime import datetime, timezone
         data = {
             "module": module, "criterion_id": criterion_id, "attempt": attempt, "step": step,
             "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "pid": _os.getpid(),
         }
         (pcp_dir / "build_progress.yaml").write_text(yaml.dump(data, default_flow_style=False))
     except Exception:

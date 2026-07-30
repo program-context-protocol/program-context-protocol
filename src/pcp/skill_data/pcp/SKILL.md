@@ -593,71 +593,109 @@ Prior criterion note  — 1 line: "<module>/<prev-id> done. commit: <hash>. adde
 - Full ci_rules.yaml (agent runs `pcp check` — doesn't need to read rules)
 - Full build loop protocol (summarised to 7 steps in the agent brief)
 
-### Execution Engine — Use Workflow tool with pipeline()
+### Execution Engine — `pcp build-plan` + Workflow tool
 
-Do NOT manually spawn Agent tool calls in a loop. Use the `Workflow` tool — it provides native parallel execution, concurrency management, progress tracking, and resume capability.
+**Rewritten 2026-07-30, real incident.** `pcp build`'s Python execution engine
+(worktree-per-criterion, merge-then-retry-on-conflict) and this skill's own
+Workflow-based execution were two INDEPENDENT orchestration implementations of
+the same job, reinventing coordination the harness already provides natively.
+Measured cost on ontology-foundry: 5 of 5 completed `query-eval-harness`
+criteria collided on merge in one run, 99% of that run's spend sat on the
+conflicted criteria, two criteria were still stuck mid-retry two hours in. Root
+cause, read directly out of the colliding file: every criterion in a module
+adds one method to a shared facade class in `__init__.py` and removes one entry
+from a shared `_PENDING` dict — small, non-overlapping in MEANING, but landing
+at the same insertion point in the same file, so git's diff calls it a conflict
+where nothing semantically conflicts. No criterion ever declares `__init__.py`
+as its `target`, so a target-only scheduler can never see this collision coming.
 
-**Max parallel agents: 25.** The Workflow runtime queues excess calls and runs them as slots free — pass all criteria at once. Note this is the *skill-side* ceiling; `pcp build`'s own pools are 5 modules × 5 criteria (`PCP_BUILD_MAX_PARALLEL` / `PCP_BUILD_MAX_PARALLEL_CRITERIA`, both default 5), bounded overall by `PCP_MAX_BUILD_SESSIONS`. Do not advertise a concurrency this skill can't actually deliver through the CLI.
+**The split now:** Python plans, the harness executes. `pcp build-plan
+[--module X]` computes the schedule (module waves, criterion waves, each
+module's `shared_surface_files`) exactly as before — same
+`_compute_criterion_waves`/dependency logic, nothing new — and emits it as JSON.
+It spawns nothing and writes nothing. Run it first, always:
 
-**Across modules in the same wave: fully parallel.**
-**Within a module: criteria are ALSO parallel by default** — up to `PCP_BUILD_MAX_PARALLEL_CRITERIA` (default 5), each in its own git worktree. A single-module run (`pcp build --module X`) is *not* one-criterion-at-a-time; never report it that way in a build plan.
+```bash
+pcp build-plan --module <name>   # or omit --module for the whole program
+```
 
-**Corrected 2026-07-27 — this used to be opt-in and read exactly backwards.** Criterion parallelism required a module to have ANY criterion declaring `depends_on` (presence as the signal, empty list counted). But a module whose criteria declare NO dependencies is stating they are mutually independent — the *best* case for fanning out — and PCP treated that as "not opted in" and ran it serially. Measured on ontology-foundry: 145 of 382 criteria sat in modules with no `depends_on` anywhere, all serial for want of a field whose absence already meant "independent".
+Each module in the plan carries `shared_surface_files`: its own
+`src/modules/<module>/__init__.py`, plus any file a `MOD_A00x` criterion in that
+module declares as `target` (the app-registry entry, the interface file).
+**Every criterion in the module is scheduled as implicitly touching these**,
+regardless of what its own `target` says — an `A00x` criterion's own new file
+IS genuinely disjoint from a sibling's own new file (real parallelism is safe
+there), but both still touch the shared facade to register.
 
-Current behaviour, implemented in `build.py`'s `_criteria_parallel_enabled` / `_compute_criterion_waves` / `_partition_wave_by_file_scope` — mirror it here, do not re-derive it:
+**Two different things, two different primitives — do not conflate them:**
 
-- `depends_on` does ORDER only. Declared → later wave. Absent/empty → wave 0, runs concurrently.
-- Same-file collisions are handled by **optimistic scheduling**: two criteria declaring the *same* `target` are separated up front; an undeclared `target` still runs alongside others, and a genuine collision costs one clean rebuild (`_merge_module_branch` aborts cleanly). Prove-or-serialise was tried and reverted — it serialised 237 criteria to prevent a collision class that had bitten once.
-- `PCP_CRITERIA_SERIAL=1` forces the old one-at-a-time behaviour. `PCP_CRITERIA_PARALLEL_STRICT=1` restores prove-or-serialise. Neither is the default.
-- Raise `PCP_BUILD_MAX_PARALLEL_CRITERIA` above 5 for a single-module run, where no module-level fan-out is competing for the same database.
+1. **Each criterion's own file(s) — build in real `parallel()`.** True
+   independence; worktree isolation is warranted here (Workflow's own
+   guidance: use isolation ONLY when agents would otherwise conflict — this is
+   exactly that case, criteria genuinely writing different files at once).
+2. **`shared_surface_files` — single writer, never parallel edits.** A worker
+   agent NEVER edits a module's `__init__.py`/interface/registry directly — it
+   returns a small STRUCTURED registration request instead (method name,
+   delegate-to call, `_PENDING` key to drop — the same shape every criterion in
+   this module already needs, visible in any existing `__init__.py` of this
+   kind). One step applies all pending requests to the shared file(s), in
+   order, after (or as) each worker finishes. Since only that one step ever
+   writes those files, there is nothing to merge and nothing to conflict —
+   not "conflicts resolved faster", genuinely no conflict is possible.
+   Prefer a **deterministic** apply step over another agent call for this: the
+   edit shape (add one method with a fixed pattern, remove one dict key) is
+   regular enough not to need judgment. Escalate to an actual agent step only
+   when a shared-file edit genuinely can't be expressed as that structured
+   request (e.g. two criteria both want to restructure the same class
+   differently) — rare, not the routine case.
 
-Use `pipeline()` — not `parallel()`. Pipeline lets criterion A of module X stream into gate while criterion A of module Y is still being built. No barrier between stages.
+`depends_on` still means ORDER only (declared → later wave, absent/empty →
+wave 0, runs together) — `pcp build-plan`'s `criterion_waves` already reflects
+this, don't re-derive it.
 
 ```javascript
-// Wave execution — one Workflow call per wave
 export const meta = {
   name: 'pcp-wave',
-  description: 'Build one wave of modules, one agent per criterion',
+  description: 'Build one module wave from pcp build-plan\'s output',
   phases: [
     { title: 'Build' },
     { title: 'Gate' },
-    { title: 'Merge' },
+    { title: 'Register' },   // the single-writer step — see above
   ]
 }
 
-// allCriteria = [{module, id, description, check, prevCommit, ...}, ...]
-// Flatten ACROSS modules AND across criteria within a module — pipeline() runs
-// every item independently and gives no ordering guarantee between them, so do
-// not read this as "same-module criteria are sequenced". Ordering comes only
-// from `depends_on`: compute criterion waves first (mirroring
-// _compute_criterion_waves) and pass one wave's criteria per pipeline() call.
-// Criteria with no depends_on are all wave 0 and belong in the same call.
-const results = await pipeline(
-  allCriteria,
-  // Stage 1: build (one agent per criterion, minimal context brief)
-  criterion => agent(buildBrief(criterion), {
-    label: `build:${criterion.module}/${criterion.id}`,
-    phase: 'Build',
-    isolation: 'worktree'   // each agent gets isolated git worktree
-  }),
-  // Stage 2: gate (runs as soon as build result is available, no waiting for other modules)
-  (buildResult, criterion) => agent(
-    `Run pcp gate on ${criterion.module}/${criterion.id}. commit: ${buildResult.commit}. advisory only — log warnings, do not block.`,
-    { label: `gate:${criterion.module}/${criterion.id}`, phase: 'Gate' }
+// plan = JSON.parse(shell(`pcp build-plan --module ${moduleName}`))
+// One pipeline() call per criterion wave (plan.modules[i].criterion_waves[w]) —
+// waves run in order, criteria within a wave run together.
+for (const wave of plan.modules[0].criterion_waves) {
+  const results = await pipeline(
+    wave,
+    // Stage 1: build ONLY this criterion's own file(s) — never the shared surface.
+    criterion => agent(buildBrief(criterion, plan.modules[0].shared_surface_files), {
+      label: `build:${criterion.id}`, phase: 'Build',
+      isolation: wave.length > 1 ? 'worktree' : undefined,  // isolation only when it's buying something
+    }),
+    // Stage 2: gate, streams in as each build finishes — no barrier.
+    (buildResult, criterion) => agent(
+      `Run pcp gate on ${criterion.id}. commit: ${buildResult.commit}. advisory only.`,
+      { label: `gate:${criterion.id}`, phase: 'Gate' },
+    ),
   )
-)
 
-// Stage 3: merge wave (after all criteria complete — true barrier needed here)
-// Merge in dependency order, run integration tests after each module
-phase('Merge')
-for (const module of waveModules) {
-  await agent(`Merge feat/${module} → main. Run integration tests. Resolve conflicts using ADR priority.`, {
-    label: `merge:${module}`, phase: 'Merge'
-  })
+  // Stage 3: single-writer registration — a REAL barrier, deliberately.
+  // Every criterion in this wave returned a registration request; apply them
+  // to shared_surface_files ONE AT A TIME, here, the only place these files
+  // are ever touched. Deterministic template insertion where the shape
+  // allows (see module docstring); escalate to agent() only if a request
+  // can't be expressed that way.
+  phase('Register')
+  for (const r of results.filter(Boolean)) {
+    await applyRegistration(r.registrationRequest, plan.modules[0].shared_surface_files)
+  }
 }
 ```
 
-**The `buildBrief(criterion)` function** — compact, no bloat:
+**The `buildBrief(criterion, sharedSurfaceFiles)` function** — compact, no bloat:
 ```
 Build criterion ${criterion.id}: "${criterion.description}"
 Module: ${criterion.module} | check: ${criterion.check}
@@ -678,15 +716,32 @@ ${persona_block_section}  ← BLOCK section only, not full document
 ${relevant_adr ? `## Relevant ADR\n${relevant_adr}` : ''}
 ${criterion.prevCommit ? `## Prior work\n${criterion.module}/${criterion.prevId} done. commit: ${criterion.prevCommit}. added: ${criterion.prevSummary}.` : ''}
 
+## Files you may NOT edit — single-writer, someone else applies these
+${sharedSurfaceFiles.join('\n')}
+If your criterion needs a new export/registration entry in one of these, do NOT
+touch the file. Instead include a registrationRequest in your return value (see
+below) describing exactly what to add. This is not a style preference — two
+agents editing these files at once is how a real incident happened (2026-07-30,
+5 of 5 criteria in one module collided on merge because everyone edited the
+same shared facade class directly). The file will be updated for you, after you
+finish, by the one step that's allowed to touch it.
+
 ## Steps (in order, no skipping)
 1. Write tests → verify RED
-2. Write code → verify GREEN
+2. Write code → verify GREEN (your own file(s) only — never a file listed above)
 3. lint → pcp check → pcp architect-review --staged
 4. Fix all BLOCK findings
 5. commit: feat(${criterion.module}): ${criterion.id} — ${criterion.description}
 6. echo "${criterion.module}:${criterion.id}:$(git rev-parse HEAD)" >> .pcp/.build_progress
 
-Return: { commit: "<hash>", summary: "<one line what was added>", escalation: null | "<what>" }
+Return: {
+  commit: "<hash>", summary: "<one line what was added>", escalation: null | "<what>",
+  registrationRequest: null | {
+    file: "<one of the files listed above>",
+    method_name: "<name>", delegates_to: "<module.path.function>",
+    pending_key_to_remove: "<key, or null if this module has no _PENDING dict>"
+  }
+}
 Do NOT read other modules. Do NOT continue to next criterion. Exit after step 6.
 Do NOT call the Agent or Workflow tool yourself — depth limit is one level, you are the leaf.
 ```

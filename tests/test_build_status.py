@@ -23,10 +23,13 @@ def test_write_progress_then_load_round_trips(tmp_path):
     pcp_dir.mkdir()
     _write_progress(pcp_dir, "mod", "A1", 2, "coding")
     data = load_progress(pcp_dir)
+    # pid added 2026-07-30 so a stuck/live build can be told apart from a
+    # stale progress file left by a run that no longer exists.
     assert data == {
         "module": "mod", "criterion_id": "A1", "attempt": 2, "step": "coding",
-        "updated_at": data["updated_at"],
+        "updated_at": data["updated_at"], "pid": data["pid"],
     }
+    assert isinstance(data["pid"], int)
 
 
 def test_format_status_no_progress_file():

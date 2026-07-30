@@ -43,6 +43,7 @@ from pcp.commands.run_log_cmd import run_log_cli
 from pcp.commands.narrative_lint import narrative_lint_cmd
 from pcp.commands.build_status import build_status
 from pcp.commands.verify import verify
+from pcp.commands.build_plan import build_plan_cmd
 
 
 @click.group()
@@ -96,3 +97,4 @@ cli.add_command(run_log_cli, name="run-log")
 cli.add_command(narrative_lint_cmd)
 cli.add_command(build_status)
 cli.add_command(verify)
+cli.add_command(build_plan_cmd, name="build-plan")
