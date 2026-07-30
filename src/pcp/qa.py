@@ -42,19 +42,63 @@ def test_timeout_info() -> tuple[int, bool]:
     return _timeout_test(), "PCP_QA_TEST_TIMEOUT_SEC" not in os.environ
 
 
-def _timeout_message(tool: str) -> str:
+def _partial_output(exc: subprocess.TimeoutExpired) -> str:
+    """Whatever the killed process had already written before the timeout.
+
+    `TimeoutExpired` carries the partial `stdout`/`stderr` captured up to the
+    kill, and every handler here discarded it -- the exception wasn't even bound
+    to a name. Measured on ontology-foundry 2026-07-30: a 900s pytest timeout
+    produced a **311-byte** evidence file containing nothing but PCP's own
+    advice message. Twelve of that run's nineteen test-gate blocks were
+    timeouts, so twelve full retries were spent, ~$37 of a $78 run, and a human
+    opening the evidence could not tell which test hung.
+
+    The message below is good prose about what to DO and says nothing about what
+    HAPPENED. pytest's own partial output names the last test it started, which
+    is the one thing that identifies the hang."""
+    parts = []
+    for label, stream in (("stdout", exc.stdout), ("stderr", exc.stderr)):
+        if not stream:
+            continue
+        text = stream.decode("utf-8", "replace") if isinstance(stream, bytes) else str(stream)
+        text = text.strip()
+        if text:
+            parts.append(f"--- partial {label} before the kill (last 4000 chars) ---\n{text[-4000:]}")
+    if not parts:
+        return (
+            "\n\n--- no partial output was captured before the kill ---\n"
+            "The process produced nothing on stdout/stderr, which itself is a signal: it "
+            "hung before writing even a collection header, so suspect a blocking connection "
+            "at import/fixture time rather than a slow test."
+        )
+    return "\n\n" + "\n\n".join(parts)
+
+
+def _timeout_message(tool: str, exc: subprocess.TimeoutExpired | None = None) -> str:
     """A bare "timed out" in the evidence file reads as "the test suite failed"
     to whoever opens it next -- it names neither the limit that was hit nor the
     knob that changes it, so the natural next move is to go debug tests that
-    may well be fine. Say which limit, and say the default is a default."""
+    may well be fine. Say which limit, and say the default is a default.
+
+    Also append whatever the process actually managed to say -- see
+    _partial_output for why advice-without-data was not enough.
+
+    The limit is read off the exception when one is given. `test_timeout_info()`
+    reports the limit in effect *now*, which is not necessarily the one that
+    killed this process -- `exc.timeout` is the value that actually applied."""
     seconds, is_default = test_timeout_info()
+    if exc is not None and exc.timeout:
+        actual = int(exc.timeout)
+        is_default = is_default and actual == seconds
+        seconds = actual
     suffix = " (PCP default — not tuned for this project)" if is_default else ""
-    return (
+    msg = (
         f"{tool} exceeded the {seconds}s PCP_QA_TEST_TIMEOUT_SEC limit{suffix} and was killed. "
         f"No test result was produced — this is NOT a test failure. Either the suite genuinely "
         f"needs longer (raise PCP_QA_TEST_TIMEOUT_SEC) or it is blocked on something that never "
         f"returns (a hung DB connection, a wrong-environment target, a lock)."
     )
+    return msg + (_partial_output(exc) if exc is not None else "")
 
 
 def _timeout_lint() -> int:
@@ -155,8 +199,8 @@ def _run_pytest(project_root: Path, test_paths: list[str] | None = None,
         result = subprocess.run(
             args, capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
-    except subprocess.TimeoutExpired:
-        return {"tool": "pytest", "passed": False, "output": _timeout_message("pytest")}
+    except subprocess.TimeoutExpired as e:
+        return {"tool": "pytest", "passed": False, "output": _timeout_message("pytest", e)}
 
     # Exit code 5 = no tests collected. Under testmon that is the SUCCESS case
     # -- "nothing this change touches" -- and it is also what a broken testmon
@@ -197,8 +241,8 @@ def _run_npm_test(project_root: Path) -> dict | None:
         result = subprocess.run(
             ["npm", "test", "--silent"], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
-    except subprocess.TimeoutExpired:
-        return {"tool": "npm test", "passed": False, "output": _timeout_message("npm test")}
+    except subprocess.TimeoutExpired as e:
+        return {"tool": "npm test", "passed": False, "output": _timeout_message("npm test", e)}
     return {"tool": "npm test", "passed": result.returncode == 0, "output": (result.stdout + result.stderr)[-3000:]}
 
 
@@ -209,8 +253,8 @@ def _run_go_test(project_root: Path) -> dict | None:
         result = subprocess.run(
             ["go", "test", "./..."], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
         )
-    except subprocess.TimeoutExpired:
-        return {"tool": "go test", "passed": False, "output": _timeout_message("go test")}
+    except subprocess.TimeoutExpired as e:
+        return {"tool": "go test", "passed": False, "output": _timeout_message("go test", e)}
     return {"tool": "go test", "passed": result.returncode == 0, "output": (result.stdout + result.stderr)[-3000:]}
 
 
