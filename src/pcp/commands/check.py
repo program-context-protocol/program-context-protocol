@@ -235,7 +235,7 @@ def run_protected_path_rule(rule: dict, staged_files: list[str], project_root: P
                     continue
         violations.append(
             f"{rel_path}: protected spec file modified by an agent session "
-            "(human-authorized: use `pcp correct-objective` / `pcp pm` / "
+            "(human-approved: use `pcp correct-objective` / `pcp pm` / "
             "`pcp amend` — diff shown, human approves, then written)"
         )
     return violations

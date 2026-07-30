@@ -1005,11 +1005,12 @@ thing. This section exists because that gap was real, not hypothetical.)
 
 ## Hard rules (non-negotiable, all sessions)
 
-1. **Spec files are human-authorized only** — `objective.md`, `target_state.md`,
+1. **Spec files are human-APPROVED only** — `objective.md`, `target_state.md`,
    `architecture.md`, `strategy/decomposition.md`, `strategy/dependency_map.md`,
    `ci_rules.yaml`, `controls.yaml`, `SDLC_phase.yaml`, `modules/*/spec.yaml`,
    `modules/*/acceptance.yaml`.
-   **Authorized, not hand-typed.** An agent must never write one unattended, and
+   **Approved, not hand-typed.** A tool proposes the change, you review a real
+   diff, you approve, then it is written. An agent must never write one unattended, and
    `pcp build`'s coding agent is hard-blocked from all of them. But when a human
    is in the session and asks for a spec update, do it — via the gated command
    for that file, which shows a real diff and requires approval before writing:

@@ -1753,7 +1753,7 @@ If a decision is genuinely new: self-decide using best practices, document as DR
 - Never invent CI or Railway status — read from CLI output
 - Never spawn more agents than modules needing work
 - Never silently skip a deferred item — always write to deferred_queue.yaml + notify
-- Never auto-resolve a spec file conflict unattended — specs are human-authorized; defer to the PM, then apply via `pcp correct-objective` / `pcp pm` / `pcp amend` (diff shown, PM approves, then written)
+- Never auto-resolve a spec file conflict unattended — specs are human-approved; defer to the PM, then apply via `pcp correct-objective` / `pcp pm` / `pcp amend` (diff shown, PM approves, then written)
 - Never generate or guess production credentials — security boundary, always stop and notify
 - Never redeploy to production after rollback without PM confirmation
 - If Playwright not installed and `check: visual` required: notify and defer rather than skip
