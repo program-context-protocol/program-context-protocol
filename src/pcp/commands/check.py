@@ -266,7 +266,30 @@ def run_file_exists_rule(rule: dict, project_root: Path, module_names: list[str]
 
 
 def _get_staged_files() -> list[str]:
+    """Staged files a gate should actually evaluate.
+
+    PCP's own generated output is excluded. It is machine-written record *about*
+    the code — telemetry, ledgers, scans, evidence — never authored content, and
+    evaluating a rule against it is not just noise, it is circular: telemetry
+    records the findings of the rules, so a rule's own pattern text ends up
+    written into the file the next commit stages and scans.
+
+    That is not hypothetical. ontology-foundry, 2026-07-30, from bypass_log.yaml:
+
+        reason: R008 matched its own rule text quoted inside generated
+                telemetry.jsonl, not a real property_hints persistence
+
+    And the blast radius was total, because a `[pcp-bypass]` is all-or-nothing
+    across rules: that single self-match bypassed **R001 through R010 together**,
+    on an unattended run, with nobody reading the output. One false positive from
+    a file PCP wrote itself voided the entire Layer 1 gate for that commit.
+
+    See pcp/operational.py for the path list and why it lives in its own module.
+    """
     import subprocess
+
+    from pcp.operational import filter_operational
+
     result = subprocess.run(
         ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
         capture_output=True,
@@ -274,7 +297,17 @@ def _get_staged_files() -> list[str]:
     )
     if result.returncode != 0:
         return []
-    return [f.strip() for f in result.stdout.splitlines() if f.strip()]
+    staged = [f.strip() for f in result.stdout.splitlines() if f.strip()]
+    keep, skipped = filter_operational(staged)
+    if skipped:
+        # Say what was skipped. A gate that silently narrows its own scope is
+        # indistinguishable from one that found nothing.
+        console.print(
+            f"[dim]Layer 1: skipping {len(skipped)} PCP-generated file(s) — "
+            f"machine-written records, not authored content "
+            f"({', '.join(skipped[:4])}{'…' if len(skipped) > 4 else ''}).[/dim]"
+        )
+    return keep
 
 
 @click.command()
