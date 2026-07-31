@@ -13,7 +13,7 @@ from pcp.llm import client as llm
 from pcp.pcp_status import write_pcp_md
 from pcp.commands.kickoff import (
     _normalize_acceptance, _normalize_spec, check_capability_coverage,
-    check_module_logic_breakdown_coverage,
+    check_module_logic_breakdown_coverage, check_prior_art_evidence,
 )
 from pcp.commands.validate_strategy import (
     _build_user_prompt as build_val_prompt,
@@ -405,6 +405,15 @@ def pm(intent: str, project_path: str | None):
     if breakdown_warnings:
         console.print(f"[yellow]⚠  {len(breakdown_warnings)} logic-breakdown item(s) may not be covered by their own module's criteria:[/yellow]")
         for w in breakdown_warnings:
+            console.print(f"   {w}")
+
+    # Prior-art evidence cross-check -- see check_prior_art_evidence's
+    # docstring in kickoff.py. Same rationale as kickoff's own call: pm can
+    # add/modify a module's build_vs_buy just as easily as kickoff can.
+    priorart_warnings = check_prior_art_evidence(all_specs)
+    if priorart_warnings:
+        console.print(f"[yellow]⚠  {len(priorart_warnings)} module(s) may be missing prior-art search evidence:[/yellow]")
+        for w in priorart_warnings:
             console.print(f"   {w}")
 
     # Run validate-strategy automatically -- pm previously had ZERO strategy

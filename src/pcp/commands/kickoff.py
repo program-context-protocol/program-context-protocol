@@ -356,6 +356,53 @@ def check_capability_coverage(capabilities: list[str], module_specs: dict) -> li
     return _keyword_miss_check(capabilities, combined_coverage, "Capability", "any module's objective_coverage")
 
 
+_NON_TRIVIAL_KEYWORDS = (
+    "auth", "login", "oauth", "payment", "billing", "checkout", "queue", "scheduler",
+    "cron", "state machine", "state-machine", "parser", "parsing", "embedding",
+    "vector search", "rate limit", "rate-limit", "retry", "backoff", "webhook",
+    "canvas", "diagram editor", "rich text editor", "rich-text editor",
+    "spreadsheet grid", "drag-drop", "drag and drop", "pdf", "ocr",
+    "file conversion", "format extraction",
+)
+
+
+def check_prior_art_evidence(module_specs: dict) -> list[str]:
+    """Deterministic, no LLM -- same tier and posture as check_capability_coverage.
+    Closes a real gap: CLAUDE.md's global Prior-Art Check rule ("run /priorart
+    before building a non-trivial module") lived only in doctrine an agent had
+    to remember to follow -- nothing in kickoff/pm/build ever checked it
+    happened, so it fired only when a human-in-loop session happened to read
+    CLAUDE.md, never in a headless run.
+
+    build_vs_buy is already schema-required per non-`not_applicable` module,
+    but its rationale can be written with zero real search behind it.
+    `candidates_considered` staying empty is the honest tell: a genuine
+    /priorart run always names 2-4 candidates even when the verdict is
+    build_fresh ("nothing comparable found, considered X, Y") -- so a
+    non-trivial-category module with candidates_considered=[] is a module
+    whose build_vs_buy decision was asserted, not searched for.
+
+    Advisory, matching check_capability_coverage's own posture -- flags,
+    never blocks. A keyword match on module name/description is a blunt
+    instrument, not proof a module is genuinely non-trivial; a human reads
+    the flag and judges."""
+    warnings = []
+    for name, spec in module_specs.items():
+        text = f"{name} {spec.get('description', '')}".lower()
+        if not any(kw in text for kw in _NON_TRIVIAL_KEYWORDS):
+            continue
+        bvb = spec.get("build_vs_buy") or {}
+        decision = bvb.get("decision")
+        if decision and decision != "not_applicable" and not bvb.get("candidates_considered"):
+            warnings.append(
+                f"{name}: non-trivial-category module (keyword match) declares "
+                f"build_vs_buy={decision} with empty candidates_considered -- no "
+                "prior-art search evidence. Run `/priorart` on this module's "
+                "description before treating the decision as final."
+            )
+    return warnings
+
+
 def check_module_logic_breakdown_coverage(module_specs: dict, module_acceptances: dict) -> list[str]:
     """One layer deeper than check_capability_coverage: does each module's
     own declared module_logic_breakdown (internal components/sub-flows/
@@ -634,6 +681,15 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     if breakdown_warnings:
         console.print(f"[yellow]⚠  {len(breakdown_warnings)} logic-breakdown item(s) may not be covered by their own module's criteria:[/yellow]")
         for w in breakdown_warnings:
+            console.print(f"   {w}")
+
+    # Prior-art evidence cross-check -- see check_prior_art_evidence's
+    # docstring. Previously doctrine-only (CLAUDE.md's Prior-Art Check rule);
+    # this is the first code path that actually checks it happened.
+    priorart_warnings = check_prior_art_evidence(modules)
+    if priorart_warnings:
+        console.print(f"[yellow]⚠  {len(priorart_warnings)} module(s) may be missing prior-art search evidence:[/yellow]")
+        for w in priorart_warnings:
             console.print(f"   {w}")
 
     # Run validate-strategy automatically
