@@ -49,6 +49,36 @@ deploy:      pcp deploy-check  → Layer 3, phase exit criteria, hard block
 `current_state.md` and `diff.md` are always auto-generated from your actual
 code — never hand-written, never allowed to go stale.
 
+## Logic-tier ladder — not everything is an LLM's job
+
+Every piece of judgment-requiring logic a PCP-built project writes gets
+routed to the cheapest tool that can correctly make it, cheapest-first:
+
+| Rung | What it is | When it applies |
+|---|---|---|
+| 1. Deterministic | if/else, lookup table | Fixed rules, one correct output |
+| 2. Solver/optimization | OR-Tools, CBC | Constraints+objective known, answer isn't |
+| 3. Statistical/ML | sklearn, HuggingFace | Pattern learned from historical data |
+| 4. RAG | retrieval + light synthesis | Answer exists in a bounded corpus |
+| 5. Cached reuse | lru_cache, diskcache | Replay a near-duplicate prior answer |
+| 6. Deep-think LLM | last resort | Two competent humans would reasonably disagree |
+
+Enforced via schema-validated `logic_tier` fields per acceptance criterion +
+CI drift checks (a criterion that claims rung ≤5 but imports an LLM SDK
+fails the gate). Most agentic-coding tools default everything to rung 6 —
+this is the difference between "call the LLM" and "decide whether you
+should."
+
+## Prior-art gate
+
+Before scaffolding a non-trivial module (auth, payments, queues, parsers,
+state machines, a canvas/diagram editor, PDF processing — anything a mature
+library probably already solves) PCP runs a prior-art check: search
+GitHub/npm/PyPI, shortlist candidates, check license compatibility, decide
+reuse-as-dependency / fork-adapt / reference-pattern-only / build-fresh
+*before* code gets written. Rationale is recorded per module, not left to
+whether the agent happened to think of it that day.
+
 ## Install
 
 ```
