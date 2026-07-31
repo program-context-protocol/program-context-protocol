@@ -19,6 +19,7 @@ from pcp.commands.kickoff import kickoff
 from pcp.commands.pm import pm
 from pcp.commands.build import build
 from pcp.commands.import_project import import_project
+from pcp.commands.self_update import self_update
 from pcp.commands.audit import audit
 from pcp.commands.telemetry_cmd import telemetry_cmd
 from pcp.commands.doctor import doctor
@@ -98,3 +99,4 @@ cli.add_command(narrative_lint_cmd)
 cli.add_command(build_status)
 cli.add_command(verify)
 cli.add_command(build_plan_cmd, name="build-plan")
+cli.add_command(self_update)

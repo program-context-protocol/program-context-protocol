@@ -1,0 +1,53 @@
+#!/bin/sh
+# Public-release gate before any push. Two checks:
+#   1. Secret scan (gitleaks) -- hard block, never auto-fixed. A leaked
+#      credential needs rotation, not just text removal; auto-stripping the
+#      string and pushing on would hide the exposure without undoing it.
+#   2. Public-hygiene (scripts/check_public_hygiene.py) -- no unrelated .md
+#      files, no personal/other-project references. Auto-fixable: on
+#      failure, runs the cleanup routine and commits the fix if it succeeds.
+#
+# Either failure blocks THIS push. For hygiene, re-run `git push` once the
+# fix is committed. GitHub Actions (.github/workflows/ci.yml) runs both
+# checks again as a backstop for anyone who bypasses this hook with --no-verify.
+REPO="$(git rev-parse --show-toplevel)"
+cd "$REPO" || exit 1
+
+if command -v gitleaks >/dev/null 2>&1; then
+  echo "Running secret scan (gitleaks)..."
+  gitleaks detect --source . --no-git -v
+  if [ $? -ne 0 ]; then
+    echo ""
+    echo "SECRET SCAN FAILED -- a real credential may be about to go public."
+    echo "Remove it from the file AND rotate the credential (removing the"
+    echo "text does not undo an exposure that already happened). Push blocked."
+    exit 1
+  fi
+else
+  echo "gitleaks not installed locally -- skipping local secret scan (CI will still run it)."
+  echo "Install: brew install gitleaks"
+fi
+
+python3 scripts/check_public_hygiene.py
+if [ $? -eq 0 ]; then
+  exit 0
+fi
+
+echo ""
+echo "Running cleanup routine..."
+python3 scripts/cleanup_public_hygiene.py
+
+python3 scripts/check_public_hygiene.py
+CHECK_STATUS=$?
+
+if [ "$CHECK_STATUS" -eq 0 ]; then
+  git add -A -- . ':!.pcp'
+  git commit -m "chore: auto-scrub public-hygiene violations (pre-push cleanup)" --quiet
+  echo ""
+  echo "Cleanup committed. Push aborted -- run 'git push' again to send the fixed commit."
+else
+  echo ""
+  echo "Cleanup could not fix everything -- see violations above. A new"
+  echo "project name may need adding to scripts/public_hygiene_denylist.py by hand."
+fi
+exit 1
