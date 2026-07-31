@@ -1,6 +1,6 @@
 """pcp verify — the missing "this is genuinely done, record it" command.
 
-Root-caused 2026-07-30: 12 criteria on ontology-foundry read `status: complete`
+Root-caused 2026-07-30: 12 criteria on Project O read `status: complete`
 with `verified_by: None`. `verified_by` is stamped ONLY by `_mark_criterion_complete`
 inside `pcp build`'s real gated loop, so its absence on a `complete` criterion means
 the status was hand-edited into `acceptance.yaml` directly.

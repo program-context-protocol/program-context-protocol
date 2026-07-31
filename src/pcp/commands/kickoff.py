@@ -173,7 +173,7 @@ _CHECK_ALIASES = {"automated": "manual", "auto": "manual", "unit_test": "test_pa
 # LLM-invented check type ('file_pair_diff', 'grep') or severity ('warn' instead
 # of 'advisory') silently reached disk and hard-blocked every future commit via
 # pcp check's schema validation -- confirmed live in a real kicked-off project
-# (agentberg), not hypothetical.
+# (Project A), not hypothetical.
 VALID_CI_CHECKS = {"ast_pattern", "file_exists", "llm_semantic", "protected_path"}
 VALID_CI_SEVERITIES = {"hard_block", "advisory"}
 _CI_SEVERITY_ALIASES = {"warn": "advisory", "warning": "advisory", "block": "hard_block", "error": "hard_block", "critical": "hard_block"}
@@ -446,7 +446,7 @@ def _report_orphaned_modules(pcp_dir: Path, generated: set[str]) -> list[str]:
     and not force` check below); it has never removed prior module directories,
     while its help text says "Force overwrite existing .pcp/ directory". So a
     second kickoff against a re-scoped vision writes its new modules ALONGSIDE
-    the old ones. Found live 2026-07-27 in the signtool dogfood: two kickoffs
+    the old ones. Found live 2026-07-27 in the Project S dogfood: two kickoffs
     produced 14 module directories from two incompatible decompositions, while
     decomposition.md described only the 6 newest.
 
@@ -601,7 +601,7 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     # scan.py's own posture (warn, don't block), but at least surfaces any
     # remaining issue right here instead of only the first time someone
     # tries to commit and pcp check's Layer 1 schema validation hard-blocks
-    # on it -- confirmed live in a real kicked-off project (agentberg) before
+    # on it -- confirmed live in a real kicked-off project (Project A) before
     # this check existed.
     ci_rules_errors = validate_file(pcp_dir / "ci_rules.yaml", "ci_rules")
     if ci_rules_errors:

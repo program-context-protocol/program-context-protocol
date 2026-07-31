@@ -1,6 +1,6 @@
 
 
-# ── Orphaned modules from a prior kickoff (2026-07-27 signtool dogfood) ──
+# ── Orphaned modules from a prior kickoff (2026-07-27 Project S dogfood) ──
 
 def test_orphaned_modules_from_a_prior_kickoff_are_reported(tmp_path, capsys):
     """`--force` only suppresses the overwrite confirm; it never removed prior

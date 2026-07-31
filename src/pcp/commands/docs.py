@@ -423,7 +423,7 @@ def _render_ui_ux(data: dict) -> str:
         # Deliberately no longer claims "Built, Hidden". A missing
         # design_justification is a missing FIELD, not a hidden feature —
         # conflating the two is what produced 101 phantom "hidden" criteria on
-        # ontology-foundry. Discoverability is measured from the built UI now
+        # Project O. Discoverability is measured from the built UI now
         # (see nav_graph); this line reports declaration coverage and says so.
         lines += [
             f"**{len(undeclared)}/{len(ui_criteria)} UI-facing criteria declare no "

@@ -1,7 +1,7 @@
 """Discoverability measured from the built UI, not from a declared field.
 
 The ladder used to classify by whether `design_justification` existed. On
-ontology-foundry that gave 101 "Built, Hidden" and 24 "Exposed, Enriched" with
+Project O that gave 101 "Built, Hidden" and 24 "Exposed, Enriched" with
 ZERO at rungs 2 and 3 — a binary condition wearing a four-rung costume. "101
 hidden features" was really "101 criteria lack an optional field".
 """
@@ -27,7 +27,7 @@ def _vite_project(tmp_path, entries: dict, links: dict):
 
 
 def test_multipage_depths_are_measured(tmp_path):
-    """ontology-foundry's real shape: vite multi-page, pages linked by href."""
+    """Project O's real shape: vite multi-page, pages linked by href."""
     root = _vite_project(
         tmp_path,
         {"main": "index.html", "query": "query.html"},

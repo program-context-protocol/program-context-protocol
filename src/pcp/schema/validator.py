@@ -15,7 +15,7 @@ SCHEMA_DIR = Path(__file__).parent
 # validator.py, editable or not) has no such sibling four levels up, so
 # every validate_file() call silently pointed at a nonexistent path for
 # anyone using PCP as an actually-installed dependency (confirmed against
-# ontology-foundry's own separate venv install). Schemas now live directly
+# Project O's own separate venv install). Schemas now live directly
 # alongside validator.py, inside the package itself, so the path resolves
 # correctly regardless of how or where the package is installed.
 

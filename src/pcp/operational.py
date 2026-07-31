@@ -5,7 +5,7 @@ audit trails). They are not code, nobody authored them, and no rule should ever
 be evaluated against their contents.
 
 `build.py` already excluded them from criterion diffs. `check.py` did not, and
-that gap produced a real Layer 1 failure on ontology-foundry, 2026-07-30:
+that gap produced a real Layer 1 failure on Project O, 2026-07-30:
 
     reason: R008 matched its own rule text quoted inside generated
             telemetry.jsonl, not a real property_hints persistence

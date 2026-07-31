@@ -9,7 +9,7 @@ module-level spec.yaml/acceptance.yaml this same way: LLM proposes the change
 from stated intent, a human reviews and approves, then it's written. objective.md
 and target_state.md never got the equivalent command, so in practice a business
 correction discussed and agreed in conversation had nowhere to go except a
-human manually opening the file -- and the 2026-07-22 ontology-foundry incident
+human manually opening the file -- and the 2026-07-22 Project O incident
 is exactly what happens when that manual step is skipped and nothing catches
 it: a build cycle runs to completion against a stale objective.
 

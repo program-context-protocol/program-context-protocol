@@ -1,6 +1,6 @@
 """A criterion PCP already verifies must not also get a pytest asserting it.
 
-Measured on ontology-foundry 2026-07-30: `test_interface_file_exists` and
+Measured on Project O 2026-07-30: `test_interface_file_exists` and
 `test_feature_flag_file_exists` each appear 20 times — once per module — asserting
 only that a path exists, which acceptance.yaml already declares as a machine-checked
 `file_exists`. One of the generated files says so in its own docstring: "Mirrors the

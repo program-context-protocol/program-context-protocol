@@ -119,7 +119,7 @@ def _project(tmp_path, modules, tests_dirs=(), extra_files=()):
 
 def test_changed_file_attributed_by_path_convention_without_declared_target(tmp_path):
     """Attribution used to depend solely on criteria declaring `target`. Only
-    51 of 382 ontology-foundry criteria do, so it returned an empty set for
+    51 of 382 Project O criteria do, so it returned an empty set for
     real files and every gate fell back to the full 1,098-test suite."""
     from pcp.impact import changed_files_to_modules, _load_modules_for_impact
     pcp_dir, root = _project(tmp_path, {"web-server": [], "accounts": []})

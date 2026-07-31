@@ -1,6 +1,6 @@
 """A wave block caused by another module must not revert this wave's work.
 
-Measured twice on ontology-foundry. A036-A039 were reverted on five blockers,
+Measured twice on Project O. A036-A039 were reverted on five blockers,
 none from that build. Then 2026-07-30: core-data-model A022/A030/A033/A038 --
 $30.04 spent, all four branches merged into main, all four marked `pending`.
 The wave gate requires dependencies 100% complete, so a module downstream of an
@@ -93,7 +93,7 @@ def test_one_real_finding_among_external_ones_still_reopens(tmp_path):
 # ── CTRL-018 must not record a block it never performed ───────────────────────
 
 def test_scope_guard_records_advisory_not_block_in_warn_mode(tmp_path, monkeypatch):
-    """110 of ontology-foundry's 259 `block` records were this check in warn
+    """110 of Project O's 259 `block` records were this check in warn
     mode — 42.5% of every block ever recorded there never blocked anything."""
     import json
     from pcp.commands import build as B

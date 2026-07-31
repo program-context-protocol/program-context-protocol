@@ -261,8 +261,8 @@ def test_deterministic_gap_shown_in_cli_output(tmp_path):
 
 def test_scorers_disagree_rule_matches_real_measured_cases():
     """Measured across four real projects: the deterministic keyword scorer
-    read 0%-100% on healthy decompositions (Postcar 0/5 with 11 real modules,
-    signtool 1/4, win2mac 8/8). It has systematic false negatives whenever an
+    read 0%-100% on healthy decompositions (Project P 0/5 with 11 real modules,
+    Project S 1/4, Project W 8/8). It has systematic false negatives whenever an
     objective's numbered list is phrased in different vocabulary from module
     coverage text."""
     from pcp import assertions as A
@@ -351,7 +351,7 @@ def test_the_two_callers_tolerances_are_explicit_not_accidental():
     behaviours are load-bearing:
 
       * wave gate (credibility_floor=1.0): advisory — it re-checks UNCHANGED
-        specs every wave, so a dip is noise. This is the 2026-07-17 LinkBox
+        specs every wave, so a dip is noise. This is the 2026-07-17 Project L
         case that hard-blocked a wave on specs nobody had touched.
       * standalone audit (default 0.5): blocks — a scorer that matched a
         majority and missed one is reporting a credible gap, which is exactly

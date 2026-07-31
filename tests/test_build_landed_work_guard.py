@@ -1,6 +1,6 @@
 """pcp build must refuse to rebuild criteria whose work already landed.
 
-Observed live on ontology-foundry 2026-07-30: a run was 13 minutes and $6.27 into
+Observed live on Project O 2026-07-30: a run was 13 minutes and $6.27 into
 rebuilding query-eval-harness A001, A008 and MOD_A002 — all three already merged
 into main. Twelve criteria across three modules were in that state.
 

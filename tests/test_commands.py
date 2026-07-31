@@ -351,7 +351,7 @@ def test_normalize_spec_accepts_not_applicable_for_business_logic_module():
     assert spec["build_vs_buy"]["decision"] == "not_applicable"
 
 
-# ── _normalize_ci_rules: real bug found live in a kicked-off project (agentberg) ──
+# ── _normalize_ci_rules: real bug found live in a kicked-off project (Project A) ──
 # ── -- kickoff wrote result["ci_rules"] with zero validation, unlike acceptance.yaml ──
 
 def test_normalize_ci_rules_returns_no_warnings_when_already_valid():
@@ -413,8 +413,8 @@ def test_normalize_ci_rules_coerces_invalid_and_duplicate_ids():
         assert re.match(r"^[A-Z]+_?[0-9]+$", rid)
 
 
-def test_normalize_ci_rules_matches_real_agentberg_bug_exactly():
-    """Real, confirmed-live data shape (agentberg's actual generated
+def test_normalize_ci_rules_matches_real_project_a_bug_exactly():
+    """Real, confirmed-live data shape (Project A's actual generated
     ci_rules.yaml) -- not a synthetic example."""
     from pcp.commands.kickoff import _normalize_ci_rules
     from pcp.schema.validator import validate_file

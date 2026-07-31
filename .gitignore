@@ -27,36 +27,12 @@ graphify-out/
 .coverage
 .claude/
 
-# PCP's own session-derived operational data (regenerable, may embed session/deploy ids)
-.pcp/telemetry.jsonl
-.pcp/token_ledger.yaml
-.pcp/decision_log.jsonl
-.pcp/brd.md
-.pcp/brd_items.yaml
-.pcp/bypass_log.yaml
-.pcp/deploy_log.yaml
-.pcp/integrations.yaml
-.pcp/audit.md
-.pcp/provenance.md
-.pcp/architecture_justification.md
-.pcp/design_audit.md
-.pcp/coverage_audit.jsonl
-.pcp/escalations.yaml
-.pcp/prune_log.yaml
-.pcp/transcripts/
-.pcp/evidence/
-
-# stale leftovers from the ontology-foundry extraction
-.pcp/observatory.md
-.pcp/ontology_review_log.jsonl
-.pcp/ontology_state.yaml
-.pcp/traceability_map.yaml
-.pcp/traceability_review_log.jsonl
+# PCP's own dogfood/operational state (local-only, never distributed) --
+# this repo runs PCP on itself, but the resulting .pcp/ content is
+# project-specific evidence, not part of the shipped product.
+.pcp/
 docs/market-research-2026-07-modules.md
 docs/build-plan-2026-07.md
-.pcp/attestations.jsonl
-.pcp/attestations.meta.json
-.pcp/audit_trend.jsonl
 docs/research-ui-intent-2026-07.md
 docs/research-rigidity-vs-reliability-2026-07.md
 docs/CHANGELOG.md

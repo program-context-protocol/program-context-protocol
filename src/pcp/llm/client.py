@@ -21,7 +21,7 @@ import yaml
 # Guards token_ledger.yaml's read-modify-write in _log_usage -- gate checks
 # in build.py's per-criterion loop that make an LLM call (architect-review,
 # gate, design-justification) now run concurrently with each other (2026-07-18,
-# ontology-foundry dogfood finding: gate stages were needlessly sequential).
+# Project O dogfood finding: gate stages were needlessly sequential).
 # Without this lock, two concurrent calls reading the same ledger snapshot
 # before either writes back would silently drop one call's usage record --
 # same class of race the module-level worktree comment in build.py already
@@ -174,7 +174,7 @@ def call_json(system: str, user: str, model: str | None = None, pcp_dir: Path | 
     an exception, became a blocking gate finding, consumed a criterion attempt,
     and after three of them the remedy PCP offered was
     PCP_ALLOW_UNVERIFIED_GATES=1 -- turn the gate off. Reported from
-    ontology-foundry 2026-07-27, where it cost three attempts on one criterion
+    Project O 2026-07-27, where it cost three attempts on one criterion
     and where the same architect review had caught a real path-traversal
     vulnerability an hour earlier. Offering "skip the check" as the cure for a
     flaky check points at exactly the wrong lever.

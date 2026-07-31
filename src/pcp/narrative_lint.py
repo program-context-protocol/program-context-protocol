@@ -1,8 +1,8 @@
 """Narrative-lint — flags CLAUDE.md-family narrative prose that has drifted
 from PCP's own tracked state (current_state.md/architecture.md).
 
-Fleet evidence (2026-07-24 context-hygiene pass across Event-Manager/
-win2mac/agentberg/atacamaMDM): narrative prose in CLAUDE.md — stage
+Fleet evidence (2026-07-24 context-hygiene pass across Project E/
+Project W/Project A/Project M): narrative prose in CLAUDE.md — stage
 descriptions, "Open Decisions," "Pending" lists — drifted from tracked
 state 3-for-3 in projects checked, because nothing checks free-text
 against it. `~/.claude/scripts/session-hygiene-check.sh` already covers

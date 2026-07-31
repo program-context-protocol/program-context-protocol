@@ -419,7 +419,7 @@ def test_conflict_guidance_names_the_gated_command_not_hand_editing():
     and the standalone command used to tell the user to rewrite specs 'by
     hand', never naming `pcp correct-objective --from-conflict` — PCP sending
     people around its own gated propose/diff/approve path. Found live in the
-    2026-07-27 signtool dogfood, where the gate fired correctly and then gave
+    2026-07-27 Project S dogfood, where the gate fired correctly and then gave
     the wrong instruction."""
     import inspect
     from pcp.commands import build as build_mod

@@ -12,14 +12,14 @@ def _write_module(pcp_dir, name, criteria):
 
 
 # Rewritten 2026-07-27. These asserted the declaration-based contract: no
-# `design_justification` -> rung 1 "Built, Hidden". Measured on ontology-foundry
+# `design_justification` -> rung 1 "Built, Hidden". Measured on Project O
 # that produced 101 at rung 1, 24 at rung 4 and ZERO at rungs 2 and 3 — a binary
 # condition wearing a four-rung costume, reporting missing FIELDS as hidden
 # FEATURES. Rungs 1-3 now come from measured reachability in the built UI; only
 # rung 4 still consults the declaration.
 
 def _nav(tmp_path, entries, links):
-    """A real vite multi-page front end on disk, matching ontology-foundry's shape."""
+    """A real vite multi-page front end on disk, matching Project O's shape."""
     from pcp import nav_graph
     (tmp_path / "vite.config.ts").write_text(
         "export default {build:{rollupOptions:{input:{"

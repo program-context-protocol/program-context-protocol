@@ -90,7 +90,7 @@ def productivity_by_week(records: list[dict]) -> list[dict]:
     """Spend and net lines written per ISO week, plus $ per net line.
 
     Nothing in PCP reported output-per-dollar over time, so a real 6x degradation
-    went unseen. Measured by hand on ontology-foundry 2026-07-30: 07-16..07-22
+    went unseen. Measured by hand on Project O 2026-07-30: 07-16..07-22
     produced +4,954 net non-test LOC for $364.77 (~$0.07/line), while 07-23..07-30
     produced +596 for $263.89 (~$0.44/line) -- while commits/day ROSE. Commit count
     and output per dollar were pointing in opposite directions and only the flattering
@@ -155,7 +155,7 @@ def repo_net_lines_by_week(project_root: Path, exclude_tests: bool = True,
     alone would have repeated the exact failure this session kept finding: a metric
     that reads healthy while the situation it describes is not.
 
-    On ontology-foundry, week 2026-W31: telemetry recorded **+12,342 net lines
+    On Project O, week 2026-W31: telemetry recorded **+12,342 net lines
     written** at $0.018/line, which looks like the most productive week of the run.
     Git says non-test code in the repo grew by **+599** over the same window. Both
     are true. Telemetry counts every attempt's diff, so superseded attempts, reverted
@@ -166,7 +166,7 @@ def repo_net_lines_by_week(project_root: Path, exclude_tests: bool = True,
     watching, and no single-source metric can express it.
 
     **Vendored third-party source is the hard case and the reason for
-    `bulk_commit_threshold`.** Extension filtering is not enough: ontology-foundry
+    `bulk_commit_threshold`.** Extension filtering is not enough: Project O
     committed an entire drawio distribution under `web/drawio-site/` and
     `web/public/drawio/` in one week and moved it the next -- ~450,000 lines of
     third-party `.js` sitting in no conventionally-named vendor directory. That
@@ -262,7 +262,7 @@ def _is_authored_source(path: str) -> bool:
     """Is this a file a person or agent wrote, rather than one a tool emitted?
 
     Without this filter the metric is not merely noisy, it is nonsense. Run against
-    ontology-foundry it reported **+1,523,5xx lines landed** in one week and
+    Project O it reported **+1,523,5xx lines landed** in one week and
     **-1,470,6xx** in another, for survival rates of 362745% and -38701% -- lockfiles
     and generated bundles swamping the signal by three orders of magnitude.
 

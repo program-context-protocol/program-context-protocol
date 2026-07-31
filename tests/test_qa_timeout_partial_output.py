@@ -1,6 +1,6 @@
 """A killed test run must still say what it was doing.
 
-Measured on ontology-foundry 2026-07-30: a 900s pytest timeout wrote a 311-byte
+Measured on Project O 2026-07-30: a 900s pytest timeout wrote a 311-byte
 evidence file containing only PCP's own advice message. 12 of that run's 19
 test-gate blocks were timeouts, so 12 full retries were spent and nobody could
 tell which test hung. TimeoutExpired carries the partial output; every handler

@@ -1,6 +1,6 @@
 """CTRL-037 build-loop bypass detector (2026-07-24): flags when git commits
 keep landing well past telemetry.jsonl's last entry -- the signature of
-pcp build's formal gated loop silently going unused, real ontology-foundry
+pcp build's formal gated loop silently going unused, real Project O
 incident recurring 3x."""
 
 import subprocess

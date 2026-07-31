@@ -6,7 +6,7 @@ TWO independent orchestration implementations in this codebase -- the `/pcp`
 skill's own SKILL.md already documents a second one, built on the Workflow
 tool's `pipeline()`/`parallel()`, and CLAUDE.md describes both as if they were
 the same mechanism. They aren't. The Python engine reinvents coordination the
-harness already provides natively, and pays for it: measured on ontology-foundry,
+harness already provides natively, and pays for it: measured on Project O,
 5 of 5 completed `query-eval-harness` criteria hit a merge conflict in one run,
 99% of that run's cost sat on the conflicted criteria, and two criteria were
 still stuck mid-retry two hours in.

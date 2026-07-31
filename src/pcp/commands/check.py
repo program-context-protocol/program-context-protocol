@@ -243,7 +243,7 @@ def run_protected_path_rule(rule: dict, staged_files: list[str], project_root: P
     build.py before spawning the coding agent) — a human's own interactive
     commit (pcp pm, direct editing) never sets this and is never blocked.
 
-    Carve-out, added 2026-07-08 after a real recurrence in ontology-foundry:
+    Carve-out, added 2026-07-08 after a real recurrence in Project O:
     a protected file that's currently invalid YAML (blocking validate-strategy/
     architect-review project-wide) and an agent's fix touches ONLY quoting/
     escaping is allowed through -- verified by is_syntax_only_yaml_fix(),
@@ -303,7 +303,7 @@ def _get_staged_files() -> list[str]:
     records the findings of the rules, so a rule's own pattern text ends up
     written into the file the next commit stages and scans.
 
-    That is not hypothetical. ontology-foundry, 2026-07-30, from bypass_log.yaml:
+    That is not hypothetical. Project O, 2026-07-30, from bypass_log.yaml:
 
         reason: R008 matched its own rule text quoted inside generated
                 telemetry.jsonl, not a real property_hints persistence

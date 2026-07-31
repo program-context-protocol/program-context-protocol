@@ -1,6 +1,6 @@
 """Work that landed but is still marked pending.
 
-Three occurrences on ontology-foundry in a week via two different paths: the
+Three occurrences on Project O in a week via two different paths: the
 wave-gate reopen ($30.04, four core-data-model criteria merged then reverted to
 pending) and a run that simply stopped ($31.65, query-eval-harness, A001/A008
 merged into main with source and tests present, all 18 criteria reading pending).

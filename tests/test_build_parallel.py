@@ -544,7 +544,7 @@ def test_pcp_own_progress_file_is_not_agent_output():
     assert not _is_pcp_operational(".pcp/strategy/modules/api/spec.yaml")
 
 
-# ── Untracked work must be visible to the gates (2026-07-27 signtool dogfood) ──
+# ── Untracked work must be visible to the gates (2026-07-27 Project S dogfood) ──
 
 def test_working_diff_includes_brand_new_untracked_files(tmp_path):
     """`git diff` never shows untracked files. An agent that creates only NEW
@@ -604,7 +604,7 @@ def test_auto_commit_never_stages_pcp_operational_writes(tmp_path):
     """PCP appends to token_ledger/telemetry in the MAIN .pcp/ throughout a
     build. If a worktree branch commits them, the merge home fails with "your
     local changes would be overwritten by merge" — main has uncommitted edits
-    to a tracked file the branch also committed. Halted the signtool dogfood
+    to a tracked file the branch also committed. Halted the Project S dogfood
     on criterion A001 after A002/A004 had already merged cleanly."""
     repo = _init_repo(tmp_path / "repo")
     pcp = repo / ".pcp"
@@ -667,7 +667,7 @@ def test_no_unregistered_pcp_runtime_writer():
         "baseline_violations.yaml",   # pcp import scaffold + pcp check --baseline
         "discovery_graph.json",       # pcp import, one-time
         "attestations.meta.json",     # pcp provenance --attest
-        "ontology_state.yaml",        # pcp_dir path helper, ontology-foundry integration
+        "ontology_state.yaml",        # pcp_dir path helper, Project O integration
         "objective.md", "target_state.md", "architecture.md", "ci_rules.yaml",
         "controls.yaml", "SDLC_phase.yaml", "context_map.yaml", "design_system.md",
         "design_conventions.yaml", "ui_kit_recipes.yaml", "logic_tier_guide.md",
@@ -711,7 +711,7 @@ def _crit(cid, target=None, **kw):
 
 def test_undeclared_criteria_run_in_parallel_optimistically(monkeypatch):
     """Corrected the same day it shipped. The first version demanded proof of
-    disjointness via `target`, which serialised 237 ontology-foundry criteria
+    disjointness via `target`, which serialised 237 Project O criteria
     that had opted into parallelism -- only 51 of 382 declare a target. A 15x
     throughput loss to prevent a collision that costs one rebuild and that
     `git merge --abort` already makes clean."""
@@ -812,7 +812,7 @@ def test_no_criterion_is_ever_dropped_or_duplicated(monkeypatch):
 def test_kickoff_prompt_no_longer_endorses_merge_time_collisions():
     """The prompt used to tell the model to 'let the two criteria's own
     file-level conflicts surface at merge time' — actively instructing the
-    failure mode that halted the signtool build."""
+    failure mode that halted the Project S build."""
     from pcp.commands import kickoff
     src = Path(kickoff.__file__).read_text()
     assert "surface at merge time" not in src
@@ -822,7 +822,7 @@ def test_kickoff_prompt_no_longer_endorses_merge_time_collisions():
 # ── A criterion gate tests the PRODUCT, not PCP's paperwork (2026-07-27) ──
 
 def test_per_criterion_gates_do_not_grade_declarations():
-    """Measured on ontology-foundry: 35% of 1,632 gate executions checked
+    """Measured on Project O: 35% of 1,632 gate executions checked
     declarations rather than the product, and those produced 108 of 187 blocks
     — 58%. 97 were the scope guard objecting that files fell outside a surface
     derived from `target`, which 331 of 382 criteria never declared: PCP
@@ -878,7 +878,7 @@ def test_only_product_failures_block_a_criterion():
         )
 
 
-# ── A malformed spec must not end the run (2026-07-27 signtool) ──
+# ── A malformed spec must not end the run (2026-07-27 Project S) ──
 
 def test_malformed_yaml_gives_an_actionable_error_not_a_traceback(tmp_path):
     """A build agent hand-edited acceptance.yaml into invalid YAML — a

@@ -19,7 +19,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-# Real incident, 2026-07-18 (ontology-foundry dogfood): these were bare
+# Real incident, 2026-07-18 (Project O dogfood): these were bare
 # module constants with no env override -- a real project's test suite
 # legitimately taking 420-550s against a real Postgres backend always got
 # falsely marked "timed out" against the 300s default, burning a build
@@ -47,7 +47,7 @@ def _partial_output(exc: subprocess.TimeoutExpired) -> str:
 
     `TimeoutExpired` carries the partial `stdout`/`stderr` captured up to the
     kill, and every handler here discarded it -- the exception wasn't even bound
-    to a name. Measured on ontology-foundry 2026-07-30: a 900s pytest timeout
+    to a name. Measured on Project O 2026-07-30: a 900s pytest timeout
     produced a **311-byte** evidence file containing nothing but PCP's own
     advice message. Twelve of that run's nineteen test-gate blocks were
     timeouts, so twelve full retries were spent, ~$37 of a $78 run, and a human
@@ -173,7 +173,7 @@ def _run_pytest(project_root: Path, test_paths: list[str] | None = None,
     does nothing about REPETITION, which is the larger term: between one
     criterion and the next a handful of files change and nearly every eligible
     test re-executes against identical code, up to 3 attempts per criterion.
-    Measured 2026-07-27 on ontology-foundry, scoping alone still left an
+    Measured 2026-07-27 on Project O, scoping alone still left an
     average of 37% of a 1,279-test suite per run, and 99% for the hub module
     every other module depends on.
 
@@ -265,7 +265,7 @@ def full_suite_forced() -> bool:
     by default, while `_run_test_suite_check`'s own docstring already described
     scoped-per-criterion + full-suite-at-wave-merge as the design. The design
     was documented and disabled, so every criterion attempt ran the entire
-    suite -- 1,098 tests, ~7m46s, on ontology-foundry, re-running the same
+    suite -- 1,098 tests, ~7m46s, on Project O, re-running the same
     tests up to three times per criterion.
 
     Scoping is now the norm. PCP_QA_FULL_SUITE=1 forces the old behaviour for

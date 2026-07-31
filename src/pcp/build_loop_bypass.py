@@ -1,6 +1,6 @@
 """CTRL-037: build-loop bypass detector (2026-07-24).
 
-Real, recurring incident (ontology-foundry, 07-08 / mid-July / 07-21-onward,
+Real, recurring incident (Project O, 07-08 / mid-July / 07-21-onward,
 3 occurrences): `pcp build`'s formal gated loop (architect-review, QA,
 wave-merge, telemetry) silently stops being used -- not by decision, just by
 default -- while real commits keep landing via `pcp pm` + ad-hoc/manual

@@ -169,7 +169,7 @@ def test_call_with_images_logs_usage(tmp_path):
     assert "test-image-call" in ledger
 
 
-# ── _log_usage concurrency (2026-07-18, ontology-foundry dogfood finding:
+# ── _log_usage concurrency (2026-07-18, Project O dogfood finding:
 # build.py's per-criterion gate checks now run concurrently via a
 # ThreadPoolExecutor -- several of them call an LLM and log usage. Without a
 # lock around token_ledger.yaml's read-modify-write, two concurrent writers
@@ -201,7 +201,7 @@ def test_log_usage_concurrent_calls_do_not_drop_entries(tmp_path):
 # ── Malformed JSON is retried, not escalated into "turn the gate off" ──
 
 def test_call_json_retries_a_malformed_response(monkeypatch):
-    """Reported from ontology-foundry: one transient `Extra data: line 15
+    """Reported from Project O: one transient `Extra data: line 15
     column 1` became a blocking gate finding, consumed three criterion
     attempts, and the remedy PCP offered was PCP_ALLOW_UNVERIFIED_GATES=1 — for
     the same review that had caught a path-traversal vulnerability an hour

@@ -1,6 +1,6 @@
 """Output per dollar, over time.
 
-Nothing in PCP reported this, so a ~6x degradation on ontology-foundry went unseen
+Nothing in PCP reported this, so a ~6x degradation on Project O went unseen
 for a week while commits/day rose. Commit count and output per dollar pointed in
 opposite directions and only the flattering one was visible.
 """
@@ -83,7 +83,7 @@ def test_empty_input_is_empty_output():
 
 def test_repo_net_lines_splits_test_from_non_test(tmp_path):
     """Test churn must not be counted as product output — it is the thing that
-    inflated ontology-foundry's ratio to 1.79 in the first place."""
+    inflated Project O's ratio to 1.79 in the first place."""
     import subprocess
     from pcp.telemetry import repo_net_lines_by_week
 
@@ -114,7 +114,7 @@ def test_repo_net_lines_returns_empty_outside_a_git_repo(tmp_path):
 
 
 def test_survival_ratio_exposes_churn_that_written_lines_hide():
-    """The ontology-foundry W31 case: 12,342 written, 599 landed = 5% survived,
+    """The Project O W31 case: 12,342 written, 599 landed = 5% survived,
     yet $/written line read as the best week of the run."""
     weeks = productivity_by_week([_r("2026-07-27T10:00:00Z", cost=223.26, added=12500, removed=158)])
     written = weeks[0]["net_lines"]
@@ -125,7 +125,7 @@ def test_survival_ratio_exposes_churn_that_written_lines_hide():
 
 
 def test_vendored_bulk_commit_is_excluded_whole_and_reported(tmp_path):
-    """ontology-foundry committed a whole drawio distribution (~450k lines of
+    """Project O committed a whole drawio distribution (~450k lines of
     third-party .js) in one week and moved it the next, producing survival rates
     of 107372% and -11249%. No path heuristic catches that; size does."""
     import subprocess

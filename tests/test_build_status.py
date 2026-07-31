@@ -1,5 +1,5 @@
 """pcp build-status (2026-07-24): live view of an in-progress pcp build run,
-closes the opacity gap that triggered a real ontology-foundry incident
+closes the opacity gap that triggered a real Project O incident
 (build killed on 07-21 partly because there was no way to see it working)."""
 
 from datetime import datetime, timedelta, timezone

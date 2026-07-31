@@ -33,8 +33,8 @@ def _max_context_chars() -> int:
     Default raised 60,000 -> 400,000 (2026-07-29). 60k chars is ~15k tokens --
     that guard was not measuring "this project no longer fits in a context
     window", it was firing on ordinary project size. Measured across the 8
-    local PCP-managed projects, 4 of 8 exceeded it (ontology-foundry 392k,
-    win2mac 94k, atacamaMDM 68k, geek-squad 43k), so `pcp pm` was dead on half
+    local PCP-managed projects, 4 of 8 exceeded it (Project O 392k,
+    Project W 94k, Project M 68k, Project G 43k), so `pcp pm` was dead on half
     the fleet with an error suggesting the fix was to "split into smaller
     modules" -- i.e. restructure a healthy 27-module project to satisfy an
     arbitrary constant. 400k chars is ~100k tokens, half a 200k window, which
@@ -47,7 +47,7 @@ def _max_context_chars() -> int:
 # the existing IDs (collision avoidance), descriptions (don't re-add what
 # exists), and the scheduling fields it must itself populate. It does not need
 # other criteria's build_vs_buy rationales, design_justification memos, QA
-# evidence, or verifier notes -- and on ontology-foundry those four fields
+# evidence, or verifier notes -- and on Project O those four fields
 # alone were 111k of the 341k spec+acceptance payload (build_vs_buy 74k,
 # design_justification 28k, test 8.7k, notes/verified_by/pattern 3.5k).
 #

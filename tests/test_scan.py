@@ -33,12 +33,12 @@ def test_ast_pattern_falls_back_when_feature_moved_to_another_file(tmp_path):
     exists elsewhere in the tree — scan should not false-negative this.
     """
     _reset_caches()
-    (tmp_path / "postcar_check.py").write_text("def validate_registration(): pass\n")
+    (tmp_path / "renamed_check.py").write_text("def validate_registration(): pass\n")
 
     ok, detail = _check_ast_pattern("registration_check.py", r"def validate_registration", tmp_path)
 
     assert ok is True
-    assert "postcar_check.py" in detail
+    assert "renamed_check.py" in detail
     assert "registration_check.py" in detail
 
 
@@ -52,7 +52,7 @@ def test_ast_pattern_not_found_anywhere_stays_pending(tmp_path):
 
 
 def test_ast_pattern_target_pointing_at_a_directory_does_not_crash(tmp_path):
-    """Real bug, found 2026-07-08 dogfooding against ontology-foundry: a
+    """Real bug, found 2026-07-08 dogfooding against Project O: a
     criterion's target field pointed at a real directory, not a file.
     path.exists() is True for a directory too, so the old code tried to
     read_text() it and crashed the whole `pcp scan` run with an unhandled

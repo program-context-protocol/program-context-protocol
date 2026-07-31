@@ -115,9 +115,9 @@ def scorers_disagree(result: dict, floor: float = LLM_CONFIDENCE_FLOOR,
     docstring): it has systematic false negatives whenever an objective's
     numbered list is phrased in different vocabulary from the modules'
     `objective_coverage`. Measured 2026-07-27 across four real projects, the
-    deterministic score ranged 0%-100% on healthy decompositions — Postcar
+    deterministic score ranged 0%-100% on healthy decompositions — Project P
     scored 0/5 with 11 real modules because its assertions are terse feature
-    names, and signtool scored 1/4 because two of its assertions are
+    names, and Project S scored 1/4 because two of its assertions are
     non-functional outcomes ("the sender never has to explain it") that no
     module coverage text will ever share words with.
 
@@ -136,8 +136,8 @@ def scorers_disagree(result: dict, floor: float = LLM_CONFIDENCE_FLOOR,
         and det_score < llm_score
         # ...and the deterministic scorer must look BROKEN on this objective,
         # not merely stricter. Vocabulary mismatch is systematic: it fails to
-        # match assertions uniformly and drives the score toward zero (Postcar
-        # 0/5, signtool 1/4). A genuine missing module is localised — most
+        # match assertions uniformly and drives the score toward zero (Project P
+        # 0/5, Project S 1/4). A genuine missing module is localised — most
         # assertions still match and one does not (9/10, or the 1/2 case in
         # test_deterministic_gap_shown_in_cli_output, a real uncovered
         # module the LLM claimed was fine).

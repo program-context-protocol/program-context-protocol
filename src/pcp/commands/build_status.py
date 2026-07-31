@@ -2,7 +2,7 @@
 
 Reads `.pcp/build_progress.yaml`, written by build.py's `_write_progress()`
 at each criterion-attempt checkpoint (coding / evaluating gates / done /
-failed). Real gap this closes (2026-07-24, ontology-foundry incident):
+failed). Real gap this closes (2026-07-24, Project O incident):
 `pcp build` gives no way to tell what it's currently doing short of reading
 raw agent output -- backgrounded (`nohup pcp build ... &`) it's fully
 opaque, which is what triggered "i want to see whats happening" and a build

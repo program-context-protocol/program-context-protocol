@@ -1,6 +1,6 @@
 """pcp verify — the missing 'this is genuinely done' command.
 
-12 criteria on ontology-foundry were hand-edited to status: complete with no
+12 criteria on Project O were hand-edited to status: complete with no
 verified_by, because pcp pm (spec-authoring) was the only tool anyone reached
 for. This is the gated write path that should have existed: re-run the
 deterministic check where one exists, require --reason where it doesn't, log

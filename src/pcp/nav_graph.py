@@ -1,7 +1,7 @@
 """Measured navigation reachability — is a screen actually reachable, and how deep.
 
 The Feature Exposure Ladder previously classified a criterion by whether it
-carried a `design_justification` field. Measured 2026-07-27 on ontology-foundry,
+carried a `design_justification` field. Measured 2026-07-27 on Project O,
 that produced 101 "Built, Hidden" and 24 "Exposed, Enriched" with **zero** at
 rungs 2 and 3 -- a binary condition wearing a four-rung costume. "101 hidden
 features" was really "101 criteria lack an optional field": a statement about
@@ -15,7 +15,7 @@ point. Deterministic, rung 1, no LLM.
 Two navigation styles are recognised, both by reading what is there:
 
 * multi-page (Vite `rollupOptions.input`, or bare `*.html`) with `href` edges --
-  ontology-foundry's canvas-next is this: `index.html` and `query.html` linking
+  Project O's canvas-next is this: `index.html` and `query.html` linking
   to each other.
 * single-page router (`<Route path=...>`) with `<Link to=...>` / `navigate(...)`
   edges.
@@ -174,7 +174,7 @@ def analyse(project_root: Path) -> dict:
     could not be determined -- callers MUST treat that as "not measured", never
     as "nothing is reachable".
     """
-    # A project can hold several front ends (ontology-foundry has `web/` and
+    # A project can hold several front ends (Project O has `web/` and
     # `web/canvas-next/`, both with a vite config). First-match-wins picked the
     # thinner one and reported a single unreachable-from-nothing page, so pick
     # the most substantive graph and record that others exist rather than

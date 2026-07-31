@@ -104,7 +104,7 @@ def _package_fingerprint(pkg_dir: Path) -> str | None:
     """Content hash of every .py under a package directory.
 
     Version strings are not evidence of code. Found 2026-07-27 minutes after
-    shipping this module: ontology-foundry's venv and the source tree both
+    shipping this module: Project O's venv and the source tree both
     declared 0.9.14 while the venv's copy was missing a function added to
     source under that same version. The check reported "ok". Comparing declared
     versions cannot see unreleased source changes, which is the single most

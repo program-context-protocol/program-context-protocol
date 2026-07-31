@@ -1,6 +1,6 @@
 """Objective-conflict gate.
 
-Closes a real incident, 2026-07-22 (ontology-foundry dogfood): a business
+Closes a real incident, 2026-07-22 (Project O dogfood): a business
 decision to stop storing business-transaction instances was made and agreed
 2026-07-20; objective.md/target_state.md (human-AUTHORIZED, Hard Rule 2 — see
 `pcp correct-objective` for the propose/diff/approve path) never

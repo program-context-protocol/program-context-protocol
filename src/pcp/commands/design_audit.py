@@ -55,7 +55,7 @@ def _classify_rung(criterion: dict, nav: dict | None = None,
     """Rung from the MEASURED artifact where possible, `None` when unknown.
 
     This used to read one field: no `design_justification` -> rung 1. Measured
-    2026-07-27 on ontology-foundry that gave 101 at rung 1, 24 at rung 4, and
+    2026-07-27 on Project O that gave 101 at rung 1, 24 at rung 4, and
     **zero** at rungs 2 and 3 -- a binary condition wearing a four-rung costume,
     because nothing ever writes a partial justification. "101 Built, Hidden"
     described 101 missing fields, not 101 hidden features.
@@ -201,7 +201,7 @@ def _render_markdown(data: dict, timestamp: str) -> str:
 
     # "Could not measure" is its own row and never folded into rung 1. The
     # previous version classified a missing `design_justification` as
-    # "Built, Hidden" and reported 101 of them on ontology-foundry -- a
+    # "Built, Hidden" and reported 101 of them on Project O -- a
     # statement about absent paperwork dressed as a discoverability crisis.
     nav = data.get("nav_analysis") or {}
     undet = data.get("undetermined", 0)

@@ -103,7 +103,7 @@ def test_doctor_surfaces_drift_without_being_fatal():
 # ── Same version string, different code (found minutes after shipping) ──
 
 def test_same_version_but_different_code_is_caught(tmp_path, monkeypatch):
-    """ontology-foundry's venv and the source tree both declared 0.9.14 while
+    """Project O's venv and the source tree both declared 0.9.14 while
     the venv's copy was missing a function added to source under that same
     version. Comparing version strings reported "ok". Version strings are not
     evidence of code."""

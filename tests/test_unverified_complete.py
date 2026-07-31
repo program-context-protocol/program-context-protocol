@@ -1,6 +1,6 @@
 """Mirror image of test_orphaned_work.py: complete with no verified_by.
 
-Found live on ontology-foundry 2026-07-30 -- 12 criteria hand-flipped to
+Found live on Project O 2026-07-30 -- 12 criteria hand-flipped to
 complete after the orphaned-work fix, because no sanctioned 'mark done' path
 existed yet. More dangerous than a stale pending: a false complete means the
 work is never checked again.

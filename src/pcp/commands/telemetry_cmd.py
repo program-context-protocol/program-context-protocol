@@ -81,12 +81,12 @@ def telemetry_cmd(project_path: str | None, output_json: bool):
         )
 
     # Output per dollar over time. Nothing reported this, so a real ~6x
-    # degradation on ontology-foundry went unseen for a week while commits/day
+    # degradation on Project O went unseen for a week while commits/day
     # rose — the flattering metric was the only visible one.
     weeks = telemetry_lib.productivity_by_week(records)
     if len(weeks) > 1:
         # Written vs landed, side by side. Telemetry alone reads healthy — on
-        # ontology-foundry it called 2026-W31 the most productive week of the run
+        # Project O it called 2026-W31 the most productive week of the run
         # (+12,342 lines, $0.018/line) while git says non-test code grew by 599.
         # The ratio between them is the signal; neither number is, alone.
         repo = telemetry_lib.repo_net_lines_by_week(pcp_dir.parent)

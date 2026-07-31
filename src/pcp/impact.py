@@ -3,7 +3,7 @@
 2026-07-21 finding: qa.py's test-suite gate ran the FULL project-wide suite
 on every build attempt (up to 3x/criterion), deliberately never scoped --
 real cost as a project's suite grows, and the thing that turned a real
-2026-07-21 ontology-foundry incident (a squatted DB port) into an
+2026-07-21 Project O incident (a squatted DB port) into an
 undiagnosable "timed out" for hours. Ganesh's direction: full-suite runs
 should be rare, and scoping should reuse PCP's own module dependency graph
 (coupling.py's build_dependency_graph, the same graph validate-strategy
@@ -65,7 +65,7 @@ def _owns_by_path_convention(module_name: str, changed_files: list[str]) -> bool
     """Does a changed file sit under a directory named for this module?
 
     Attribution used to rely solely on criteria declaring `target`. Measured
-    2026-07-27 on ontology-foundry: only 51 of 382 criteria declare one, so
+    2026-07-27 on Project O: only 51 of 382 criteria declare one, so
     attribution returned an empty set for real changed files, scoping resolved
     to None, and the gate fell back to the full 1,098-test suite on EVERY
     criterion attempt -- roughly 7m46s each, about 13 hours of pure test time
@@ -143,7 +143,7 @@ def blast_radius_test_paths(pcp_dir: Path, project_root: Path, changed_files: li
     # Per-module test DIRECTORIES (`tests/web_server/`) are how real projects
     # actually lay this out; the file patterns above only find
     # `tests/test_<stem>.py`. Without this the function returned None on
-    # ontology-foundry despite 18 of 27 modules having exactly such a directory.
+    # Project O despite 18 of 27 modules having exactly such a directory.
     for name in radius:
         for variant in _name_variants(name):
             d = project_root / "tests" / variant

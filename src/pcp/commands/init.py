@@ -481,7 +481,7 @@ controls:
     mechanism: "objective_conflicts.reconcile() -- build.py's first preflight step, before any module/agent work starts. An active brd_items.yaml entry with a live drift_flag (set by capture.py's classifier when a captured business item conflicts with objective.md's text) is stamped with a SHA-256 hash of objective.md+target_state.md's content at flag time. If current content still matches that hash, the conflict is unresolved and blocks. If the hash no longer matches, the file was actually edited since the flag was raised -- auto-clears deterministically."
     tool: "n/a (deterministic hash check; flagging itself is Haiku-classified in capture.py)"
     enforcement: hard_block
-    description: "2026-07-22 incident, ontology-foundry dogfood: a business objective correction was discussed and agreed, objective.md/target_state.md never got rewritten to match, and a 30+-agent build cycle two days later built exactly the rejected shape end-to-end -- every other gate passed, because every gate validates the build against objective.md as given, never against whether objective.md is still true. `pcp objective-conflicts` lists/dismisses flags; `pcp correct-objective` is the human-gated resolution path (LLM proposes an objective.md/target_state.md rewrite from the stated correction, human approves the real diff, then it's written -- same pattern pcp kickoff/pm already use for module specs). `pcp build` also self-captures its own live session (CLAUDE_CODE_SESSION_ID) before this gate even runs, so a correction discussed in the same still-open session that authorizes the build gets a chance to be caught."
+    description: "2026-07-22 incident, Project O dogfood: a business objective correction was discussed and agreed, objective.md/target_state.md never got rewritten to match, and a 30+-agent build cycle two days later built exactly the rejected shape end-to-end -- every other gate passed, because every gate validates the build against objective.md as given, never against whether objective.md is still true. `pcp objective-conflicts` lists/dismisses flags; `pcp correct-objective` is the human-gated resolution path (LLM proposes an objective.md/target_state.md rewrite from the stated correction, human approves the real diff, then it's written -- same pattern pcp kickoff/pm already use for module specs). `pcp build` also self-captures its own live session (CLAUDE_CODE_SESSION_ID) before this gate even runs, so a correction discussed in the same still-open session that authorizes the build gets a chance to be caught."
     ssdf_practice: ["PW.1.1", "PW.4.1"]
 
   - id: CTRL-036
@@ -490,7 +490,7 @@ controls:
     mechanism: "narrative_lint.py run() -- deterministic stale-dated-reference and missing-referenced-file scan of every CLAUDE.md-family file, plus ONE batched judge call comparing status-shaped narrative lines (Pending/Open Decision/Planned/etc.) against current_state.md+architecture.md for semantic contradiction"
     tool: "judge model (JUDGE_MODEL, contradiction check only; the two file-scan sub-checks are deterministic)"
     enforcement: advisory
-    description: "2026-07-24 fleet evidence: a context-hygiene pass across 4 projects (Event-Manager, win2mac, agentberg, atacamaMDM) found narrative prose in CLAUDE.md -- stage descriptions, 'Open Decisions,' 'Pending' lists -- drifted from tracked state 3-for-3 in projects checked (largest: ~65 lines of dead launch-weekend content still live 7 weeks post-launch, undetected). Nothing in PCP's existing gate catalog checks free-text prose against current_state.md/architecture.md -- every other gate validates code against spec. Deterministic sub-checks port `~/.claude/scripts/session-hygiene-check.sh`'s mechanical checks into PCP's own enforcement lifecycle (telemetry, not just a SessionStart print); the semantic contradiction check is the one irreducibly judgment-shaped part, same rung-6 posture as CTRL-020's rung-necessity check -- one batched call, advisory, fails open. Standalone via `pcp narrative-lint`; also runs at every wave-merge boundary."
+    description: "2026-07-24 fleet evidence: a context-hygiene pass across 4 projects (Project E, Project W, Project A, Project M) found narrative prose in CLAUDE.md -- stage descriptions, 'Open Decisions,' 'Pending' lists -- drifted from tracked state 3-for-3 in projects checked (largest: ~65 lines of dead launch-weekend content still live 7 weeks post-launch, undetected). Nothing in PCP's existing gate catalog checks free-text prose against current_state.md/architecture.md -- every other gate validates code against spec. Deterministic sub-checks port `~/.claude/scripts/session-hygiene-check.sh`'s mechanical checks into PCP's own enforcement lifecycle (telemetry, not just a SessionStart print); the semantic contradiction check is the one irreducibly judgment-shaped part, same rung-6 posture as CTRL-020's rung-necessity check -- one batched call, advisory, fails open. Standalone via `pcp narrative-lint`; also runs at every wave-merge boundary."
     ssdf_practice: ["PW.1.1"]
 
   - id: CTRL-037
@@ -499,7 +499,7 @@ controls:
     mechanism: "build_loop_bypass.py check() -- git log commit dates vs telemetry.jsonl's last entry timestamp, run by doctor.py's check_environment() (pcp build/watch/deploy's own automatic preflight) and the interactive `pcp doctor`"
     tool: "n/a (deterministic)"
     enforcement: advisory
-    description: "2026-07-24 incident (ontology-foundry, 3rd recurrence: 07-08, mid-July, 07-21-onward): pcp build's formal gated loop stopped being invoked, not by decision -- a real Postgres schema-bloat bug got killed and never relaunched -- while 31 commits landed via `pcp pm` + ad-hoc work over the next 3 days, telemetry.jsonl silent the whole time. Nothing previously surfaced that drift at the moment it started; it only became visible via manual transcript archaeology. Flags when commits continue past telemetry's last record by more than PCP_BUILD_LOOP_BYPASS_THRESHOLD_DAYS (default 3) -- inert until a project has at least one real telemetry record to compare against."
+    description: "2026-07-24 incident (Project O, 3rd recurrence: 07-08, mid-July, 07-21-onward): pcp build's formal gated loop stopped being invoked, not by decision -- a real Postgres schema-bloat bug got killed and never relaunched -- while 31 commits landed via `pcp pm` + ad-hoc work over the next 3 days, telemetry.jsonl silent the whole time. Nothing previously surfaced that drift at the moment it started; it only became visible via manual transcript archaeology. Flags when commits continue past telemetry's last record by more than PCP_BUILD_LOOP_BYPASS_THRESHOLD_DAYS (default 3) -- inert until a project has at least one real telemetry record to compare against."
     ssdf_practice: ["PW.1.1"]
 """
 
@@ -668,7 +668,7 @@ BUILD_LOOP_WARNING_TEMPLATE = """\
 #!/usr/bin/env python3
 # PCP build-loop warning (scaffolded by pcp init, 2026-07-24).
 #
-# Real ontology-foundry finding: CTRL-037 (pcp doctor) catches build-loop
+# Real Project O finding: CTRL-037 (pcp doctor) catches build-loop
 # bypass only in retrospect -- after the fact, only if someone runs
 # pcp doctor. This is the real-time version: fires the moment an Edit/Write
 # happens outside pcp build's own gated agent loop (PCP_AGENT_SESSION != 1),
@@ -753,7 +753,7 @@ venv/
 # Agent-session-local config. Claude Code writes these per working directory,
 # and a worktree-scoped value (TMPDIR, granted permissions) differs in every
 # parallel build worktree. Committing them turns every wave merge into an
-# add/add conflict on a scratch config file — 2026-07-25 ontology-foundry,
+# add/add conflict on a scratch config file — 2026-07-25 Project O,
 # where three criteria that had all passed their gates could not be merged.
 .claude/settings.json
 .claude/settings.local.json
@@ -761,7 +761,7 @@ venv/
 # PCP's own operational writes. These are auto-generated audit artifacts, and
 # PCP appends to them in the MAIN .pcp/ throughout a build by design. Tracking
 # them means a parallel-build merge hits "your local changes would be
-# overwritten by merge" and refuses — 2026-07-27 signtool dogfood, where a
+# overwritten by merge" and refuses — 2026-07-27 Project S dogfood, where a
 # criterion that had passed every gate could not be merged because the token
 # ledger had moved underneath it. Governance SPECS (objective, strategy/,
 # ci_rules, controls) stay tracked deliberately; only the run-time logs go.

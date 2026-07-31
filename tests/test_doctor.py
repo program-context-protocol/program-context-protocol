@@ -208,7 +208,7 @@ def test_doctor_cli_check_only_reports_context7_without_writing(tmp_path):
     assert not (tmp_path / ".mcp.json").exists()
 
 
-# ── Postgres schema-bloat preflight (2026-07-24, ontology-foundry incident) ──
+# ── Postgres schema-bloat preflight (2026-07-24, Project O incident) ──
 
 def test_schema_bloat_none_without_postgres_url(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)

@@ -117,7 +117,7 @@ def test_run_coverage_no_tool(tmp_path):
     assert result == {"tool": None, "percent": None}
 
 
-# ── env-overridable timeouts (2026-07-18, ontology-foundry dogfood finding:
+# ── env-overridable timeouts (2026-07-18, Project O dogfood finding:
 # these were bare hardcoded constants -- a real project's suite legitimately
 # taking longer than the default always got falsely marked "timed out") ──
 

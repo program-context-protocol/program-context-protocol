@@ -1,6 +1,6 @@
 """Criteria whose work landed in the repo but whose status still says `pending`.
 
-Three independent occurrences on ontology-foundry inside a week, via two
+Three independent occurrences on Project O inside a week, via two
 different code paths:
 
 - **The wave-gate reopen path.** `core-data-model` A022/A030/A033/A038 — $30.04
@@ -52,7 +52,7 @@ def _landed_commit_subjects(project_root: Path) -> list[str]:
     version of this module. `pcp build` reuses worktrees and resets their branch
     to the current base (`_sync_worktree_to_base`), so a branch that never carried
     a single commit still reports as "merged" — it is an ancestor of HEAD by
-    construction. Checked against ontology-foundry, that produced 18 findings of
+    construction. Checked against Project O, that produced 18 findings of
     which most were false: `feat/query-eval-harness-MOD_A001` and
     `feat/core-data-model-A041` have no merge commit and never advanced.
 
@@ -157,13 +157,13 @@ def find_unverified_complete(pcp_dir: Path) -> list[dict]:
     no gate ever ran, no evidence exists, and PCP is reporting work as done that
     it has no basis for.
 
-    First found live on ontology-foundry 2026-07-30: 12 criteria hand-flipped
+    First found live on Project O 2026-07-30: 12 criteria hand-flipped
     after the orphaned-work fix landed, because no sanctioned "mark done" path
     existed yet -- fixed by `pcp verify` in this same change.
 
     **The baseline exists because the naive version was shipped and run against
     the real project before the tests caught the problem it caused.** `verified_by`
-    is 6 days old (added 2026-07-24); ontology-foundry has 432 criteria going back
+    is 6 days old (added 2026-07-24); Project O has 432 criteria going back
     to early July. Un-baselined, this returns **282 of 333 complete criteria** --
     85% of all completed work, flagged as suspect for the sole reason that it
     predates a field that did not exist when it was built. That is not a signal,

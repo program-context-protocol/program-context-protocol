@@ -126,7 +126,7 @@ def write_control_audit(pcp_dir: Path) -> dict:
 def sync_catalog(pcp_dir: Path) -> list[str]:
     """Additive-only merge of the CURRENT package's control catalog into a
     project's existing controls.yaml. Real gap found 2026-07-22 auditing
-    ontology-foundry: `controls.yaml` is scaffolded once at `pcp init` and
+    Project O: `controls.yaml` is scaffolded once at `pcp init` and
     never refreshed as the `pcp` package adds new controls over time -- one
     project had 23 distinct control_ids firing in telemetry.jsonl against a
     10-entry catalog, invisible to `pcp control-audit`/`pcp provenance`

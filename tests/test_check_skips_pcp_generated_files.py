@@ -1,6 +1,6 @@
 """A rule must never be evaluated against PCP's own generated output.
 
-ontology-foundry, 2026-07-30, from bypass_log.yaml:
+Project O, 2026-07-30, from bypass_log.yaml:
 
     reason: R008 matched its own rule text quoted inside generated
             telemetry.jsonl, not a real property_hints persistence

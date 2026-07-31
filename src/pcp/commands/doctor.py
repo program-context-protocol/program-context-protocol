@@ -53,7 +53,7 @@ def _which(name: str) -> str | None:
 
 
 def _claude_bin_for_detection() -> str:
-    """Real bug, found 2026-07-18 (CI failure, ontology-foundry-adjacent):
+    """Real bug, found 2026-07-18 (CI failure, Project O-adjacent):
     llm/client.py's _claude_bin() respects PCP_CLAUDE_BIN so callers can
     substitute a stub agent (real substitution in tests, or a genuinely
     different install path), but this module's own REQUIRED_TOOLS check for
@@ -211,7 +211,7 @@ def _postgres_url() -> str | None:
 
 
 def check_schema_bloat(threshold: int | None = None, pattern: str | None = None) -> dict | None:
-    """Postgres test-schema bloat preflight (2026-07-24, ontology-foundry
+    """Postgres test-schema bloat preflight (2026-07-24, Project O
     incident root cause): a schema-per-test pattern that never tears down
     left 2000+ stray schemas, which correlated directly with pytest timeouts
     under worktree-parallel builds -- looked like a `pcp build` stall from
@@ -289,7 +289,7 @@ def check_git_hooks_reachable(project_root: Path) -> dict | None:
     Measured across the local fleet 2026-07-30: **6 of 8 PCP-managed projects had
     `core.hooksPath = ~/.git-hooks`**, a directory containing a single `commit-msg`
     with no PCP reference. So PCP's Layer 1 commit-msg gate and its post-commit
-    scan had never fired in any of them. agentberg is the clearest case --
+    scan had never fired in any of them. Project A is the clearest case --
     `current_state.md` generated 2026-07-24, then 26 more commits landed and it
     was never regenerated.
 

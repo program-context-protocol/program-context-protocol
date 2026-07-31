@@ -159,7 +159,7 @@ class _BuildBudget:
 
     def record_test_timeout_signal(self, timed_out: bool) -> bool:
         """Cross-criterion anomaly signal. A real 2026-07-21 incident
-        (ontology-foundry): a squatted DB port made the test-suite gate
+        (Project O): a squatted DB port made the test-suite gate
         "time out" identically across several criteria before a human
         caught it -- per-criterion escalation (_record_escalation) only
         fires after a criterion exhausts all 3 attempts and never compares
@@ -309,7 +309,7 @@ def _criteria_parallel_enabled(mod: dict) -> bool:
     fanning out. PCP treated it as "not opted in" and ran the whole module one
     criterion at a time.
 
-    Measured 2026-07-27, ontology-foundry: `logic-artifact-storage` has 12
+    Measured 2026-07-27, Project O: `logic-artifact-storage` has 12
     criteria and 0 declaring `depends_on`, so it ran a single agent
     sequentially. Across the project 145 of 382 criteria are in modules with
     no `depends_on` anywhere — all serial for want of a field whose absence
@@ -364,7 +364,7 @@ def _partition_wave_by_file_scope(wave_criteria: list[dict]) -> list[list[dict]]
     their own gates and the second merge dies on CONFLICT (add/add), leaving the
     build stopped and a human holding a git conflict.
 
-    Observed 2026-07-27 (signtool dogfood): pdf-document-storage A001 and A004
+    Observed 2026-07-27 (Project S dogfood): pdf-document-storage A001 and A004
     both created `src/pdf_document_storage/logging_safety.py` and both edited
     `pyproject.toml`. A004 merged; A001 could not. Flagged as a known risk on
     07-25 and left unfixed — this is that fix.
@@ -389,7 +389,7 @@ def _partition_wave_by_file_scope(wave_criteria: list[dict]) -> list[list[dict]]
     # OPTIMISTIC by default (corrected 2026-07-27, same day it shipped
     # pessimistic). The first version ran two criteria together only when both
     # declared a `target` and the targets differed -- "prove disjointness or
-    # run alone". On ontology-foundry that serialised 237 criteria that had
+    # run alone". On Project O that serialised 237 criteria that had
     # explicitly opted into parallel builds via depends_on, because only 51 of
     # 382 declare a target at all. A 15x throughput loss to prevent a collision
     # class that had bitten once.
@@ -488,7 +488,7 @@ def _seed_testmon_cache(project_root: Path, wt_path: Path) -> None:
     only the tests a change actually affects. It delivered **zero** benefit
     inside `pcp build`, because its cache is gitignored and `git worktree add`
     does not carry gitignored files across -- verified empirically on
-    ontology-foundry, where a 448K `.testmondata` sits in the main checkout and
+    Project O, where a 448K `.testmondata` sits in the main checkout and
     a fresh worktree has none.
 
     Cold testmon is not merely "no speedup", it is *slower than plain pytest*:
@@ -587,7 +587,7 @@ def _auto_commit_criterion(project_root: Path, module_name: str, criterion: dict
     separate step a human opts into later. Once a criterion has passed every
     gate, commit whatever is still sitting uncommitted so real work doesn't
     rot in a worktree if the run stops before the module finishes (the
-    2026-07-23 ontology-foundry web-server worktrees). No-op if the agent
+    2026-07-23 Project O web-server worktrees). No-op if the agent
     already committed — working tree is already clean."""
     status = subprocess.run(
         ["git", "status", "--porcelain"], capture_output=True, text=True, cwd=project_root,
@@ -599,7 +599,7 @@ def _auto_commit_criterion(project_root: Path, module_name: str, criterion: dict
     # scoped to THAT directory (TMPDIR, granted permissions) -- so every
     # parallel worktree produces a different version of the same new path.
     # Committing them makes every wave merge an add/add conflict on a scratch
-    # file (2026-07-25 ontology-foundry: three criteria that had passed all
+    # file (2026-07-25 Project O: three criteria that had passed all
     # their gates could not be merged). `pcp init`'s .gitignore covers new
     # projects; this covers every project that already had a .gitignore, which
     # init deliberately never modifies.
@@ -675,7 +675,7 @@ def _write_progress(pcp_dir: Path, module: str, criterion_id: str, attempt: int,
     """Live build progress (2026-07-24) -- .pcp/build_progress.yaml, read by
     `pcp build-status`. A backgrounded/parallel-worktree build with no way
     to see what's currently running is exactly what triggered a real
-    ontology-foundry incident (07-21: 'i want to see whats happening').
+    Project O incident (07-21: 'i want to see whats happening').
     Advisory/UX only -- a write failure here must never fail a real build.
 
     `pid` added 2026-07-30, real incident: a human hand-checking whether a
@@ -730,7 +730,7 @@ def _reopen_wave_criteria(pcp_dir: Path, wave_modules: list[dict], wave_number: 
     Reopens everything completed in the wave rather than guessing WHICH criterion
     caused it: per-criterion attribution would need each criterion's declared
     `target`, which real projects overwhelmingly do not populate (51 of 382 on
-    ontology-foundry). Reopening too much costs a rebuild; reopening too little
+    Project O). Reopening too much costs a rebuild; reopening too little
     leaves a vulnerability marked verified. Those failure directions are not
     symmetric, so the coarse choice is right.
 
@@ -741,7 +741,7 @@ def _reopen_wave_criteria(pcp_dir: Path, wave_modules: list[dict], wave_number: 
     downstream of an incomplete dependency can never pass, and every attempt
     reverts work that was merged and correct.
 
-    Measured twice on ontology-foundry. A036-A039 (agent-query-interface) were
+    Measured twice on Project O. A036-A039 (agent-query-interface) were
     reverted on five blockers, none from that build. Then on 2026-07-30,
     core-data-model A022/A030/A033/A038 -- **$30.04 spent, all four branches
     merged into main, all four marked `pending`**. They were the four most
@@ -1232,7 +1232,7 @@ _PCP_OPERATIONAL_DIRS = (".pcp/evidence/", ".pcp/transcripts/")
 # DIFFERENT version of the same new path, so merging two branches was an
 # add/add conflict. That got patched by naming those two files here.
 #
-# 2026-07-27 (signtool dogfood) was the same shape through the other door:
+# 2026-07-27 (Project S dogfood) was the same shape through the other door:
 # `.pcp/token_ledger.yaml` and friends are TRACKED, and PCP appends to them in
 # the main pcp_dir throughout the run by design. So at merge time the main
 # repo has uncommitted changes to a tracked file the incoming branch also
@@ -1347,7 +1347,7 @@ def _get_working_diff(cwd: Path, since_ref: str | None = None) -> str:
     # gates then judged nothing and returned "No diff provided; cannot assess
     # alignment" -- a guaranteed 0% BLOCK on work that plainly existed.
     #
-    # Observed live 2026-07-27, signtool dogfood, pdf-document-storage/A004:
+    # Observed live 2026-07-27, Project S dogfood, pdf-document-storage/A004:
     # scope guard listed 3 modified files in the same attempt the alignment
     # gate reported no diff at all.
     #
@@ -1409,7 +1409,7 @@ def _tdd_instruction(criterion: dict) -> str:
     so in a docstring: "Mirrors the file_exists check declared in
     .pcp/strategy/modules/agent-query-interface/acceptance.yaml."
 
-    Measured on ontology-foundry 2026-07-30: `test_interface_file_exists` and
+    Measured on Project O 2026-07-30: `test_interface_file_exists` and
     `test_feature_flag_file_exists` each appear **20 times**, once per module, ~40
     tests asserting only that a path exists. They are not free. `core-data-model`'s
     blast radius is 99% of the suite (every module depends on it), so every one of
@@ -1796,7 +1796,7 @@ def _run_test_suite_check(pcp_dir: Path, project_root: Path, ctx: dict) -> list[
 
     This was the documented design from the start but sat behind an opt-in flag
     that defaulted off, so the full suite ran every time regardless. Measured
-    2026-07-27 on ontology-foundry: 1,098 tests / ~7m46s per attempt, versus 478
+    2026-07-27 on Project O: 1,098 tests / ~7m46s per attempt, versus 478
     scoped. PCP_QA_FULL_SUITE=1 restores the old behaviour."""
     result = qa.run_test_suite(project_root, pcp_dir=pcp_dir, changed_files=ctx.get("files"))
     if result.get("scoped_to"):
@@ -2097,7 +2097,7 @@ def _gate_infrastructure_failure(check: str, exc: Exception) -> list[str]:
         )
         return []
     # Deliberately does NOT lead with the escape hatch. Reported from
-    # ontology-foundry 2026-07-27: a transient malformed-JSON response cost
+    # Project O 2026-07-27: a transient malformed-JSON response cost
     # three attempts on one criterion, and the remedy this message offered was
     # "turn the gate off" -- for the same review that had caught a real
     # path-traversal vulnerability an hour earlier. Offering "skip the check"
@@ -2638,7 +2638,7 @@ def _run_scope_check(pcp_dir: Path, mod: dict, criterion: dict, changed_files: l
     )
     # In warn mode a finding here does NOT block, so recording it as `block`
     # makes the audit trail claim something that never happened. Measured on
-    # ontology-foundry 2026-07-30: 110 of the project's 259 `block` records were
+    # Project O 2026-07-30: 110 of the project's 259 `block` records were
     # this check in warn mode -- **42.5% of every block PCP had ever recorded
     # there never blocked anything**, so any provenance or block-rate reading of
     # that project was wrong by nearly half. `advisory` already exists as a
@@ -3624,7 +3624,7 @@ def _build_one_criterion(
         # run concurrently rather than one after another. Until 2026-07-18
         # these ran strictly sequentially within one criterion even though
         # nothing here depends on another check's output -- a real dogfood
-        # finding (ontology-foundry): with 3 of these being LLM calls and the
+        # finding (Project O): with 3 of these being LLM calls and the
         # rest subprocess/network calls, sequential execution was pure wasted
         # wall-clock. The comment this replaced only justified running
         # OUTSIDE _STATE_LOCK for overlap ACROSS concurrently-building
@@ -3644,7 +3644,7 @@ def _build_one_criterion(
         # A criterion gate tests THE BUILT PRODUCT. Nothing here inspects PCP's
         # own paperwork -- declarations about how the code was decided on.
         #
-        # Measured on ontology-foundry 2026-07-27, 1,632 gate executions:
+        # Measured on Project O 2026-07-27, 1,632 gate executions:
         # 35% of them checked declarations rather than the product, and those
         # produced 108 of 187 total blocks -- 58%. Of those, 97 were the scope
         # guard reporting "agent modified N files outside the declared surface"
@@ -3687,7 +3687,7 @@ def _build_one_criterion(
                 f"[red bold]Infra anomaly suspected:[/red bold] the test-suite gate has now "
                 f"\"timed out\" on {budget.infra_signal_streak} consecutive attempts. This usually "
                 "means the environment is broken (wrong/unreachable DB, a squatted port, a hung "
-                "service), not the agent's code -- see the 2026-07-21 ontology-foundry incident. "
+                "service), not the agent's code -- see the 2026-07-21 Project O incident. "
                 "Verify the environment before trusting further gate results this run."
             )
             from pcp import escalations
@@ -3726,7 +3726,7 @@ def _build_one_criterion(
     # still leaves its worktree "for inspection" (never merged to main; only
     # a successful criterion gets merged), but real agent work must not sit
     # as raw uncommitted files that a stale worktree removal could lose —
-    # the exact ontology-foundry web-server-A013/14/15 pattern, 2026-07-23.
+    # the exact Project O web-server-A013/14/15 pattern, 2026-07-23.
     _auto_commit_criterion(project_root, mod["name"], c)
 
     if run_log_id:
@@ -4108,7 +4108,7 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
     # built again from scratch -- paying full agent cost to reproduce code that is
     # already in `main`, and risking a conflicting second implementation of it.
     #
-    # Observed live on ontology-foundry 2026-07-30: a run was rebuilding
+    # Observed live on Project O 2026-07-30: a run was rebuilding
     # query-eval-harness A001, A008 and MOD_A002 thirteen minutes and $6.27 in,
     # all three already merged. Twelve criteria across three modules were in that
     # state at the time.

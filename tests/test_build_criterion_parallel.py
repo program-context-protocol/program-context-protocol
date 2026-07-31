@@ -191,7 +191,7 @@ _GATE_PATCHES = dict(
 def test_module_without_depends_on_now_fans_out(tmp_path, monkeypatch):
     """Corrected 2026-07-27: this asserted the opposite. A module whose
     criteria declare no dependencies used to run one criterion at a time —
-    ontology-foundry's logic-artifact-storage ran 12 criteria on a single
+    Project O's logic-artifact-storage ran 12 criteria on a single
     agent for exactly this reason."""
     repo = _init_repo(tmp_path / "repo")
     pcp_dir = repo / ".pcp"
@@ -309,7 +309,7 @@ def test_opted_in_chain_dependency_still_runs_in_order(tmp_path, monkeypatch):
 def test_undeclared_criteria_fan_out_end_to_end(tmp_path, monkeypatch):
     """Two independent criteria with no declared target must still build
     concurrently. Demanding a declared `target` as proof of disjointness
-    serialised 237 opted-in ontology-foundry criteria (only 51 of 382 declare
+    serialised 237 opted-in Project O criteria (only 51 of 382 declare
     one) -- a 15x throughput loss to avoid a collision that costs one rebuild.
     Optimistic concurrency + exact conflict detection beats pessimistic
     locking when conflicts are rare."""
@@ -346,7 +346,7 @@ def test_undeclared_criteria_fan_out_end_to_end(tmp_path, monkeypatch):
 def test_module_with_no_depends_on_anywhere_still_parallelises(monkeypatch):
     """The opt-in read backwards: a module whose criteria declare NO
     dependencies is stating they are independent — the BEST case for fanning
-    out — and PCP ran it one criterion at a time. ontology-foundry's
+    out — and PCP ran it one criterion at a time. Project O's
     logic-artifact-storage has 12 criteria, 0 with depends_on, 1 agent."""
     monkeypatch.delenv("PCP_CRITERIA_SERIAL", raising=False)
     from pcp.commands.build import _criteria_parallel_enabled, _compute_criterion_waves

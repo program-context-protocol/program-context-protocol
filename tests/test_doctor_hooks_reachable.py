@@ -3,7 +3,7 @@
 `pcp init` writes commit-msg + post-commit into .git/hooks/. If core.hooksPath
 points elsewhere, git never reads that directory — the files are present,
 executable, and inert. Layer 1's commit-msg gate and the post-commit `pcp scan`
-both stop firing, so current_state.md ages silently. agentberg: generated
+both stop firing, so current_state.md ages silently. Project A: generated
 2026-07-24, then 26 more commits, never regenerated.
 """
 import subprocess

@@ -14,6 +14,12 @@ FORBIDDEN_PATTERNS = [
     r"tier25a", r"winemac-drv", r"combase-intercept", r"mounterd",
     r"NEFilterDataProvider", r"Apple Developer", r"codesigning",
     r"ganeshnallasivam",
+    # 2026-07-31 addition: a separate leak found in this same file (line
+    # ~603 at the time) named a dogfood project directly in a cost-measurement
+    # example. The original list predates that project becoming the dominant
+    # dogfood reference, which is exactly how it went uncaught.
+    r"ontology-foundry", r"agentberg", r"atacamaMDM", r"signtool",
+    r"geek-squad", r"LinkBox",
 ]
 
 

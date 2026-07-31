@@ -600,7 +600,7 @@ Prior criterion note  — 1 line: "<module>/<prev-id> done. commit: <hash>. adde
 (worktree-per-criterion, merge-then-retry-on-conflict) and this skill's own
 Workflow-based execution were two INDEPENDENT orchestration implementations of
 the same job, reinventing coordination the harness already provides natively.
-Measured cost on ontology-foundry: 5 of 5 completed `query-eval-harness`
+Measured cost on Project O: 5 of 5 completed `query-eval-harness`
 criteria collided on merge in one run, 99% of that run's spend sat on the
 conflicted criteria, two criteria were still stuck mid-retry two hours in. Root
 cause, read directly out of the colliding file: every criterion in a module
