@@ -6,7 +6,7 @@ overwrote an agent instruction file with no signature, no hash check, no
 human trigger. This command is the opposite on every axis: only runs when
 a human types it, only touches a real git checkout (refuses cleanly
 otherwise), only ever fast-forwards (never clobbers local changes), and
-reports exactly what changed -- same shape Postcar landed on for its own
+reports exactly what changed -- same shape Project P landed on for its own
 agent self-update (`git pull --ff-only`, see decision_git_pull_self_update).
 
 `--check` is the announce-only half, added for the SessionStart hook
