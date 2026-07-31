@@ -1,7 +1,7 @@
 ---
 name: pcp
 version: "1.0.0"
-description: "Program Context Protocol — full autonomous software factory. PM describes vision; PCP runs structured discovery, generates BRD, translates to modular specs, spawns up to 15 parallel build agents, runs all gates (TDD, architect-review, CI), auto-fixes failures, merges, deploys. PM only touches: vision input, visual approvals, escalations. Invoke with /pcp."
+description: "Program Context Protocol — full autonomous software factory. PM describes vision; PCP runs structured discovery, generates BRD, translates to modular specs, builds via the Workflow tool's native parallelism (pcp build-plan computes the schedule, the harness governs concurrency), runs all gates (TDD, architect-review, CI), auto-fixes failures, merges, deploys. PM only touches: vision input, visual approvals, escalations. Invoke with /pcp."
 ---
 
 # /pcp
@@ -10,7 +10,7 @@ Autonomous software factory. PM describes what to build. PCP builds it.
 
 **Three modes:**
 1. `/pcp new` — Vision workshop → BRD → spec scaffold
-2. `/pcp build` — Parallel autonomous build (up to 15 agents)
+2. `/pcp build` — Parallel autonomous build (concurrency governed by the Workflow tool, not a manual count)
 3. `/pcp status` — Project health across all projects
 
 **The contract:** PM inputs vision and approves milestones. PCP handles everything else. "Build" means deployed and verified — not written.
@@ -23,10 +23,11 @@ Autonomous software factory. PM describes what to build. PCP builds it.
 /pcp new                          # start vision workshop → BRD → .pcp/ scaffold (greenfield)
 /pcp new --from-brd <file>        # skip workshop, generate .pcp/ from existing BRD
 /pcp import "<description>"       # brownfield: graphify → clusters → draft specs → PM review
-/pcp build                        # build next wave, up to 15 parallel agents
-/pcp build --module <name>        # build one module, single agent
-/pcp build --all                  # build entire backlog, full parallel scheduling
-/pcp build --agents <n>           # override agent count (default 25, min 1)
+/pcp build                        # build next wave via pcp build-plan + Workflow tool
+/pcp build --module <name>        # build one module
+/pcp build --all                  # build entire backlog, full wave scheduling
+                                   # (no --agents flag: Workflow's own concurrency cap
+                                   #  governs how many run at once, not a manual number)
 /pcp status                       # current project: phase, %, CI, deferred queue
 /pcp status --all                 # all projects under ~/Claude-code/
 /pcp watch                        # watch Railway + GitHub Actions

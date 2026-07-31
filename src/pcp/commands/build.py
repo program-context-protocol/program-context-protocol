@@ -119,7 +119,12 @@ def _max_parallel_modules() -> int:
     3 was an arbitrary conservative guess, not measured against that ceiling.
     Kept below the top of that range since this is still the unattended CLI
     default, not an interactive session where a human is watching cost
-    accrue in real time. Override with PCP_BUILD_MAX_PARALLEL."""
+    accrue in real time. Override with PCP_BUILD_MAX_PARALLEL.
+
+    Scope note, 2026-07-30: this cap belongs to THIS headless engine only.
+    The Workflow-tool/`pcp build-plan` path (interactive sessions) relies on
+    Workflow's own native concurrency cap instead -- do not port this number
+    there, it would just be a second, disagreeing cap on the same thing."""
     return int(os.environ.get("PCP_BUILD_MAX_PARALLEL", "5"))
 
 
@@ -286,7 +291,11 @@ def _max_parallel_criteria() -> int:
     modules x criteria concurrent agents, bounded overall by
     PCP_MAX_BUILD_SESSIONS. Raise PCP_BUILD_MAX_PARALLEL_CRITERIA for a
     single-module run (`--module X`), where no module-level fan-out is
-    competing for the same database."""
+    competing for the same database.
+
+    Scope note, 2026-07-30: headless-engine-only, same as _max_parallel_modules()
+    above -- the Workflow-tool path schedules criteria via `pipeline()`/`parallel()`
+    per `pcp build-plan`'s criterion_waves and lets Workflow's own cap govern."""
     return max(1, int(os.environ.get("PCP_BUILD_MAX_PARALLEL_CRITERIA", "5")))
 
 
@@ -3992,7 +4001,16 @@ def _refresh_state(pcp_dir: Path, modules_dir: Path) -> None:
 @click.option("--yes", "yes", is_flag=True,
               help="Skip the interactive install-only approval prompt (CI/non-interactive use — opt-in, not default). Only affects criteria/modules declaring install_only; every other criterion builds exactly as before.")
 def build(module_name: str | None, project_path: str | None, yes: bool):
-    """Run autonomous AI coding loops for pending acceptance criteria."""
+    """Run autonomous AI coding loops for pending acceptance criteria.
+
+    This is the HEADLESS executor (ThreadPoolExecutor, worktree-per-criterion,
+    merge-then-retry) -- for CI, `pcp watch`'s auto-fix loop, and cron, where
+    no Claude Code session exists to hand a plan to. An interactive session
+    has a better option: `pcp build-plan` + the `/pcp` skill's Workflow-tool
+    execution (2026-07-30 redesign, see build_plan.py's module docstring) --
+    same wave computation, but the harness governs concurrency and worktree
+    isolation natively instead of this engine reinventing merge/retry. This
+    command still nudges toward that path below when it detects one."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
     except NoPCPDir as e:
@@ -4024,6 +4042,17 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
                 run_capture(pcp_dir, _self_transcript, source=f"session:{_self_session_id}", session_id=_self_session_id)
         except Exception as e:
             console.print(f"[dim]Self-capture skipped: {e}[/dim]")
+
+        # Interactive-session nudge, 2026-07-30. This engine is the headless
+        # executor (see the command docstring above) -- a session exists here,
+        # which means `pcp build-plan` + Workflow-tool execution is available
+        # and lets the harness govern concurrency instead of this engine's own
+        # merge-then-retry path. Advisory only, never blocks.
+        console.print(
+            "[yellow]Note:[/yellow] running inside an interactive session. This is the "
+            "headless build engine (CI/watch/cron). Prefer `pcp build-plan` + the `/pcp` "
+            "skill's Workflow-tool execution for interactive builds. Continuing here..."
+        )
 
     # Objective-conflict gate (CTRL-035) -- a captured business decision that
     # conflicts with objective.md/target_state.md's actual text must not sit
