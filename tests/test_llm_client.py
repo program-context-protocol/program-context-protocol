@@ -39,14 +39,14 @@ def test_call_passes_cwd_derived_from_pcp_dir(tmp_path):
     isolated test project instead."""
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=_envelope())
         llm.call("system", "user", pcp_dir=pcp_dir)
     assert mock_run.call_args.kwargs["cwd"] == pcp_dir.parent
 
 
 def test_call_cwd_none_when_no_pcp_dir_given():
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=_envelope())
         llm.call("system", "user")
     assert mock_run.call_args.kwargs["cwd"] is None
@@ -55,7 +55,7 @@ def test_call_cwd_none_when_no_pcp_dir_given():
 def test_call_json_also_passes_cwd(tmp_path):
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=_envelope('{"a": 1}'))
         result = llm.call_json("system", "user", pcp_dir=pcp_dir)
     assert mock_run.call_args.kwargs["cwd"] == pcp_dir.parent
@@ -63,7 +63,7 @@ def test_call_json_also_passes_cwd(tmp_path):
 
 
 def test_call_raises_on_missing_claude_binary(tmp_path):
-    with patch("pcp.llm.client.subprocess.run", side_effect=FileNotFoundError):
+    with patch("pcp.llm.harness.claude.subprocess.run", side_effect=FileNotFoundError):
         try:
             llm.call("system", "user")
             assert False, "expected RuntimeError"
@@ -77,7 +77,7 @@ def test_call_logs_usage_to_correct_pcp_dir(tmp_path):
     not wherever cwd ended up pointing."""
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=_envelope())
         llm.call("system", "user", model="haiku", pcp_dir=pcp_dir, command="test-call")
     ledger = (pcp_dir / "token_ledger.yaml").read_text()
@@ -89,7 +89,7 @@ def test_call_logs_usage_to_correct_pcp_dir(tmp_path):
 def test_call_with_images_uses_stream_json_flags(tmp_path):
     img = tmp_path / "shot.png"
     img.write_bytes(_PNG_BYTES)
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=_stream_envelope("looks fine"))
         text = llm.call_with_images("system", "user", [img])
     cmd = mock_run.call_args.args[0]
@@ -102,7 +102,7 @@ def test_call_with_images_uses_stream_json_flags(tmp_path):
 def test_call_with_images_sends_base64_image_content_block(tmp_path):
     img = tmp_path / "shot.png"
     img.write_bytes(_PNG_BYTES)
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=_stream_envelope())
         llm.call_with_images("system", "user", [img])
     sent = json.loads(mock_run.call_args.kwargs["input"])
@@ -118,7 +118,7 @@ def test_call_with_images_sends_two_image_blocks_for_two_paths(tmp_path):
     img2 = tmp_path / "b.png"
     img1.write_bytes(_PNG_BYTES)
     img2.write_bytes(_PNG_BYTES)
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=_stream_envelope())
         llm.call_with_images("system", "user", [img1, img2])
     sent = json.loads(mock_run.call_args.kwargs["input"])
@@ -129,7 +129,7 @@ def test_call_with_images_sends_two_image_blocks_for_two_paths(tmp_path):
 def test_call_with_image_single_image_wrapper(tmp_path):
     img = tmp_path / "shot.png"
     img.write_bytes(_PNG_BYTES)
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=_stream_envelope("ok"))
         text = llm.call_with_image("system", "user", img)
     assert text == "ok"
@@ -139,7 +139,7 @@ def test_call_with_images_raises_when_no_result_event(tmp_path):
     img = tmp_path / "shot.png"
     img.write_bytes(_PNG_BYTES)
     non_result_line = json.dumps({"type": "system", "subtype": "init"})
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=non_result_line)
         try:
             llm.call_with_images("system", "user", [img])
@@ -151,7 +151,7 @@ def test_call_with_images_raises_when_no_result_event(tmp_path):
 def test_call_json_with_images_parses_json_result(tmp_path):
     img = tmp_path / "shot.png"
     img.write_bytes(_PNG_BYTES)
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=_stream_envelope('{"overall_passed": true}'))
         parsed = llm.call_json_with_images("system", "user", [img])
     assert parsed == {"overall_passed": True}
@@ -162,7 +162,7 @@ def test_call_with_images_logs_usage(tmp_path):
     pcp_dir.mkdir()
     img = tmp_path / "shot.png"
     img.write_bytes(_PNG_BYTES)
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.claude.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=_stream_envelope())
         llm.call_with_images("system", "user", [img], pcp_dir=pcp_dir, command="test-image-call")
     ledger = (pcp_dir / "token_ledger.yaml").read_text()
@@ -268,14 +268,14 @@ def test_gate_failure_message_does_not_lead_with_the_escape_hatch():
 def test_call_json_agy_parses_plain_stdout_no_envelope():
     """agy has no --output-format json envelope the way claude does -- its
     stdout IS the answer, not a wrapper to unpack."""
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout='{"verdicts": []}', stderr="")
         result = llm.call_json_agy("system", "user")
     assert result == {"verdicts": []}
 
 
 def test_call_json_agy_strips_markdown_fences():
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout='```json\n{"a": 1}\n```', stderr="")
         result = llm.call_json_agy("system", "user")
     assert result == {"a": 1}
@@ -284,14 +284,14 @@ def test_call_json_agy_strips_markdown_fences():
 def test_call_json_agy_passes_cwd_derived_from_pcp_dir(tmp_path):
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
         llm.call_json_agy("system", "user", pcp_dir=pcp_dir)
     assert mock_run.call_args.kwargs["cwd"] == pcp_dir.parent
 
 
 def test_call_json_agy_raises_runtimeerror_on_nonzero_exit():
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="quota exceeded")
         try:
             llm.call_json_agy("system", "user")
@@ -301,7 +301,7 @@ def test_call_json_agy_raises_runtimeerror_on_nonzero_exit():
 
 
 def test_call_json_agy_raises_runtimeerror_when_binary_missing():
-    with patch("pcp.llm.client.subprocess.run", side_effect=FileNotFoundError()):
+    with patch("pcp.llm.harness.agy.subprocess.run", side_effect=FileNotFoundError()):
         try:
             llm.call_json_agy("system", "user")
             raise AssertionError("should have raised")
@@ -310,7 +310,7 @@ def test_call_json_agy_raises_runtimeerror_when_binary_missing():
 
 
 def test_call_json_agy_retries_once_on_bad_json_then_gives_up():
-    with patch("pcp.llm.client.subprocess.run") as mock_run:
+    with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="not json at all", stderr="")
         try:
             llm.call_json_agy("system", "user")

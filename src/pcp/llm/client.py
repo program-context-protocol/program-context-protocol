@@ -1,33 +1,50 @@
-"""LLM client — uses `claude -p` CLI subprocess. No API key required.
+"""LLM client — common dispatch layer over per-vendor harness implementations.
 
 Token discipline is a hard constraint, same tier as modularity (see CLAUDE.md).
 Every call site must pass an explicit `model` — judge/advisory calls route to
 Haiku by default; PCP_MODEL env always wins if a human sets it. Usage/cost is
-captured from --output-format json and logged to .pcp/token_ledger.yaml so
-spend is visible the same way coverage_score and coupling_score are.
+captured (where the harness exposes it) and logged to .pcp/token_ledger.yaml
+so spend is visible the same way coverage_score and coupling_score are.
+
+Repo split (2026-07-31): this file is the COMMON half — dispatch, retry-on-
+bad-JSON, model routing constants, none of it caring which vendor answered.
+The actual per-vendor implementations live in llm/harness/ (claude.py,
+agy.py, ...) — see that package's docstring for the contract a new harness
+implements. `_log_usage`/token-ledger writing lives in llm/ledger.py,
+independent of both this file and any harness/*.py, specifically to avoid a
+circular import between the dispatcher and the harnesses it dispatches to.
+
+Everything here re-exports what harness/claude.py and harness/agy.py define,
+so existing `from pcp.llm.client import _claude_bin` / `llm.call_with_images`
+/ patch("pcp.llm.client.call_json_with_images") call sites and tests are
+unaffected by the split — only tests that patch subprocess.run directly
+needed updating, to the module that actually owns the subprocess call now
+(llm.harness.claude / llm.harness.agy).
+
+Scope, stated honestly: this file (and the harness/ split under it) covers
+PCP's JUDGE/GENERATION calls only. It does NOT cover `pcp build`'s own
+coding-agent loop -- the part that actually writes code (commands/build.py,
+worktree-per-criterion, `--resume`-based retry) is a separate, deeper
+subprocess integration this seam does not touch. Porting THAT to a
+different harness (Codex, or promoting agy beyond its current verifier-
+only role) is real, additional work, and for agy specifically also runs
+past this repo's own CLAUDE.md scoping of agy to research/QA/analysis, not
+code-writing -- a policy question, not just a technical one, worth a human
+decision before extending it there.
 """
 
-import base64
 import json
 import os
-import subprocess
-import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-# Guards token_ledger.yaml's read-modify-write in _log_usage -- gate checks
-# in build.py's per-criterion loop that make an LLM call (architect-review,
-# gate, design-justification) now run concurrently with each other (2026-07-18,
-# Project O dogfood finding: gate stages were needlessly sequential).
-# Without this lock, two concurrent calls reading the same ledger snapshot
-# before either writes back would silently drop one call's usage record --
-# same class of race the module-level worktree comment in build.py already
-# flagged as "should overlap across concurrently-building modules" without
-# ever actually guarding this particular file.
-_LEDGER_LOCK = threading.Lock()
+from pcp.llm.harness.claude import (
+    _claude_bin, _timeout, _call_claude,
+    call_with_images, call_with_image, call_json_with_images, call_json_with_image,
+    _MEDIA_TYPES,
+)
+from pcp.llm.harness.agy import _agy_bin, _agy_timeout, _call_agy
+from pcp.llm.ledger import _LEDGER_LOCK, _log_usage
 
 JUDGE_MODEL = "haiku"
 # Model-selection strategy (reviewed and approved 2026-07-17) -- same
@@ -48,114 +65,41 @@ BUILD_MODEL = "sonnet"
 ESCALATION_MODEL = "opus"
 
 
-def _claude_bin() -> str:
-    return os.environ.get("PCP_CLAUDE_BIN", "claude")
+# ── Harness seam ────────────────────────────────────────────────────────
+# call()/call_json() below route through a per-vendor implementation chosen
+# by `harness` (default "claude", PCP_LLM_HARNESS env overrides). This is
+# the plug point for a future harness: implement _call_<name>() in a new
+# llm/harness/<name>.py with the same contract as _call_claude()/_call_agy()
+# (returns text, or (text, meta) when return_meta=True; raises RuntimeError
+# on a CLI-level failure), add it to SUPPORTED_HARNESSES and
+# _HARNESS_IMPLS, done -- call_json()'s retry-on-bad-JSON logic and every
+# judge/generation call site (kickoff/pm/gate/architect-review/build's
+# _verify_block_findings) work unchanged, they never see which harness
+# actually answered.
+
+SUPPORTED_HARNESSES = ("claude", "agy")
+_HARNESS_IMPLS = {"claude": _call_claude, "agy": _call_agy}
 
 
-def _timeout() -> int:
-    return int(os.environ.get("PCP_LLM_TIMEOUT", "300"))
-
-
-def _log_usage(pcp_dir: Path | None, command: str, model: str | None, session_id: str | None,
-               usage: dict, cost_usd: float | None) -> None:
-    if pcp_dir is None:
-        return
-    with _LEDGER_LOCK:
-        ledger_path = Path(pcp_dir) / "token_ledger.yaml"
-        entries = []
-        if ledger_path.exists():
-            data = yaml.safe_load(ledger_path.read_text()) or {}
-            entries = data.get("calls", [])
-        entries.append({
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "command": command,
-            "model": model or "default",
-            "session_id": session_id,
-            "input_tokens": usage.get("input_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0),
-            "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
-            "cache_creation_tokens": usage.get("cache_creation_input_tokens", 0),
-            "cost_usd": cost_usd,
-        })
-        ledger_path.write_text(yaml.dump({"calls": entries}, default_flow_style=False))
+def _resolve_harness(harness: str | None) -> str:
+    """PCP_LLM_HARNESS env always wins, same override precedence PCP_MODEL
+    already has for models -- a human forcing a harness for debugging
+    shouldn't need to edit every call site."""
+    h = os.environ.get("PCP_LLM_HARNESS") or harness or "claude"
+    if h not in SUPPORTED_HARNESSES:
+        raise ValueError(f"Unknown harness '{h}' -- one of {SUPPORTED_HARNESSES}.")
+    return h
 
 
 def call(system: str, user: str, model: str | None = None, pcp_dir: Path | None = None,
-          command: str = "llm.call", return_meta: bool = False) -> str | tuple[str, dict]:
-    """Run prompt through claude CLI (one-shot, no session reuse). Returns text output.
-
-    model: explicit model for this call site (e.g. JUDGE_MODEL). PCP_MODEL env overrides
-    everything if set, so a human can force a model for debugging.
-    pcp_dir/command: if given, usage+cost is appended to .pcp/token_ledger.yaml.
-    return_meta: if True, returns (text, meta) where meta has model/session_id/usage/
-    cost_usd/duration_ms — for callers building richer per-event telemetry (see telemetry.py).
-    """
-    prompt = f"{system}\n\n---\n\n{user}"
-
-    resolved_model = os.environ.get("PCP_MODEL") or model
-    cmd = [_claude_bin(), "-p", "--output-format", "json"]
-    if resolved_model:
-        cmd += ["--model", resolved_model]
-
-    # Real bug, found 2026-07-08: this call never passed cwd, so it always
-    # ran in whatever the calling PROCESS's actual OS cwd happened to be --
-    # not necessarily the target project. Harmless when the CLI is invoked
-    # from the project root (the common case), actively wrong otherwise: a
-    # test process (or any caller) with a different cwd would silently run
-    # the agent against the wrong directory. pcp_dir is already passed by
-    # every call site for token-ledger logging, so it doubles as the correct
-    # anchor here — project_root = pcp_dir.parent.
-    cwd = Path(pcp_dir).parent if pcp_dir else None
-
-    try:
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=_timeout(),
-            cwd=cwd,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"claude CLI not found at '{_claude_bin()}'. "
-            "Install Claude Code: https://claude.ai/download"
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"claude CLI timed out after {_timeout()}s")
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"claude CLI exited {result.returncode}: {result.stderr.strip()}"
-        )
-
-    try:
-        envelope = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        # Fallback: older CLI or unexpected output — treat stdout as raw text.
-        text = result.stdout.strip()
-        return (text, {}) if return_meta else text
-
-    if envelope.get("is_error"):
-        raise RuntimeError(f"claude CLI returned an error: {envelope.get('result', '')}")
-
-    _log_usage(
-        pcp_dir, command, resolved_model, envelope.get("session_id"),
-        envelope.get("usage", {}), envelope.get("total_cost_usd"),
-    )
-
-    text = (envelope.get("result") or "").strip()
-    if not return_meta:
-        return text
-
-    meta = {
-        "model": resolved_model or "default",
-        "session_id": envelope.get("session_id"),
-        "usage": envelope.get("usage", {}),
-        "cost_usd": envelope.get("total_cost_usd"),
-        "duration_ms": envelope.get("duration_ms"),
-    }
-    return text, meta
+          command: str = "llm.call", return_meta: bool = False,
+          harness: str | None = None) -> str | tuple[str, dict]:
+    """Dispatches to the resolved harness's implementation. See the module
+    docstring for the seam's scope and contract. Existing call sites that
+    never pass `harness` are unaffected -- this resolves to "claude",
+    exactly the prior hardcoded behavior."""
+    impl = _HARNESS_IMPLS[_resolve_harness(harness)]
+    return impl(system, user, model=model, pcp_dir=pcp_dir, command=command, return_meta=return_meta)
 
 
 def _json_retries() -> int:
@@ -163,8 +107,14 @@ def _json_retries() -> int:
 
 
 def call_json(system: str, user: str, model: str | None = None, pcp_dir: Path | None = None,
-              command: str = "llm.call_json", return_meta: bool = False) -> Any:
-    """Call claude CLI, parse response as JSON, retrying a malformed response.
+              command: str = "llm.call_json", return_meta: bool = False,
+              harness: str | None = None) -> Any:
+    """Call the resolved harness, parse response as JSON, retrying a
+    malformed response. Harness-agnostic by construction -- it only calls
+    call() and parses text, so this same retry logic now covers every
+    harness in SUPPORTED_HARNESSES without duplicating it per-vendor (agy's
+    JSON-retry loop used to be a separate near-identical copy of this one;
+    unified 2026-07-31).
 
     A response that is not parseable JSON is the single most retryable failure
     an LLM call has: the model answered, it just answered in the wrong shape.
@@ -190,7 +140,7 @@ def call_json(system: str, user: str, model: str | None = None, pcp_dir: Path | 
     for attempt in range(attempts):
         out = call(
             system, prompt, model=model, pcp_dir=pcp_dir, command=command,
-            return_meta=return_meta,
+            return_meta=return_meta, harness=harness,
         )
         text, meta = out if return_meta else (out, None)
         text = text.strip()
@@ -220,208 +170,14 @@ def call_json(system: str, user: str, model: str | None = None, pcp_dir: Path | 
     )
 
 
-def _agy_bin() -> str:
-    return os.environ.get("PCP_AGY_BIN", "agy")
-
-
-def _agy_timeout() -> int:
-    return int(os.environ.get("PCP_AGY_TIMEOUT", "240"))
-
-
 def call_json_agy(system: str, user: str, pcp_dir: Path | None = None,
                    command: str = "llm.call_json_agy") -> Any:
-    """Cross-vendor call (Google Gemini via the Antigravity `agy` CLI) --
-    deliberately a SEPARATE code path from call()/call_json() above, which
-    are `claude -p`-only by this module's own design (see the module
-    docstring). This is the one narrow, explicit exception: Loop 3's
-    cross-vendor architecture-review verifier leg (proposed 2026-07-22,
-    parked pending trust in LLM-judged gates recovering, resumed 2026-07-31
-    -- see memory `project-cross-vendor-verifier-deferred-2026-07-22`).
-    Callers must keep this scoped narrowly (CTRL-005/CTRL-006 BLOCK
-    findings only, per the original proposal) -- this function does not
-    enforce that scope itself, the caller does.
-
-    agy has no cost/usage JSON envelope the way `claude -p --output-format
-    json` does -- there is nothing to append to token_ledger.yaml here.
-    Honest gap, not a silently dropped one: cross-vendor spend is real but
-    untracked by PCP's own ledger until agy exposes one.
-
-    Fails the same way call_json() does: raises RuntimeError on a CLI-level
-    failure (not installed, timeout, non-zero exit), retries only on a JSON
-    parse failure, raises ValueError if still unparseable after retries."""
-    prompt = f"{system}\n\n---\n\n{user}\n\nRespond with valid JSON only. No markdown fences, no prose before or after it."
-    cwd = Path(pcp_dir).parent if pcp_dir else None
-    attempts = _json_retries() + 1
-    last_exc: Exception | None = None
-
-    for attempt in range(attempts):
-        cmd = [_agy_bin(), "-p", prompt, "--print-timeout", f"{_agy_timeout()}s"]
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=_agy_timeout() + 30, cwd=cwd,
-            )
-        except FileNotFoundError:
-            raise RuntimeError(
-                f"agy CLI not found at '{_agy_bin()}'. Install Antigravity CLI, or unset "
-                "PCP_VERIFIER_CROSS_VENDOR to skip the cross-vendor leg."
-            )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(f"agy CLI timed out after {_agy_timeout()}s")
-
-        if result.returncode != 0:
-            raise RuntimeError(f"agy CLI exited {result.returncode}: {result.stderr.strip()}")
-
-        text = result.stdout.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:-1])
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError as exc:
-            last_exc = exc
-            if attempt + 1 >= attempts:
-                break
-            prompt = (
-                prompt
-                + f"\n\nYour previous response could not be parsed as JSON: {exc}. "
-                "Respond with ONE valid JSON object and nothing else."
-            )
-            continue
-
-    raise ValueError(
-        f"{command}: agy response was not valid JSON after {attempts} attempt(s): {last_exc}"
-    )
-
-
-_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
-
-
-def call_with_images(system: str, user: str, image_paths: list[Path], model: str | None = None,
-                     pcp_dir: Path | None = None, command: str = "llm.call_with_images",
-                     return_meta: bool = False) -> str | tuple[str, dict]:
-    """Same contract as call(), but attaches one or more images as inline
-    multimodal content blocks. Plain text stdin (what call() uses) has no
-    image channel -- `claude -p` only accepts an image via `--input-format
-    stream-json` (a single JSON message with text + image content blocks),
-    which in turn requires `--output-format stream-json` (confirmed by the
-    CLI's own error: "requires --verbose" once stream-json output is set).
-    The final envelope is the last `type: "result"` line on stdout -- same
-    fields (result/session_id/usage/total_cost_usd) as --output-format json.
-
-    Enables VLM-based checks (uat.check_visual_quality) that judge a
-    rendered screenshot -- optionally against a second reference image --
-    without requiring the coding agent itself to have filesystem access to
-    the image at judge-call time. Verified live 2026-07-18: the model
-    sometimes first attempts a Read tool call on a hallucinated file path
-    for an inline image before falling back to inspecting it directly --
-    the explicit instruction below cuts that wasted turn most of the time
-    but not always; harmless either way, just an extra attempt."""
-    content = [{
-        "type": "text",
-        "text": (
-            f"{system}\n\n---\n\n{user}\n\n"
-            f"{'The image is' if len(image_paths) == 1 else 'The images are'} attached "
-            "inline in this message's content as image blocks -- not files on disk. "
-            "Do not attempt to Read a file path for them; analyze the attached "
-            "image(s) directly."
-        ),
-    }]
-    for image_path in image_paths:
-        media_type = _MEDIA_TYPES.get(image_path.suffix.lower(), "image/png")
-        data = base64.b64encode(image_path.read_bytes()).decode()
-        content.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}})
-    message = {"type": "user", "message": {"role": "user", "content": content}}
-
-    resolved_model = os.environ.get("PCP_MODEL") or model
-    cmd = [_claude_bin(), "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
-    if resolved_model:
-        cmd += ["--model", resolved_model]
-    cwd = Path(pcp_dir).parent if pcp_dir else None
-
-    try:
-        result = subprocess.run(
-            cmd, input=json.dumps(message), capture_output=True, text=True,
-            timeout=_timeout(), cwd=cwd,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"claude CLI not found at '{_claude_bin()}'. "
-            "Install Claude Code: https://claude.ai/download"
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"claude CLI timed out after {_timeout()}s")
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"claude CLI exited {result.returncode}: {result.stderr.strip()}"
-        )
-
-    envelope = None
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if obj.get("type") == "result":
-            envelope = obj
-    if envelope is None:
-        raise RuntimeError("claude CLI stream-json output had no result event")
-
-    if envelope.get("is_error"):
-        raise RuntimeError(f"claude CLI returned an error: {envelope.get('result', '')}")
-
-    _log_usage(
-        pcp_dir, command, resolved_model, envelope.get("session_id"),
-        envelope.get("usage", {}), envelope.get("total_cost_usd"),
-    )
-
-    text = (envelope.get("result") or "").strip()
-    if not return_meta:
-        return text
-
-    meta = {
-        "model": resolved_model or "default",
-        "session_id": envelope.get("session_id"),
-        "usage": envelope.get("usage", {}),
-        "cost_usd": envelope.get("total_cost_usd"),
-        "duration_ms": envelope.get("duration_ms"),
-    }
-    return text, meta
-
-
-def call_with_image(system: str, user: str, image_path: Path, model: str | None = None,
-                     pcp_dir: Path | None = None, command: str = "llm.call_with_image",
-                     return_meta: bool = False) -> str | tuple[str, dict]:
-    """Single-image convenience wrapper over call_with_images()."""
-    return call_with_images(
-        system, user, [image_path], model=model, pcp_dir=pcp_dir, command=command, return_meta=return_meta,
-    )
-
-
-def call_json_with_images(system: str, user: str, image_paths: list[Path], model: str | None = None,
-                           pcp_dir: Path | None = None, command: str = "llm.call_json_with_images",
-                           return_meta: bool = False) -> Any:
-    """call_with_images + JSON parsing, same contract as call_json()."""
-    out = call_with_images(
-        system, user + "\n\nRespond with valid JSON only. No markdown fences.",
-        image_paths, model=model, pcp_dir=pcp_dir, command=command, return_meta=return_meta,
-    )
-    text, meta = out if return_meta else (out, None)
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1])
-    parsed = json.loads(text)
-    return (parsed, meta) if return_meta else parsed
-
-
-def call_json_with_image(system: str, user: str, image_path: Path, model: str | None = None,
-                          pcp_dir: Path | None = None, command: str = "llm.call_json_with_image",
-                          return_meta: bool = False) -> Any:
-    """Single-image convenience wrapper over call_json_with_images()."""
-    return call_json_with_images(
-        system, user, [image_path], model=model, pcp_dir=pcp_dir, command=command, return_meta=return_meta,
-    )
+    """Backward-compatible convenience wrapper -- call_json(..., harness="agy").
+    Kept as a named function since Loop 3's cross-vendor verifier leg
+    (build.py's _verify_block_findings, proposed 2026-07-22, resumed
+    2026-07-31 -- see memory `project-cross-vendor-verifier-deferred-2026-07-22`)
+    already calls it by this name; existing callers/tests don't need to
+    change. Scope note: callers must keep cross-vendor use narrow
+    (CTRL-005/CTRL-006 BLOCK findings only, per the original proposal) --
+    this function does not enforce that scope itself, the caller does."""
+    return call_json(system, user, pcp_dir=pcp_dir, command=command, harness="agy")
