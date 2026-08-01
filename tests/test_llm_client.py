@@ -264,19 +264,33 @@ def test_gate_failure_message_does_not_lead_with_the_escape_hatch():
 
 
 # ── call_json_agy — Loop 3's cross-vendor leg ──
+#
+# agy DOES have a real --output-format json envelope (conversation_id,
+# status, response, usage with real token counts) -- corrected 2026-07-31.
+# The envelope wraps a `response` field, which is itself the text we asked
+# agy to respond with (JSON, per the prompt) -- so a mocked envelope's
+# stdout must be valid JSON at the OUTER layer, with `response` holding the
+# (possibly fenced) INNER JSON text call_json()'s retry loop parses.
 
-def test_call_json_agy_parses_plain_stdout_no_envelope():
-    """agy has no --output-format json envelope the way claude does -- its
-    stdout IS the answer, not a wrapper to unpack."""
+def _agy_envelope(response='{}', status="SUCCESS", conversation_id="c1", total_tokens=100):
+    return json.dumps({
+        "conversation_id": conversation_id, "status": status, "response": response,
+        "duration_seconds": 1.5,
+        "usage": {"input_tokens": total_tokens - 10, "output_tokens": 10, "thinking_tokens": 0,
+                   "cache_read_tokens": 0, "total_tokens": total_tokens},
+    })
+
+
+def test_call_json_agy_parses_envelope_and_inner_response():
     with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"verdicts": []}', stderr="")
+        mock_run.return_value = MagicMock(returncode=0, stdout=_agy_envelope('{"verdicts": []}'), stderr="")
         result = llm.call_json_agy("system", "user")
     assert result == {"verdicts": []}
 
 
-def test_call_json_agy_strips_markdown_fences():
+def test_call_json_agy_strips_markdown_fences_from_inner_response():
     with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='```json\n{"a": 1}\n```', stderr="")
+        mock_run.return_value = MagicMock(returncode=0, stdout=_agy_envelope('```json\n{"a": 1}\n```'), stderr="")
         result = llm.call_json_agy("system", "user")
     assert result == {"a": 1}
 
@@ -285,9 +299,18 @@ def test_call_json_agy_passes_cwd_derived_from_pcp_dir(tmp_path):
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()
     with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        mock_run.return_value = MagicMock(returncode=0, stdout=_agy_envelope('{}'), stderr="")
         llm.call_json_agy("system", "user", pcp_dir=pcp_dir)
     assert mock_run.call_args.kwargs["cwd"] == pcp_dir.parent
+
+
+def test_call_agy_passes_output_format_json_and_effort_flags():
+    with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=_agy_envelope('{}'), stderr="")
+        llm.call_json_agy("system", "user")
+    cmd = mock_run.call_args.args[0]
+    assert "--output-format" in cmd and "json" in cmd
+    assert "--effort" in cmd and "low" in cmd  # default effort
 
 
 def test_call_json_agy_raises_runtimeerror_on_nonzero_exit():
@@ -309,15 +332,58 @@ def test_call_json_agy_raises_runtimeerror_when_binary_missing():
             assert "agy CLI not found" in str(e)
 
 
-def test_call_json_agy_retries_once_on_bad_json_then_gives_up():
+def test_call_json_agy_raises_on_non_success_status():
     with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="not json at all", stderr="")
+        mock_run.return_value = MagicMock(returncode=0, stdout=_agy_envelope(status="FAILURE"), stderr="")
+        try:
+            llm.call_json_agy("system", "user")
+            raise AssertionError("should have raised")
+        except RuntimeError as e:
+            assert "FAILURE" in str(e)
+
+
+def test_call_json_agy_retries_once_on_bad_inner_json_then_gives_up():
+    with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=_agy_envelope("not json at all"), stderr="")
         try:
             llm.call_json_agy("system", "user")
             raise AssertionError("should have raised")
         except ValueError as e:
             assert "agy" in str(e)
     assert mock_run.call_count == 1 + client_json_retries()
+
+
+def test_call_agy_raises_when_token_ceiling_exceeded(monkeypatch):
+    monkeypatch.setenv("PCP_AGY_MAX_TOKENS_PER_CALL", "50")
+    with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=_agy_envelope(total_tokens=100), stderr="")
+        try:
+            llm.call_json_agy("system", "user")
+            raise AssertionError("should have raised")
+        except RuntimeError as e:
+            assert "100 tokens" in str(e) and "50" in str(e)
+
+
+def test_call_agy_returns_real_usage_and_conversation_id_as_session_id():
+    with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=_agy_envelope(response="ok text", conversation_id="conv-xyz", total_tokens=500), stderr="",
+        )
+        text, meta = llm.call("system", "user", pcp_dir=None, return_meta=True, harness="agy")
+    assert text == "ok text"
+    assert meta["session_id"] == "conv-xyz"
+    assert meta["usage"]["total_tokens"] == 500
+    assert meta["cost_usd"] is None  # honest -- agy exposes no pricing
+
+
+def test_call_agy_logs_real_usage_to_token_ledger(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("pcp.llm.harness.agy.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=_agy_envelope(total_tokens=321), stderr="")
+        llm.call("system", "user", pcp_dir=pcp_dir, command="test-agy-call", harness="agy")
+    ledger = (pcp_dir / "token_ledger.yaml").read_text()
+    assert "test-agy-call" in ledger
 
 
 def client_json_retries():
