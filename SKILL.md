@@ -6,14 +6,18 @@ project with PCP." Follow these steps exactly, in order.
 ## 1. Install
 
 ```bash
-cd /tmp && curl -sL -O https://github.com/program-context-protocol/program-context-protocol/releases/latest/download/program_context_protocol-latest-py3-none-any.whl
-pip install ./program_context_protocol-latest-py3-none-any.whl
+cd /tmp
+WHEEL_URL=$(curl -sS https://api.github.com/repos/program-context-protocol/program-context-protocol/releases/latest \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print([a['browser_download_url'] for a in d['assets'] if a['name'].endswith('.whl')][0])")
+curl -sL -OJ "$WHEEL_URL"
+pip install ./program_context_protocol-*.whl
 ```
 
-Every release publishes the wheel under its real versioned name (for
-anyone who wants a specific version) and this fixed `-latest-` alias, so
-this command always installs whatever was most recently released without
-needing to know the version number.
+Resolves the real wheel filename from the latest GitHub Release rather
+than assuming a fixed name — pip validates a wheel's filename structurally
+(`name-version-...`) and rejects anything that isn't a real version, so
+there's no fixed "-latest-" alias to fetch by name; this always installs
+whatever was most recently released.
 
 ## 2. Verify the environment
 
