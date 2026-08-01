@@ -26,6 +26,8 @@ NAME_DENYLIST = {
 MD_ALLOWLIST = {
     "README.md",
     "src/pcp/skill_data/pcp/SKILL.md",  # functional -- read by `pcp install-skill`, not a doc
+    "SKILL.md",  # functional -- served/read for `pcp takeover`'s remote self-install flow
+                 # (github.com/program-context-protocol org URL, not a personal reference)
 }
 
 # Files that legitimately contain denylist terms as literal data (this file,
