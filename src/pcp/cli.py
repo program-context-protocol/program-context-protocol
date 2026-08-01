@@ -45,6 +45,7 @@ from pcp.commands.narrative_lint import narrative_lint_cmd
 from pcp.commands.build_status import build_status
 from pcp.commands.verify import verify
 from pcp.commands.build_plan import build_plan_cmd
+from pcp.commands.diff_reduce import diff_reduce
 
 
 @click.group()
@@ -100,3 +101,4 @@ cli.add_command(build_status)
 cli.add_command(verify)
 cli.add_command(build_plan_cmd, name="build-plan")
 cli.add_command(self_update)
+cli.add_command(diff_reduce)

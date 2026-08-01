@@ -123,7 +123,9 @@ def _add_deterministic_coverage(result: dict, objective: str, modules: dict[str,
     return result
 
 
-def _add_coupling(result: dict, modules: dict[str, dict], project_root: Path | None = None) -> dict:
+def _add_coupling(
+    result: dict, modules: dict[str, dict], project_root: Path | None = None, pcp_dir: Path | None = None,
+) -> dict:
     """Merge deterministic coupling analysis into the LLM's coverage-only result."""
     graph = coupling_lib.build_dependency_graph(modules)
     result.update(coupling_lib.compute_coupling(graph))
@@ -136,6 +138,17 @@ def _add_coupling(result: dict, modules: dict[str, dict], project_root: Path | N
             result["hidden_coupling"] = coupling_lib.compute_change_coupling(project_root, modules)
         except Exception:
             result["hidden_coupling"] = []
+        # Persisted (2026-07-31) so build.py's run_ledger capsule can attach
+        # the REAL coupling signal to internal_deps without re-running this
+        # git-log scan per criterion -- a cheap cached read instead of
+        # recomputing an expensive project-wide subprocess inside the build
+        # hot loop. Simple last-run cache, not an audit ledger: overwritten
+        # every validate-strategy run, no hash chain.
+        if pcp_dir is not None:
+            try:
+                (pcp_dir / "hidden_coupling.json").write_text(json.dumps(result["hidden_coupling"], indent=2))
+            except Exception:
+                pass
     return result
 
 
@@ -343,7 +356,7 @@ def run_validate_strategy(pcp_dir: Path, command: str = "validate-strategy") -> 
     user_prompt = _build_user_prompt(objective, decomposition, modules)
     result = llm.call_json(SYSTEM_PROMPT, user_prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command=command)
     result = _add_deterministic_coverage(result, objective, modules)
-    result = _add_coupling(result, modules, project_root=pcp_dir.parent)
+    result = _add_coupling(result, modules, project_root=pcp_dir.parent, pcp_dir=pcp_dir)
     result = _add_tier_distribution(pcp_dir, result)
     return _add_coverage_audit(pcp_dir, result, objective, modules)
 
@@ -393,7 +406,7 @@ def validate_strategy(output_json: bool, project_path: str | None):
         sys.exit(2)
 
     result = _add_deterministic_coverage(result, objective, modules)
-    result = _add_coupling(result, modules, project_root=pcp_dir.parent)
+    result = _add_coupling(result, modules, project_root=pcp_dir.parent, pcp_dir=pcp_dir)
     result = _add_coverage_audit(pcp_dir, result, objective, modules)
 
     exit_code = _render_results(pcp_dir, result, output_json)

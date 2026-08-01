@@ -1,4 +1,5 @@
 import json
+import os
 from unittest.mock import patch
 
 from pcp.commands.build import (
@@ -7,6 +8,7 @@ from pcp.commands.build import (
 from pcp import telemetry
 
 CTX = {"attempt": 1, "module": "add", "criterion_id": "A001"}
+_REFUTED = {"verdicts": [{"index": 0, "refuted": True, "reason": "no such file in the diff"}]}
 
 
 def _qa_records(pcp_dir):
@@ -88,6 +90,107 @@ def test_verifier_defaults_to_keeping_finding_with_no_matching_verdict(tmp_path)
         )
     assert kept == ["finding with no verdict returned"]
     assert dropped == []
+
+
+# ── Loop 3: cross-vendor (agy) leg ──
+
+def test_cross_vendor_off_by_default_never_called(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("pcp.commands.build.llm.call_json", return_value=(_REFUTED, {})), \
+         patch("pcp.commands.build.llm.call_json_agy") as mock_agy:
+        _verify_block_findings(pcp_dir, "diff", ["a finding"], CTX, "architect-review", "CTRL-005")
+    mock_agy.assert_not_called()
+
+
+def test_cross_vendor_scoped_to_ctrl005_006_only(tmp_path):
+    """A gate never proposed for cross-vendor scope (e.g. a hypothetical
+    CTRL-004) must not pay for the extra call even with the flag on."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch.dict(os.environ, {"PCP_VERIFIER_CROSS_VENDOR": "1"}), \
+         patch("pcp.commands.build.llm.call_json", return_value=(_REFUTED, {})), \
+         patch("pcp.commands.build.llm.call_json_agy") as mock_agy:
+        _verify_block_findings(pcp_dir, "diff", ["a finding"], CTX, "layer1", "CTRL-004")
+    mock_agy.assert_not_called()
+
+
+def test_cross_vendor_disagreement_keeps_finding_contested(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    agy_confirms = {"verdicts": [{"index": 0, "refuted": False, "reason": "looks grounded to me"}]}
+    with patch.dict(os.environ, {"PCP_VERIFIER_CROSS_VENDOR": "1"}), \
+         patch("pcp.commands.build.llm.call_json", return_value=(_REFUTED, {})), \
+         patch("pcp.commands.build.llm.call_json_agy", return_value=agy_confirms):
+        kept, dropped = _verify_block_findings(pcp_dir, "diff", ["a finding"], CTX, "architect-review", "CTRL-005")
+    assert dropped == []
+    assert len(kept) == 1
+    assert "cross-vendor-agy" in kept[0]
+    assert "contested" in kept[0]
+
+
+def test_cross_vendor_agreement_with_primary_drops_finding(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    agy_agrees = {"verdicts": [{"index": 0, "refuted": True, "reason": "agreed, not grounded"}]}
+    with patch.dict(os.environ, {"PCP_VERIFIER_CROSS_VENDOR": "1"}), \
+         patch("pcp.commands.build.llm.call_json", return_value=(_REFUTED, {})), \
+         patch("pcp.commands.build.llm.call_json_agy", return_value=agy_agrees):
+        kept, dropped = _verify_block_findings(pcp_dir, "diff", ["a finding"], CTX, "gate", "CTRL-006")
+    assert kept == []
+    assert len(dropped) == 1
+
+
+def test_cross_vendor_unavailable_falls_back_to_escalation_model(tmp_path):
+    """agy not installed -> falls back to ESCALATION_MODEL (still same-
+    vendor, honestly weaker decorrelation, but better than nothing). The
+    fallback disagreeing keeps the finding, same as a real agy disagreement
+    would -- labeled 'same-vendor-fallback', never mislabeled as agy."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    fallback_disagrees = {"verdicts": [{"index": 0, "refuted": False, "reason": "grounded, on reflection"}]}
+    with patch.dict(os.environ, {"PCP_VERIFIER_CROSS_VENDOR": "1"}), \
+         patch("pcp.commands.build.llm.call_json",
+               side_effect=[(_REFUTED, {}), (fallback_disagrees, {})]), \
+         patch("pcp.commands.build.llm.call_json_agy", side_effect=RuntimeError("agy not installed")):
+        kept, dropped = _verify_block_findings(pcp_dir, "diff", ["a finding"], CTX, "architect-review", "CTRL-005")
+    assert dropped == []
+    assert len(kept) == 1
+    assert "same-vendor-fallback" in kept[0]
+    assert "cross-vendor-agy" not in kept[0]
+
+
+def test_cross_vendor_and_fallback_both_unavailable_skips_leg_entirely(tmp_path):
+    """agy AND the fallback model both fail -> no secondary verdict at all,
+    never raises out of _verify_block_findings, primary's refute stands
+    exactly like single-verifier behavior."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch.dict(os.environ, {"PCP_VERIFIER_CROSS_VENDOR": "1"}), \
+         patch("pcp.commands.build.llm.call_json",
+               side_effect=[(_REFUTED, {}), RuntimeError("escalation model also unavailable")]), \
+         patch("pcp.commands.build.llm.call_json_agy", side_effect=RuntimeError("agy not installed")):
+        kept, dropped = _verify_block_findings(pcp_dir, "diff", ["a finding"], CTX, "architect-review", "CTRL-005")
+    assert kept == []
+    assert len(dropped) == 1
+
+
+def test_cross_vendor_and_same_vendor_ensemble_together_need_both_to_confirm(tmp_path):
+    """Three legs on at once: primary refutes, same-vendor ensemble agrees
+    it's refuted, but agy disagrees -- ANY disagreement keeps the finding,
+    a 2-vs-1 majority does not override it."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    same_vendor_agrees = {"verdicts": [{"index": 0, "refuted": True, "reason": "agreed"}]}
+    agy_disagrees = {"verdicts": [{"index": 0, "refuted": False, "reason": "I think it's grounded"}]}
+    with patch.dict(os.environ, {"PCP_VERIFIER_ENSEMBLE": "1", "PCP_VERIFIER_CROSS_VENDOR": "1"}), \
+         patch("pcp.commands.build.llm.call_json", side_effect=[(_REFUTED, {}), (same_vendor_agrees, {})]), \
+         patch("pcp.commands.build.llm.call_json_agy", return_value=agy_disagrees):
+        kept, dropped = _verify_block_findings(pcp_dir, "diff", ["a finding"], CTX, "architect-review", "CTRL-005")
+    assert dropped == []
+    assert len(kept) == 1
+    assert "cross-vendor-agy" in kept[0]
+    assert "same-vendor-ensemble" not in kept[0]  # only the DISAGREEING verifier is named
 
 
 # ── end-to-end through the real gate call sites ──

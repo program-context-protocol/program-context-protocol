@@ -87,6 +87,10 @@ def detect_tools() -> dict:
         "npx": {"available": _which("npx") is not None, "path": _which("npx")},
         "opa": _detect_one(["opa"]),
         "temporal": _detect_one(["temporal"]),
+        # Only needed if PCP_VERIFIER_CROSS_VENDOR=1 is set (Loop 3's
+        # cross-vendor architect-review verifier leg, build.py's
+        # _verify_block_findings) -- optional, same posture as gh/opa above.
+        "agy": {"available": _which("agy") is not None, "path": _which("agy")},
     }
 
 
@@ -492,6 +496,7 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, yes: boo
     _row("npx (a11y scan via axe-core, CTRL-022)", tools["npx"])
     _row("OPA (policy/decision layer)", tools["opa"])
     _row("Temporal CLI (process layer)", tools["temporal"])
+    _row("agy (cross-vendor verifier, opt-in via PCP_VERIFIER_CROSS_VENDOR=1)", tools["agy"])
     console.print(table)
     console.print("[dim]Browser automation (for `pcp uat`): assumed available via this environment's MCP tools — not directly verified.[/dim]")
 

@@ -302,7 +302,7 @@ def _is_genuinely_new(item: str, existing: list[str]) -> bool:
 
 def loop_until_dry_breakdown(
     pcp_dir: Path, module_name: str, description: str, breakdown: list[str], max_rounds: int = 6,
-) -> list[str]:
+) -> tuple[list[str], list[dict]]:
     """Lazy-agent backlog item 10: multi-lens completeness pass over a
     module's own module_logic_breakdown, looping until 2 CONSECUTIVE rounds
     add nothing genuinely new (loop-until-dry) rather than a fixed-N-loop
@@ -315,8 +315,15 @@ def loop_until_dry_breakdown(
 
     Opt-in only (see PCP_KICKOFF_DEEP_BREAKDOWN in kickoff()) -- a real
     LLM-call loop, not something every kickoff should pay for by default
-    (Token Discipline). Returns the ENRICHED breakdown (original + new)."""
+    (Token Discipline). Returns (ENRICHED breakdown (original + new),
+    additions) where additions is [{"item": ..., "lens": ...}] for each
+    genuinely-new item -- surfaced to the human at approval time (2026-07-31)
+    instead of discarded, so "the AI found more edge cases" is reviewable
+    (which lens, which item) rather than a bare trust-me count. Overconfident
+    verbalized-completeness is a known LLM failure mode; a reason attached
+    to each item is cheaper than re-deriving one after the fact."""
     enriched = list(breakdown)
+    additions: list[dict] = []
     consecutive_dry = 0
     round_num = 0
     while consecutive_dry < 2 and round_num < max_rounds:
@@ -337,10 +344,11 @@ def loop_until_dry_breakdown(
         genuinely_new = [c for c in candidates if _is_genuinely_new(c, enriched)]
         if genuinely_new:
             enriched.extend(genuinely_new)
+            additions.extend({"item": item, "lens": lens} for item in genuinely_new)
             consecutive_dry = 0
         else:
             consecutive_dry += 1
-    return enriched
+    return enriched, additions
 
 
 def check_capability_coverage(capabilities: list[str], module_specs: dict) -> list[str]:
@@ -610,6 +618,7 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     _write_file(pcp_dir / "kb" / "domain" / "general.md", DOMAIN_KB_TEMPLATE)
 
     # Write module specs and acceptance criteria
+    breakdown_additions: dict[str, list[dict]] = {}
     for m in result.get("modules", []):
         mod_dir = pcp_dir / "strategy" / "modules" / m["name"]
         # Force version 2.0 regardless of what the LLM returned -- a fresh
@@ -624,12 +633,12 @@ def kickoff(vision_file: str, project_path: str, force: bool):
         # real extra LLM calls, so this stays behind an explicit flag rather
         # than running on every kickoff (Token Discipline).
         if os.environ.get("PCP_KICKOFF_DEEP_BREAKDOWN") == "1" and m["spec"].get("module_logic_breakdown"):
-            enriched = loop_until_dry_breakdown(
+            enriched, additions = loop_until_dry_breakdown(
                 pcp_dir, m["name"], m["spec"].get("description", ""), m["spec"]["module_logic_breakdown"],
             )
-            added = len(enriched) - len(m["spec"]["module_logic_breakdown"])
-            if added:
-                console.print(f"[dim]Completeness pass: +{added} logic-breakdown item(s) for '{m['name']}'[/dim]")
+            if additions:
+                console.print(f"[dim]Completeness pass: +{len(additions)} logic-breakdown item(s) for '{m['name']}'[/dim]")
+                breakdown_additions.setdefault(m["name"], []).extend(additions)
             m["spec"]["module_logic_breakdown"] = enriched
 
         _write_file(mod_dir / "spec.yaml", yaml.dump(m["spec"], default_flow_style=False))
@@ -709,6 +718,18 @@ def kickoff(vision_file: str, project_path: str, force: bool):
 
     if val_result:
         render_val_results(pcp_dir, val_result, output_json=False)
+
+    # Surface completeness-pass additions with their lens before approval --
+    # a human seeing a bare "+3 items" count has nothing to actually judge;
+    # naming which lens (data-model/edge-case/integration-dependency)
+    # produced each item gives a real basis to accept or push back on rather
+    # than rubber-stamping "the AI found more edge cases."
+    if breakdown_additions:
+        console.print("\n[bold]Completeness-pass additions (review before approving):[/bold]")
+        for mod_name, items in breakdown_additions.items():
+            console.print(f"  [cyan]{mod_name}[/cyan]:")
+            for a in items:
+                console.print(f"    + ({a['lens']}) {a['item']}")
 
     # PM approval step
     if click.confirm("\nApprove this strategy and proceed to alpha phase?"):

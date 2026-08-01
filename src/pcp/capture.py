@@ -25,6 +25,7 @@ from pcp import decision_log
 from pcp import objective_conflicts
 from pcp import telemetry
 from pcp.llm import client as llm
+from pcp.pcp_dir import get_modules_dir
 
 MAX_TRANSCRIPT_CHARS = 40000
 
@@ -38,12 +39,16 @@ substantive drift or elaboration, not routine implementation chatter.
 2. technical_items — implementation choices, tool/library picks, architecture tradeoffs, \
 workarounds, or root causes discussed (useful context for future coding sessions).
 
-You are given the program's existing immutable objective, and the currently active \
-business requirements already on file (so you can mark supersession instead of duplicating).
+You are given the program's existing immutable objective, the currently active \
+business requirements already on file (so you can mark supersession instead of duplicating), \
+and the list of existing module names.
 
 For each business item, if it appears to conflict with the given objective text, set \
 drift_flag to a short explanation of the conflict; otherwise null. If it clearly replaces \
-an existing active requirement (by id), set supersedes to that id; otherwise null.
+an existing active requirement (by id), set supersedes to that id; otherwise null. If the \
+item is clearly about one specific module from the given list, set module to that module's \
+exact name; if it's program-level, spans multiple modules, or you're not confident, set \
+module to null — do not guess.
 
 Skip anything that's just routine back-and-forth with no durable decision (e.g. "run the \
 tests", "looks good", debugging noise). If nothing substantive was discussed, return empty lists.
@@ -53,7 +58,7 @@ You must output ONLY valid JSON — no prose, no markdown, no code fences.
 Output schema:
 {
   "business_items": [
-    {"description": "...", "evidence": "short quoted excerpt", "supersedes": "BRD-001 or null", "drift_flag": "explanation or null"}
+    {"description": "...", "evidence": "short quoted excerpt", "supersedes": "BRD-001 or null", "drift_flag": "explanation or null", "module": "exact-module-name or null"}
   ],
   "technical_items": [
     {"category": "library-choice|architecture|workaround|root-cause|other", "summary": "...", "evidence": "short quoted excerpt"}
@@ -104,17 +109,27 @@ def _load_brd_items(pcp_dir: Path) -> list[dict]:
     return data.get("items", [])
 
 
+def _known_module_names(pcp_dir: Path) -> list[str]:
+    modules_dir = get_modules_dir(pcp_dir)
+    if not modules_dir.exists():
+        return []
+    return sorted(p.name for p in modules_dir.iterdir() if p.is_dir())
+
+
 def classify_transcript(pcp_dir: Path, conversation_text: str, source: str) -> dict:
     """Single Haiku call classifying conversation_text. Returns
     {"business_items": [...], "technical_items": [...]}."""
     objective = (pcp_dir / "objective.md").read_text() if (pcp_dir / "objective.md").exists() else ""
     active_items = [i for i in _load_brd_items(pcp_dir) if i.get("status") == "active"]
     active_summary = "\n".join(f"- [{i['id']}] {i['description']}" for i in active_items) or "(none yet)"
+    known_modules = _known_module_names(pcp_dir)
+    modules_summary = ", ".join(known_modules) if known_modules else "(none yet)"
 
     user_prompt = "\n\n".join([
         f"## Source\n{source}",
         f"## Program Objective (immutable)\n{objective}",
         f"## Currently Active Business Requirements\n{active_summary}",
+        f"## Existing Module Names\n{modules_summary}",
         f"## Conversation Transcript\n{conversation_text}",
     ])
     return llm.call_json(SYSTEM_PROMPT, user_prompt, model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command="capture-classify")
@@ -190,6 +205,7 @@ def apply_business_items(pcp_dir: Path, items: list[dict], source: str) -> Path:
     by_id = {i["id"]: i for i in existing}
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     seen_active = {_normalize_desc(i["description"]) for i in existing if i.get("status") == "active"}
+    known_modules = set(_known_module_names(pcp_dir))
 
     for item in items:
         desc_key = _normalize_desc(item["description"])
@@ -202,6 +218,11 @@ def apply_business_items(pcp_dir: Path, items: list[dict], source: str) -> Path:
             by_id[supersedes]["superseded_by"] = new_id
             by_id[supersedes]["last_updated"] = now
         drift_flag = item.get("drift_flag")
+        # Deterministic guard, not trust-the-classifier: a hallucinated or
+        # stale module name (e.g. from a since-renamed module) is worse than
+        # no link at all, so only a name that's REAL right now gets stored.
+        claimed_module = item.get("module")
+        module = claimed_module if claimed_module in known_modules else None
         new_entry = {
             "id": new_id,
             "description": item["description"],
@@ -210,6 +231,7 @@ def apply_business_items(pcp_dir: Path, items: list[dict], source: str) -> Path:
             "first_seen": now,
             "last_updated": now,
             "source": source,
+            "module": module,
             "drift_flag": drift_flag,
             # Stamped only when flagged -- this is the "proof of edit" hash
             # `pcp build`'s objective-conflict gate compares against

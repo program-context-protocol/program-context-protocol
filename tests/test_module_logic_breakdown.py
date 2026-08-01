@@ -55,9 +55,10 @@ def test_loop_until_dry_stops_after_two_consecutive_dry_rounds(tmp_path):
         {"new_items": []},
     ]
     with patch("pcp.commands.kickoff.llm.call_json", side_effect=responses):
-        result = loop_until_dry_breakdown(pcp_dir, "billing", "handles billing", ["invoice generation"])
+        result, additions = loop_until_dry_breakdown(pcp_dir, "billing", "handles billing", ["invoice generation"])
     assert "rate limiting per user" in result
     assert len(result) == 2
+    assert additions == [{"item": "rate limiting per user", "lens": "data-model"}]
 
 
 def test_loop_until_dry_respects_max_rounds_cap(tmp_path):
@@ -80,17 +81,20 @@ def test_loop_until_dry_respects_max_rounds_cap(tmp_path):
         return {"new_items": [item]}
 
     with patch("pcp.commands.kickoff.llm.call_json", side_effect=_always_new):
-        result = loop_until_dry_breakdown(pcp_dir, "billing", "handles billing", [], max_rounds=4)
+        result, additions = loop_until_dry_breakdown(pcp_dir, "billing", "handles billing", [], max_rounds=4)
     assert call_count[0] == 4
     assert len(result) == 4
+    assert len(additions) == 4
+    assert [a["lens"] for a in additions] == ["data-model", "edge-case", "integration-dependency", "data-model"]
 
 
 def test_loop_until_dry_breaks_cleanly_on_llm_error(tmp_path):
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()
     with patch("pcp.commands.kickoff.llm.call_json", side_effect=RuntimeError("timeout")):
-        result = loop_until_dry_breakdown(pcp_dir, "billing", "handles billing", ["existing item"])
+        result, additions = loop_until_dry_breakdown(pcp_dir, "billing", "handles billing", ["existing item"])
     assert result == ["existing item"]
+    assert additions == []
 
 
 # ── CTRL-031: built-code verification (post-build, wave-merge) ──

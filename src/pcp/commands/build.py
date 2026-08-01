@@ -1219,6 +1219,10 @@ _PCP_OPERATIONAL_PATHS = (
     # written, which is the point: the rule is not self-enforcing, so
     # test_no_unregistered_pcp_runtime_writer() now checks it mechanically.
     ".pcp/run_ledger.jsonl",
+    # hidden_coupling.json — written by validate_strategy.py's _add_coupling
+    # (cached git co-change result) and read by build.py's run_log wiring at
+    # start_run time. Registered at introduction (2026-07-31), same rule.
+    ".pcp/hidden_coupling.json",
 )
 _PCP_OPERATIONAL_DIRS = (".pcp/evidence/", ".pcp/transcripts/")
 
@@ -1706,6 +1710,7 @@ def _qa_record(
             pcp_dir,
             cycle="qa", cycle_number=ctx["attempt"], check=check, control_id=control_id,
             module=ctx["module"], submodule=ctx.get("submodule"), criterion_id=ctx["criterion_id"],
+            run_id=ctx.get("run_id"),
             files=files or ctx.get("files") or [],
             result=result, errors=errors, error_count=len(errors), evidence_path=evidence_path,
             model=(meta or {}).get("model"), session_id=(meta or {}).get("session_id"),
@@ -1975,22 +1980,68 @@ def _verify_block_findings(
     # keeps the finding, tagged, so the retry agent (and telemetry) see that
     # verification was contested. PCP_VERIFIER_ENSEMBLE=1 to enable — one
     # extra call per check, only on BLOCK findings.
-    verdicts2: dict = {}
+    confirm_system = (
+        "You are a supportive verifier for code-review findings: for each GIVEN finding, "
+        "try to CONFIRM it against the diff. Mark refuted=true only if you find clear "
+        "evidence the finding is wrong or refers to code not present."
+    )
+    secondary_verdicts: list[tuple[str, dict]] = []
+
     if os.environ.get("PCP_VERIFIER_ENSEMBLE") == "1":
-        confirm_system = (
-            "You are a supportive verifier for code-review findings: for each GIVEN finding, "
-            "try to CONFIRM it against the diff. Mark refuted=true only if you find clear "
-            "evidence the finding is wrong or refers to code not present."
-        )
         try:
             res2, _ = llm.call_json(
                 confirm_system, prompt, model=verifier_model, pcp_dir=pcp_dir,
                 command=f"build-{check}-verify2", return_meta=True,
             )
-            verdicts2 = {v.get("index"): v for v in res2.get("verdicts", []) if isinstance(v, dict)}
+            secondary_verdicts.append(
+                ("same-vendor-ensemble", {v.get("index"): v for v in res2.get("verdicts", []) if isinstance(v, dict)})
+            )
         except Exception:
-            verdicts2 = {}
+            pass
 
+    # Cross-vendor leg (Loop 3, resumed 2026-07-31 -- see
+    # call_json_agy's docstring for the deferral history). Deliberately
+    # scoped to CTRL-005/CTRL-006 only, matching the original 2026-07-22
+    # proposal's Token Discipline boundary -- these are the rare,
+    # high-blast-radius BLOCK findings, not every gate call. Same INVERTED
+    # framing as the same-vendor ensemble leg, decorrelated by vendor this
+    # time instead of just prompt. A failed/unavailable agy call is treated
+    # exactly like a failed same-vendor ensemble call below -- it does not
+    # protect a finding by itself, it just isn't counted as a vote either
+    # way (see the merge loop's comment).
+    if os.environ.get("PCP_VERIFIER_CROSS_VENDOR") == "1" and control_id in ("CTRL-005", "CTRL-006"):
+        try:
+            res3 = llm.call_json_agy(confirm_system, prompt, pcp_dir=pcp_dir, command=f"build-{check}-verify-crossvendor")
+            secondary_verdicts.append(
+                ("cross-vendor-agy", {v.get("index"): v for v in res3.get("verdicts", []) if isinstance(v, dict)})
+            )
+        except Exception as e:
+            # agy not installed / quota / network -- degrade, don't just
+            # drop the leg outright. ESCALATION_MODEL (Opus) is still
+            # same-vendor, so this is honestly a WEAKER decorrelation than
+            # real cross-vendor -- tagged "fallback", never mislabeled as
+            # "cross-vendor-agy", so a human reading a contested finding
+            # can tell which kind of second opinion it actually got.
+            console.print(f"[dim]{check} cross-vendor verifier (agy) unavailable ({e}) — falling back to {llm.ESCALATION_MODEL}.[/dim]")
+            try:
+                res3b, _ = llm.call_json(
+                    confirm_system, prompt, model=llm.ESCALATION_MODEL, pcp_dir=pcp_dir,
+                    command=f"build-{check}-verify-crossvendor-fallback", return_meta=True,
+                )
+                secondary_verdicts.append(
+                    ("same-vendor-fallback", {v.get("index"): v for v in res3b.get("verdicts", []) if isinstance(v, dict)})
+                )
+            except Exception as e2:
+                console.print(f"[dim]{check} fallback verifier also unavailable ({e2}) — skipping the cross-vendor leg entirely.[/dim]")
+
+    # Merge: a finding is dropped only when the primary verifier refutes it
+    # AND every secondary verifier that actually returned a verdict for it
+    # also refutes it. Any secondary verifier disagreeing (or simply not
+    # having run) keeps the finding, tagged with which verifier(s)
+    # disagreed -- a second (or third) opinion can only ADD signal here,
+    # never silently override the primary on its own. With zero secondary
+    # verifiers enabled this reduces to exactly the original single-
+    # verifier behavior.
     kept: list[str] = []
     dropped: list[str] = list(pre_dropped)
     for i, f in enumerate(findings):
@@ -1999,9 +2050,12 @@ def _verify_block_findings(
         if not refuted1:
             kept.append(f)
             continue
-        v2 = verdicts2.get(i)
-        if v2 is not None and not v2.get("refuted"):
-            kept.append(f"{f}  [verifier disagreement — kept, contested]")
+        if not secondary_verdicts:
+            dropped.append(f"{f}  [dropped by verifier: {(v or {}).get('reason', '(no reason given)')}]")
+            continue
+        disagreeing = [label for label, vd in secondary_verdicts if (vd.get(i) is not None and not vd[i].get("refuted"))]
+        if disagreeing:
+            kept.append(f"{f}  [verifier disagreement ({', '.join(disagreeing)}) — kept, contested]")
         else:
             dropped.append(f"{f}  [dropped by verifier: {(v or {}).get('reason', '(no reason given)')}]")
 
@@ -3385,7 +3439,7 @@ def _run_install_only(
 def _build_one_criterion(
     pcp_dir: Path, project_root: Path, mod: dict, c: dict,
     build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
-    yes: bool = False,
+    yes: bool = False, module_wave_number: int | None = None, criterion_wave_number: int | None = None,
 ) -> tuple[bool, list[str]]:
     """Runs the up-to-3-attempt loop for ONE criterion. `project_root` is
     where the coding agent actually runs and where gates are evaluated —
@@ -3428,10 +3482,25 @@ def _build_one_criterion(
     run_log_id = None
     run_log_tokens = {"input": 0, "output": 0, "cache_read": 0, "cost": 0.0}
     run_log_last_checks: list[str] = []
+    changed_files: list[str] = []
     try:
+        wave_for_capsule = criterion_wave_number if criterion_wave_number is not None else module_wave_number
+        internal_deps_real: list[str] = []
+        hc_path = pcp_dir / "hidden_coupling.json"
+        if hc_path.exists():
+            try:
+                for pair in json.loads(hc_path.read_text()):
+                    pair_modules = pair.get("modules") or []
+                    if mod["name"] in pair_modules:
+                        internal_deps_real.extend(m for m in pair_modules if m != mod["name"])
+            except Exception:
+                pass
         run_log_id = run_log.start_run(
             pcp_dir, module=mod["name"], feature=f"{c['id']}: {c.get('description', '')}",
             run_type="dev", actor="pcp-build-agent", model=build_model,
+            criterion_id=c["id"], wave_number=wave_for_capsule,
+            logic_tier=c.get("logic_tier"), build_vs_buy=(c.get("build_vs_buy") or {}).get("decision"),
+            internal_deps_declared=c.get("depends_on") or [], internal_deps_real=internal_deps_real,
         )
     except Exception as e:
         console.print(f"[dim]run-log start skipped: {e}[/dim]")
@@ -3443,7 +3512,7 @@ def _build_one_criterion(
     with _STATE_LOCK:
         telemetry.record(
             pcp_dir, cycle="qa", cycle_number=0, check="complexity-route", control_id=None,
-            module=mod["name"], submodule=None, criterion_id=c["id"], files=[],
+            module=mod["name"], submodule=None, criterion_id=c["id"], run_id=run_log_id, files=[],
             result="pass",
             errors=[f"would_route_to_escalation_model={route_up} active={routing_active} signal={route_signal}"],
             error_count=0,
@@ -3595,7 +3664,7 @@ def _build_one_criterion(
             telemetry.record(
                 pcp_dir,
                 cycle="build", cycle_number=attempt,
-                module=mod["name"], submodule=None, criterion_id=c["id"],
+                module=mod["name"], submodule=None, criterion_id=c["id"], run_id=run_log_id,
                 files=changed_files, languages=telemetry.infer_languages(changed_files),
                 lines_added=lines_added, lines_removed=lines_removed,
                 model=agent_usage.get("model"), session_id=agent_usage.get("session_id"),
@@ -3639,7 +3708,7 @@ def _build_one_criterion(
         ctx = {
             "module": mod["name"], "submodule": None, "criterion_id": c["id"],
             "criterion_description": c.get("description", ""),
-            "attempt": attempt, "files": changed_files,
+            "attempt": attempt, "files": changed_files, "run_id": run_log_id,
         }
         # A criterion gate tests THE BUILT PRODUCT. Nothing here inspects PCP's
         # own paperwork -- declarations about how the code was decided on.
@@ -3731,6 +3800,11 @@ def _build_one_criterion(
 
     if run_log_id:
         try:
+            external_deps: set[str] = set()
+            for f in changed_files:
+                full_path = project_root / f
+                if full_path.exists() and full_path.is_file():
+                    external_deps |= _external_python_imports(full_path, project_root)
             entry = run_log.end_run(
                 pcp_dir, run_log_id, result="success" if success else "failure",
                 model=build_model,
@@ -3740,7 +3814,7 @@ def _build_one_criterion(
                 tests_passed=(success if "tests" in run_log_last_checks else None),
                 real_gates_passed=[k for k in run_log_last_checks if k in run_log._DETERMINISTIC_CHECKS],
                 llm_judged_gates_passed=[k for k in run_log_last_checks if k in run_log._LLM_JUDGED_CHECKS],
-                self_reported_usage=False,
+                self_reported_usage=False, external_deps=sorted(external_deps),
             )
             if entry["anomaly_flags"]:
                 console.print(f"[yellow]run-log anomalies ({mod['name']}/{c['id']}):[/yellow] " + "; ".join(entry["anomaly_flags"]))
@@ -3776,7 +3850,7 @@ def _mark_criterion_complete(mod: dict, criterion_id: str, verified_by: str = "p
 def _build_module_worker(
     pcp_dir: Path, mod: dict, project_root: Path,
     build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
-    yes: bool = False,
+    yes: bool = False, module_wave_number: int | None = None,
 ) -> dict:
     # A malformed spec must fail THIS module, not the run. On 2026-07-27 a build
     # agent hand-edited an acceptance.yaml into invalid YAML and the raw
@@ -3785,6 +3859,7 @@ def _build_module_worker(
     try:
         return _build_module_worker_inner(
             pcp_dir, mod, project_root, build_model, build_model_explicit, budget, yes,
+            module_wave_number=module_wave_number,
         )
     except MalformedSpecError as exc:
         console.print(f"[red]✗ Module '{mod['name']}' has an unreadable spec:[/red] {exc}")
@@ -3795,7 +3870,7 @@ def _build_module_worker(
 def _build_module_worker_inner(
     pcp_dir: Path, mod: dict, project_root: Path,
     build_model: str | None, build_model_explicit: bool, budget: "_BuildBudget",
-    yes: bool = False,
+    yes: bool = False, module_wave_number: int | None = None,
 ) -> dict:
     """Runs all of one module's pending criteria inside `project_root` (its
     own worktree when building in parallel across modules). Stops at the
@@ -3833,7 +3908,10 @@ def _build_module_worker_inner(
     if not _criteria_parallel_enabled(mod):
         for c in mod["pending_criteria"]:
             console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
-            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget, yes)
+            success, block_findings = _build_one_criterion(
+                pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget, yes,
+                module_wave_number=module_wave_number,
+            )
 
             if success:
                 console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
@@ -3867,7 +3945,10 @@ def _build_module_worker_inner(
         if len(wave_criteria) == 1:
             c = wave_criteria[0]
             console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
-            success, block_findings = _build_one_criterion(pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget, yes)
+            success, block_findings = _build_one_criterion(
+                pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget, yes,
+                module_wave_number=module_wave_number, criterion_wave_number=wave_number,
+            )
             if success:
                 console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
                 _mark_criterion_complete(mod, c["id"])
@@ -3893,6 +3974,7 @@ def _build_module_worker_inner(
             futures = {
                 executor.submit(
                     _build_one_criterion, pcp_dir, worktrees[c["id"]], mod, c, build_model, build_model_explicit, budget, yes,
+                    module_wave_number, wave_number,
                 ): c["id"]
                 for c in wave_criteria
             }
@@ -3942,6 +4024,7 @@ def _build_module_worker_inner(
                     retry_wt = _setup_worktree(project_root, units[cid])
                     retry_ok, retry_findings = _build_one_criterion(
                         pcp_dir, retry_wt, mod, c, build_model, build_model_explicit, budget, yes,
+                        module_wave_number=module_wave_number, criterion_wave_number=wave_number,
                     )
                     remerged = False
                     if retry_ok:
@@ -4231,7 +4314,7 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
             # Single module (or parallelism disabled) — run directly against
             # the main project root, no worktree machinery needed at all.
             for mod in wave_modules:
-                result = _build_module_worker(pcp_dir, mod, project_root, build_model, build_model_explicit, budget, yes)
+                result = _build_module_worker(pcp_dir, mod, project_root, build_model, build_model_explicit, budget, yes, module_wave_number=wave_number)
                 if not result["success"]:
                     console.print("[bold red]Build execution stopped. Please resolve findings manually.[/bold red]")
                     sys.exit(1)
@@ -4247,6 +4330,7 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
                     futures = {
                         executor.submit(
                             _build_module_worker, pcp_dir, mod, worktrees[mod["name"]], build_model, build_model_explicit, budget, yes,
+                            wave_number,
                         ): mod["name"]
                         for mod in wave_modules
                     }

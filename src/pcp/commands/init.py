@@ -828,6 +828,7 @@ venv/
 .pcp/coverage_audit.jsonl
 .pcp/build_progress.yaml
 .pcp/run_ledger.jsonl
+.pcp/hidden_coupling.json
 .pcp/notify_heartbeat.yaml
 .pcp/escalations.yaml
 .pcp/prune_log.yaml

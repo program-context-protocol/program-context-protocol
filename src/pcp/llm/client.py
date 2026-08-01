@@ -220,6 +220,79 @@ def call_json(system: str, user: str, model: str | None = None, pcp_dir: Path | 
     )
 
 
+def _agy_bin() -> str:
+    return os.environ.get("PCP_AGY_BIN", "agy")
+
+
+def _agy_timeout() -> int:
+    return int(os.environ.get("PCP_AGY_TIMEOUT", "240"))
+
+
+def call_json_agy(system: str, user: str, pcp_dir: Path | None = None,
+                   command: str = "llm.call_json_agy") -> Any:
+    """Cross-vendor call (Google Gemini via the Antigravity `agy` CLI) --
+    deliberately a SEPARATE code path from call()/call_json() above, which
+    are `claude -p`-only by this module's own design (see the module
+    docstring). This is the one narrow, explicit exception: Loop 3's
+    cross-vendor architecture-review verifier leg (proposed 2026-07-22,
+    parked pending trust in LLM-judged gates recovering, resumed 2026-07-31
+    -- see memory `project-cross-vendor-verifier-deferred-2026-07-22`).
+    Callers must keep this scoped narrowly (CTRL-005/CTRL-006 BLOCK
+    findings only, per the original proposal) -- this function does not
+    enforce that scope itself, the caller does.
+
+    agy has no cost/usage JSON envelope the way `claude -p --output-format
+    json` does -- there is nothing to append to token_ledger.yaml here.
+    Honest gap, not a silently dropped one: cross-vendor spend is real but
+    untracked by PCP's own ledger until agy exposes one.
+
+    Fails the same way call_json() does: raises RuntimeError on a CLI-level
+    failure (not installed, timeout, non-zero exit), retries only on a JSON
+    parse failure, raises ValueError if still unparseable after retries."""
+    prompt = f"{system}\n\n---\n\n{user}\n\nRespond with valid JSON only. No markdown fences, no prose before or after it."
+    cwd = Path(pcp_dir).parent if pcp_dir else None
+    attempts = _json_retries() + 1
+    last_exc: Exception | None = None
+
+    for attempt in range(attempts):
+        cmd = [_agy_bin(), "-p", prompt, "--print-timeout", f"{_agy_timeout()}s"]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=_agy_timeout() + 30, cwd=cwd,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"agy CLI not found at '{_agy_bin()}'. Install Antigravity CLI, or unset "
+                "PCP_VERIFIER_CROSS_VENDOR to skip the cross-vendor leg."
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"agy CLI timed out after {_agy_timeout()}s")
+
+        if result.returncode != 0:
+            raise RuntimeError(f"agy CLI exited {result.returncode}: {result.stderr.strip()}")
+
+        text = result.stdout.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1])
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                break
+            prompt = (
+                prompt
+                + f"\n\nYour previous response could not be parsed as JSON: {exc}. "
+                "Respond with ONE valid JSON object and nothing else."
+            )
+            continue
+
+    raise ValueError(
+        f"{command}: agy response was not valid JSON after {attempts} attempt(s): {last_exc}"
+    )
+
+
 _MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
 

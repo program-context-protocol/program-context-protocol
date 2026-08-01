@@ -92,8 +92,21 @@ def _append(pcp_dir: Path, fields: dict) -> dict:
 def start_run(
     pcp_dir: Path, *, module: str, feature: str, run_type: str, actor: str,
     business_objective: str | None = None, model: str | None = None,
+    criterion_id: str | None = None, wave_number: int | None = None,
+    logic_tier: str | None = None, build_vs_buy: str | None = None,
+    internal_deps_declared: list[str] | None = None, internal_deps_real: list[str] | None = None,
 ) -> str:
-    """PRE record. Returns run_id -- pass it to end_run() to close the bracket."""
+    """PRE record. Returns run_id -- pass it to end_run() to close the bracket.
+
+    criterion_id/wave_number/logic_tier/build_vs_buy/internal_deps_declared
+    (2026-07-31): the "build capsule" fields -- BRD/module/submodule/wave/
+    scope/deps/completed/tested requested as a time-series record of what
+    got built. This ledger already had module/feature/tests/commit/cost/
+    objective_hash; these fill in the remaining self-declared fields at the
+    point they're known (kickoff/pm time), not recomputed later.
+    internal_deps_declared is exactly that -- DECLARED, not verified against
+    real coupling (see validate_strategy.py's hidden_coupling for the
+    actual-usage signal; the declared graph is known to drift from it)."""
     project_root = Path(pcp_dir).parent
     run_id = str(uuid.uuid4())
     obj_text = business_objective
@@ -105,6 +118,19 @@ def start_run(
         "business_objective": obj_text, "objective_hash": objective_hash(Path(pcp_dir)),
         "module": module, "feature": feature, "run_type": run_type, "actor": actor,
         "start_time": _now(), "model": model, "pre_commit_sha": _git_head(project_root),
+        "criterion_id": criterion_id, "wave_number": wave_number,
+        "logic_tier": logic_tier, "build_vs_buy": build_vs_buy,
+        "internal_deps_declared": internal_deps_declared or [],
+        # internal_deps_real: actual git co-change coupling (coupling.py's
+        # compute_change_coupling, cached via validate-strategy's last run in
+        # hidden_coupling.json) -- distinct from internal_deps_declared,
+        # which is self-reported and known to drift from what's real in this
+        # codebase (see the standards_interop finding: 69% of blocking test
+        # failures in one dogfood project came from modules with ZERO
+        # declared dependency on it). Empty if validate-strategy has never
+        # run, or this module has no confirmed hidden coupling -- absence
+        # here means "not yet measured or none found", not "verified zero".
+        "internal_deps_real": internal_deps_real or [],
     })
     return run_id
 
@@ -116,6 +142,7 @@ def end_run(
     tests_ran: bool | None = None, tests_passed: bool | None = None,
     real_gates_passed: list[str] | None = None, llm_judged_gates_passed: list[str] | None = None,
     note: str | None = None, self_reported_usage: bool = False,
+    external_deps: list[str] | None = None,
 ) -> dict:
     """POST record, same run_id. anomaly_flags are computed here,
     deterministically, from git state + the PRE record -- never from an LLM
@@ -157,6 +184,7 @@ def end_run(
         "token_input": token_input, "token_output": token_output, "token_cache_read": token_cache_read,
         "cost_usd": cost_usd, "self_reported_usage": self_reported_usage,
         "result": result, "proof_of_delivery": proof, "note": note, "anomaly_flags": anomalies,
+        "external_deps": external_deps or [],
     }
     if pre is not None:
         try:

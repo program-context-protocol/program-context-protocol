@@ -261,3 +261,65 @@ def test_gate_failure_message_does_not_lead_with_the_escape_hatch():
     assert msg.index("re-run") < msg.index("PCP_ALLOW_UNVERIFIED_GATES"), \
         "mechanical causes must come before the opt-out"
     assert "catches real defects" in msg, "the opt-out must state what it costs"
+
+
+# ── call_json_agy — Loop 3's cross-vendor leg ──
+
+def test_call_json_agy_parses_plain_stdout_no_envelope():
+    """agy has no --output-format json envelope the way claude does -- its
+    stdout IS the answer, not a wrapper to unpack."""
+    with patch("pcp.llm.client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"verdicts": []}', stderr="")
+        result = llm.call_json_agy("system", "user")
+    assert result == {"verdicts": []}
+
+
+def test_call_json_agy_strips_markdown_fences():
+    with patch("pcp.llm.client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout='```json\n{"a": 1}\n```', stderr="")
+        result = llm.call_json_agy("system", "user")
+    assert result == {"a": 1}
+
+
+def test_call_json_agy_passes_cwd_derived_from_pcp_dir(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("pcp.llm.client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        llm.call_json_agy("system", "user", pcp_dir=pcp_dir)
+    assert mock_run.call_args.kwargs["cwd"] == pcp_dir.parent
+
+
+def test_call_json_agy_raises_runtimeerror_on_nonzero_exit():
+    with patch("pcp.llm.client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="quota exceeded")
+        try:
+            llm.call_json_agy("system", "user")
+            raise AssertionError("should have raised")
+        except RuntimeError as e:
+            assert "quota exceeded" in str(e)
+
+
+def test_call_json_agy_raises_runtimeerror_when_binary_missing():
+    with patch("pcp.llm.client.subprocess.run", side_effect=FileNotFoundError()):
+        try:
+            llm.call_json_agy("system", "user")
+            raise AssertionError("should have raised")
+        except RuntimeError as e:
+            assert "agy CLI not found" in str(e)
+
+
+def test_call_json_agy_retries_once_on_bad_json_then_gives_up():
+    with patch("pcp.llm.client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="not json at all", stderr="")
+        try:
+            llm.call_json_agy("system", "user")
+            raise AssertionError("should have raised")
+        except ValueError as e:
+            assert "agy" in str(e)
+    assert mock_run.call_count == 1 + client_json_retries()
+
+
+def client_json_retries():
+    from pcp.llm.client import _json_retries
+    return _json_retries()
