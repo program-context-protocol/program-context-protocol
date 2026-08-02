@@ -43,7 +43,7 @@ def test_detect_tools_reports_all_categories():
     assert tools["test_runner"]["available"] is False
     assert set(tools.keys()) == {
         "git", "claude", "gh", "test_runner", "lint", "sast", "coverage",
-        "audit", "slack_notify", "opa", "temporal", "npx", "agy",
+        "audit", "ast_grep", "jscpd", "slack_notify", "opa", "temporal", "npx", "agy",
     }
 
 

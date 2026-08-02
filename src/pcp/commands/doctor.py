@@ -85,6 +85,8 @@ def detect_tools() -> dict:
         "sast": _detect_one(["semgrep"]),
         "coverage": _detect_one(["coverage"]),
         "audit": _detect_one(["vulture", "knip"]),
+        "ast_grep": {"available": _which("ast-grep") is not None, "path": _which("ast-grep")},
+        "jscpd": {"available": _which("jscpd") is not None, "path": _which("jscpd")},
         "slack_notify": {"available": _which("slack-notify") is not None, "path": _which("slack-notify")},
         "npx": {"available": _which("npx") is not None, "path": _which("npx")},
         "opa": _detect_one(["opa"]),
@@ -704,6 +706,8 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, fix_work
     _row("SAST/secret-scan", tools["sast"])
     _row("Coverage", tools["coverage"])
     _row("Dead-code audit", tools["audit"])
+    _row("Swallowed-exception scan (ast-grep, in `pcp audit`)", tools["ast_grep"])
+    _row("Duplication scan (jscpd, in `pcp audit`)", tools["jscpd"])
     _row("Slack notifications", tools["slack_notify"])
     _row("npx (a11y scan via axe-core, CTRL-022)", tools["npx"])
     _row("OPA (policy/decision layer)", tools["opa"])
