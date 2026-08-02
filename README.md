@@ -81,13 +81,21 @@ whether the agent happened to think of it that day.
 
 ## Install
 
+Requires `git` and the `claude` CLI on `PATH`.
+
 ```
-pip install -e .
+pip install program-context-protocol
 pcp init
 ```
 
-Requires `git` and the `claude` CLI on `PATH`. Run `pcp doctor` to check
-your environment.
+Run `pcp doctor` to check your environment. To develop PCP itself instead
+(clone + editable install):
+
+```
+git clone https://github.com/program-context-protocol/program-context-protocol
+cd program-context-protocol
+pip install -e .
+```
 
 ## Status
 
