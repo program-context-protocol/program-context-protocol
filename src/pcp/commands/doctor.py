@@ -420,6 +420,40 @@ def check_environment(pcp_dir: Path, fatal_on_missing_required: bool = True) -> 
     return tools
 
 
+def _report_check_only_pre_init(project_root: Path) -> None:
+    """Reduced `pcp doctor --check` report for a project with no `.pcp/` yet."""
+    tools = detect_tools()
+    missing_required = [t for t in REQUIRED_TOOLS if not tools[t]["available"]]
+    if missing_required:
+        console.print(f"[red bold]Missing required tool(s): {', '.join(missing_required)}[/red bold]")
+        sys.exit(2)
+
+    table = Table(title="PCP Environment Check (pre-init — no .pcp/ yet)")
+    table.add_column("Integration")
+    table.add_column("Status")
+    table.add_column("Detail")
+
+    def _row(name: str, info: dict):
+        if info.get("available"):
+            table.add_row(name, "[green]available[/green]", str(info.get("path") or ""))
+        else:
+            table.add_row(name, "[yellow]not found[/yellow]", "—")
+
+    _row("git (required)", tools["git"])
+    _row("claude CLI (required)", tools["claude"])
+    _row("gh (CI status, for `pcp watch`)", tools["gh"])
+    _row("Test runner", tools["test_runner"])
+    _row("Lint", tools["lint"])
+    _row("SAST/secret-scan", tools["sast"])
+    console.print(table)
+    console.print(
+        "[dim]All required tools present. Everything else here is optional — the "
+        "corresponding QA gate skips until it's installed. Run `pcp init` or "
+        "`pcp takeover <vision.md>` next.[/dim]"
+    )
+    report_dead_git_hooks(project_root)
+
+
 @click.command()
 @click.option("--path", "project_path", type=click.Path(), default=None,
               help="Project root (default: cwd, walks up to find .pcp/).")
@@ -433,6 +467,17 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, yes: boo
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
     except NoPCPDir as e:
+        if check_only:
+            # `pcp doctor --check` is documented (this module's own docstring,
+            # and the install SKILL.md) as blocking only on missing git/claude --
+            # never on a missing `.pcp/`. It's the step run BEFORE `pcp takeover`
+            # creates `.pcp/` on a fresh checkout, so requiring it here made the
+            # documented preflight fail on every fresh install. Report tools +
+            # version drift only; anything that needs a real .pcp/ (schema-tier
+            # recs, build-loop-bypass, context-route staleness) has nothing to
+            # check yet anyway.
+            _report_check_only_pre_init(Path(project_path) if project_path else Path.cwd())
+            return
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(2)
 

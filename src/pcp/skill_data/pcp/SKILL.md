@@ -1813,7 +1813,7 @@ If a decision is genuinely new: self-decide using best practices, document as DR
 - Never generate or guess production credentials — security boundary, always stop and notify
 - Never redeploy to production after rollback without PM confirmation
 - If Playwright not installed and `check: visual` required: notify and defer rather than skip
-- If `pcp` CLI not installed: `pip install program-context-protocol` first
+- If `pcp` CLI not installed: fetch the latest wheel from GitHub Releases and `pip install` it (see the top-level `SKILL.md`'s Install step — there is no PyPI package yet)
 - Draft ADRs are labelled DRAFT — never present them as accepted decisions
 - If a module's build is completely blocked (all criteria depend on a true-stop item): say so clearly in status, move to next module
 - If git worktree fails: fall back to sequential build on main branch, tell PM
