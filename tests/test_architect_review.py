@@ -93,6 +93,30 @@ def test_module_mode_reviews_spec_text(tmp_path):
     assert result.exit_code == 0
 
 
+def test_block_finding_writes_qa_telemetry_record(tmp_path):
+    """Same gap class as pcp verify: this command is called directly by a
+    harness-driven agent, not only through build.py's wrapper, which was the
+    only place this gate's telemetry used to be recorded."""
+    _init_pcp(tmp_path)
+    block_result = {
+        "findings": [{"severity": "BLOCK", "location": "x.py:10", "principle": "modularity",
+                       "finding": "cross-module import", "fix": "use interface"}],
+        "summary": "Cross-module coupling found.", "blocks": 1, "warns": 0,
+    }
+    with patch("pcp.commands.architect_review.subprocess.run") as mock_run, \
+            patch("pcp.llm.client.call_json") as mock_llm:
+        mock_run.return_value = MagicMock(returncode=0, stdout="diff --git a/x.py\n+++ b/x.py\n+bad\n", stderr="")
+        mock_llm.return_value = block_result
+        runner = CliRunner()
+        runner.invoke(cli, ["architect-review", "--path", str(tmp_path)])
+    import json
+    lines = (tmp_path / ".pcp" / "telemetry.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["cycle"] == "qa" and rec["check"] == "architect-review"
+    assert rec["result"] == "block" and rec["error_count"] == 1
+
+
 def test_json_output_with_fail_on_block(tmp_path):
     _init_pcp(tmp_path)
     with patch("pcp.commands.architect_review.subprocess.run") as mock_run, \

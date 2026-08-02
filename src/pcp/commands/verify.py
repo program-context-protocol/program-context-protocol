@@ -145,5 +145,22 @@ def verify(module: str, criterion_id: str, reason: str | None, yes: bool, projec
         evidence=reason or "deterministic check re-run",
     )
 
+    # Restores the build-cycle signal for work done through the native-harness
+    # path (pcp build-plan + the Workflow tool's own agent()/parallel() -- see
+    # CLAUDE.md's Workflow/Agent/pcp-build split). That path marks a criterion
+    # done via `pcp verify` directly, never through build.py's own
+    # _build_one_criterion, which is the ONLY place telemetry.record() used to
+    # be called for build-cycle events. Nothing removed a hook; the hook was
+    # only ever written for the older headless-engine path, so telemetry.jsonl
+    # went silent the moment real work moved to the harness-driven one, even
+    # though decision_log.jsonl (recorded above) kept going.
+    from pcp import telemetry
+    telemetry.record(
+        pcp_dir, cycle="build", cycle_number=None,
+        module=module, submodule=None, criterion_id=criterion_id, files=[],
+        languages=[], lines_added=0, lines_removed=0,
+        result="pass", source=source,
+    )
+
     console.print(f"[green]✓[/green] {module}/{criterion_id} marked complete, verified_by={source}.")
     console.print("[dim]Recorded in decision_log.jsonl. Run `pcp scan` to refresh current_state.md.[/dim]")

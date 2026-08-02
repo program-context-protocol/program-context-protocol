@@ -263,6 +263,21 @@ def architect_review(
         console.print(f"[red]LLM returned invalid JSON:[/red] {e}")
         sys.exit(2)
 
+    # Same gap class as `pcp verify`: this command is called directly by a
+    # harness-driven agent (pcp build-plan + the Workflow tool's agent()), not
+    # only through build.py's own _run_architect_review wrapper -- which was
+    # the only place this gate's telemetry got recorded before. Not a removed
+    # hook, an omission: it was only ever wired for the older path.
+    from pcp import telemetry
+    telemetry.record(
+        pcp_dir, cycle="qa", cycle_number=None, check="architect-review", control_id=None,
+        module=module_name, submodule=None, criterion_id=None,
+        files=changed_files if mode == "diff" else [],
+        result="block" if result.get("blocks", 0) > 0 else "pass",
+        errors=[f.get("finding", "") for f in result.get("findings", []) if f.get("severity") == "BLOCK"],
+        error_count=result.get("blocks", 0),
+    )
+
     if output_json:
         click.echo(json.dumps(result, indent=2))
         if fail_on_block and result.get("blocks", 0) > 0:

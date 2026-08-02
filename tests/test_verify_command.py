@@ -83,6 +83,25 @@ def test_verification_is_logged_to_decision_log(tmp_path):
     assert "commit abc123" in rec["evidence"]
 
 
+def test_verification_writes_a_build_cycle_telemetry_record(tmp_path):
+    """Restores the build-cycle signal for criteria completed through the
+    native-harness path (pcp build-plan + the Workflow tool's agent()), which
+    marks work done via `pcp verify` directly rather than build.py's own
+    _build_one_criterion -- previously the only place telemetry.record() fired
+    for a build-cycle event, so this path went completely dark in
+    telemetry.jsonl even while decision_log.jsonl kept recording it."""
+    root = _project(tmp_path, check="manual", target=None)
+    CliRunner().invoke(cli, ["verify", "billing", "A001", "--yes",
+                             "--reason", "commit abc123", "--path", str(root)])
+    import json
+    lines = (root / ".pcp" / "telemetry.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["cycle"] == "build"
+    assert rec["module"] == "billing" and rec["criterion_id"] == "A001"
+    assert rec["result"] == "pass"
+
+
 def test_already_verified_complete_is_a_no_op(tmp_path):
     root = _project(tmp_path, check="manual", target=None, status="complete",
                     criterion_extra={"verified_by": "pcp_build"})
