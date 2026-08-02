@@ -29,6 +29,8 @@ REQUIRED_TOOLS = ["git", "claude"]
 
 DEFAULT_SCHEMA_BLOAT_THRESHOLD = 50
 DEFAULT_TEST_SCHEMA_PATTERN = "test_%"
+DEFAULT_ORPHAN_WORKTREE_AGE_HOURS = 24
+DEFAULT_TIMEOUT_HEAVY_THRESHOLD = 2
 _SAFE_SCHEMA_PATTERN_RE = re.compile(r"^[A-Za-z0-9_%-]+$")
 
 DEPLOY_HINT_FILES = {
@@ -274,6 +276,126 @@ def fix_schema_bloat(pattern: str) -> dict:
     return {"dropped": dropped, "errors": errors}
 
 
+def _pcp_worktrees(project_root: Path) -> list[dict]:
+    """Git worktrees `pcp build` itself created -- branch `feat/<module>[-<criterion>]`,
+    sibling dir `<repo>-<module>[-<criterion>]`, exactly build.py's `_setup_worktree`/
+    `_worktree_dir` naming convention. Never matches a worktree a human created for
+    unrelated work."""
+    try:
+        proc = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=project_root, capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    worktrees, current = [], {}
+    for line in proc.stdout.splitlines():
+        if line.startswith("worktree "):
+            if current:
+                worktrees.append(current)
+            current = {"path": line[len("worktree "):].strip()}
+        elif line.startswith("branch "):
+            current["branch"] = line[len("branch "):].strip().removeprefix("refs/heads/")
+    if current:
+        worktrees.append(current)
+    prefix = f"{project_root.name}-"
+    return [
+        w for w in worktrees
+        if w.get("branch", "").startswith("feat/")
+        and Path(w["path"]) != project_root
+        and Path(w["path"]).name.startswith(prefix)
+    ]
+
+
+def check_orphaned_worktrees(project_root: Path) -> list[dict]:
+    """PCP-created git worktrees with no commit activity in
+    PCP_ORPHAN_WORKTREE_AGE_HOURS (default 24) -- orphaned by a crashed or
+    killed `pcp build` run.
+
+    build.py's `_cleanup_worktree` only runs on the graceful-success and
+    graceful-merge-failure paths (the latter deliberately leaves the worktree
+    for manual inspection -- see build.py's own comments). A genuine process
+    crash or kill mid-wave hits neither path: the wave's `worktrees = {...}`
+    dict is built with no try/finally around it, so nothing ever tracks those
+    dirs again. Age is measured from the worktree branch's last commit, not
+    filesystem mtime (stat noise), and stays well clear of a real in-progress
+    attempt: PCP_BUILD_AGENT_TIMEOUT_SEC defaults to 30 minutes across up to 3
+    attempts, so a genuinely active criterion is hours old at most, not a day.
+
+    Advisory detection only -- never deletes without `--fix-orphaned-worktrees`
+    + confirmation, same posture as schema-bloat cleanup below.
+    """
+    if not (project_root / ".git").exists():
+        return []
+    threshold_hours = int(os.environ.get("PCP_ORPHAN_WORKTREE_AGE_HOURS", str(DEFAULT_ORPHAN_WORKTREE_AGE_HOURS)))
+    now = datetime.now(timezone.utc)
+    orphans = []
+    for w in _pcp_worktrees(project_root):
+        path = Path(w["path"])
+        if not path.exists():
+            continue
+        log = subprocess.run(
+            ["git", "log", "-1", "--format=%ct", w["branch"]],
+            cwd=project_root, capture_output=True, text=True, timeout=15,
+        )
+        if log.returncode != 0:
+            continue
+        try:
+            last_commit_ts = datetime.fromtimestamp(int(log.stdout.strip()), tz=timezone.utc)
+        except (ValueError, OSError):
+            continue
+        age_hours = (now - last_commit_ts).total_seconds() / 3600
+        if age_hours >= threshold_hours:
+            orphans.append({"path": str(path), "branch": w["branch"], "age_hours": round(age_hours, 1)})
+    return orphans
+
+
+def fix_orphaned_worktrees(project_root: Path, orphans: list[dict]) -> dict:
+    """Removes each orphaned worktree + its branch. Destructive -- the CLI
+    command owns confirmation (never called on a bare `pcp doctor`)."""
+    removed, errors = [], []
+    for o in orphans:
+        r1 = subprocess.run(
+            ["git", "worktree", "remove", o["path"], "--force"],
+            cwd=project_root, capture_output=True, text=True,
+        )
+        subprocess.run(["git", "branch", "-D", o["branch"]], cwd=project_root, capture_output=True, text=True)
+        if r1.returncode == 0:
+            removed.append(o["path"])
+        else:
+            errors.append(f"{o['path']}: {r1.stderr.strip()}")
+    return {"removed": removed, "errors": errors}
+
+
+def check_timeout_heavy_criteria(pcp_dir: Path, threshold: int | None = None) -> list[str]:
+    """Advisory: a criterion that has already timed out `threshold`+ times
+    (default PCP_TIMEOUT_HEAVY_THRESHOLD, 2) across recorded builds is
+    unlikely to succeed on yet another retry with the same prompt/budget --
+    worth a human look rather than silently burning another attempt cycle.
+
+    Reads `telemetry.record(cycle="build", result="timeout", ...)` entries --
+    before the timeout handler in build.py was fixed to call telemetry.record()
+    at all, a timed-out attempt left no trace in telemetry.jsonl, so this kind
+    of pattern was invisible no matter how many times it recurred.
+    """
+    threshold = threshold if threshold is not None else int(
+        os.environ.get("PCP_TIMEOUT_HEAVY_THRESHOLD", str(DEFAULT_TIMEOUT_HEAVY_THRESHOLD))
+    )
+    from pcp import telemetry as telemetry_mod
+    counts: dict[tuple, int] = {}
+    for r in telemetry_mod.load(pcp_dir):
+        if r.get("cycle") == "build" and r.get("result") == "timeout":
+            key = (r.get("module") or "?", r.get("criterion_id") or "?")
+            counts[key] = counts.get(key, 0) + 1
+    return [
+        f"{mod}/{cid} has timed out {n} times across recorded builds — "
+        f"same prompt/budget is unlikely to succeed on another retry"
+        for (mod, cid), n in sorted(counts.items()) if n >= threshold
+    ]
+
+
 def load_integrations(pcp_dir: Path) -> dict:
     path = pcp_dir / "integrations.yaml"
     if not path.exists():
@@ -408,6 +530,18 @@ def check_environment(pcp_dir: Path, fatal_on_missing_required: bool = True) -> 
             f"that look like a stuck build. Run `pcp doctor --fix-schema-bloat` to clean up."
         )
 
+    orphaned_wts = check_orphaned_worktrees(pcp_dir.parent)
+    if orphaned_wts:
+        console.print(
+            f"[yellow bold]⚠ Orphaned build worktree(s):[/yellow bold] {len(orphaned_wts)} git worktree(s) "
+            f"from a crashed/killed `pcp build` run with no commit activity for 24h+ — "
+            f"run `pcp doctor --fix-orphaned-worktrees` to clean up."
+        )
+
+    timeout_heavy = check_timeout_heavy_criteria(pcp_dir)
+    for line in timeout_heavy:
+        console.print(f"[yellow bold]⚠ Timeout-heavy criterion:[/yellow bold] {line}")
+
     from pcp import build_loop_bypass, telemetry
     bypass_findings = build_loop_bypass.check(pcp_dir, pcp_dir.parent)
     telemetry.record(
@@ -461,8 +595,10 @@ def _report_check_only_pre_init(project_root: Path) -> None:
               help="Non-interactive: detect and report only, don't prompt or write.")
 @click.option("--fix-schema-bloat", "fix_bloat", is_flag=True,
               help="Drop stray Postgres test schemas matching PCP_TEST_SCHEMA_PATTERN. Destructive — always confirms.")
-@click.option("--yes", "yes", is_flag=True, help="Skip the confirmation prompt for --fix-schema-bloat (CI/non-interactive use).")
-def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, yes: bool):
+@click.option("--fix-orphaned-worktrees", "fix_worktrees", is_flag=True,
+              help="Remove git worktrees left behind by a crashed/killed pcp build run. Destructive — always confirms.")
+@click.option("--yes", "yes", is_flag=True, help="Skip the confirmation prompt for --fix-schema-bloat/--fix-orphaned-worktrees (CI/non-interactive use).")
+def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, fix_worktrees: bool, yes: bool):
     """Check/configure CLI integrations for this project's PCP lifecycle."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
@@ -504,11 +640,42 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, yes: boo
                 console.print(f"  {e}")
         sys.exit(1 if result["errors"] else 0)
 
+    orphaned_wts = check_orphaned_worktrees(project_root)
+    if fix_worktrees:
+        if not orphaned_wts:
+            console.print("[green]No orphaned build worktrees found — nothing to remove.[/green]")
+            sys.exit(0)
+        console.print(f"[bold]{len(orphaned_wts)} worktree(s)[/bold] will be permanently removed (branch + working dir):")
+        for o in orphaned_wts:
+            console.print(f"  {o['path']} (branch {o['branch']}, idle {o['age_hours']}h)")
+        if not yes and not click.confirm("Proceed?", default=False):
+            console.print("[yellow]Aborted.[/yellow]")
+            sys.exit(0)
+        result = fix_orphaned_worktrees(project_root, orphaned_wts)
+        console.print(f"[green]Removed {len(result['removed'])} worktree(s).[/green]")
+        if result["errors"]:
+            console.print(f"[red]{len(result['errors'])} error(s):[/red]")
+            for e in result["errors"][:10]:
+                console.print(f"  {e}")
+        sys.exit(1 if result["errors"] else 0)
+
     if bloat and bloat["bloated"]:
         console.print(
             f"[yellow bold]⚠ Postgres schema bloat:[/yellow bold] {bloat['count']} schemas matching "
             f"'{bloat['pattern']}' (threshold {bloat['threshold']}) — run `pcp doctor --fix-schema-bloat` to clean up.\n"
         )
+
+    if orphaned_wts:
+        console.print(
+            f"[yellow bold]⚠ Orphaned build worktree(s):[/yellow bold] {len(orphaned_wts)} git worktree(s) "
+            f"idle 24h+ with no owning build — run `pcp doctor --fix-orphaned-worktrees` to clean up.\n"
+        )
+        for o in orphaned_wts:
+            console.print(f"  [dim]{o['path']} (branch {o['branch']}, idle {o['age_hours']}h)[/dim]")
+
+    timeout_heavy = check_timeout_heavy_criteria(pcp_dir)
+    for line in timeout_heavy:
+        console.print(f"[yellow bold]⚠ Timeout-heavy criterion:[/yellow bold] {line}")
 
     from pcp import build_loop_bypass
     for f in build_loop_bypass.check(pcp_dir, project_root):

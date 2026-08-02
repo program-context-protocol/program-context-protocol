@@ -26,17 +26,29 @@ def _run_build_one_criterion(tmp_path, build_model, build_model_explicit, test_s
     captured_models = []
 
     def fake_run(cmd, **kwargs):
-        # Only claude agent invocations carry a session flag — git helper
-        # calls (rev-parse, diff, ls-files) also route through subprocess.run
-        # and must not pollute the captured model list.
-        if "--session-id" in cmd or "--resume" in cmd:
-            captured_models.append(cmd[cmd.index("--model") + 1] if "--model" in cmd else None)
+        # Git helper calls (rev-parse, diff, ls-files) route through
+        # subprocess.run — the claude agent call itself now uses Popen (see
+        # fake_popen below) so it can killpg its process group on timeout.
         result = MagicMock()
         result.returncode = 0
         result.stdout = _envelope()
         return result
 
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self._cmd = cmd
+            self.returncode = 0
+            self.pid = 99999
+
+        def communicate(self, input=None, timeout=None):
+            if "--session-id" in self._cmd or "--resume" in self._cmd:
+                captured_models.append(
+                    self._cmd[self._cmd.index("--model") + 1] if "--model" in self._cmd else None
+                )
+            return _envelope(), ""
+
     with patch("pcp.commands.build.subprocess.run", side_effect=fake_run), \
+         patch("pcp.commands.build.subprocess.Popen", side_effect=_FakePopen), \
          patch("pcp.commands.build._git_head", return_value="REF0"), \
          patch("pcp.commands.build._get_changed_files_since", return_value=[]), \
          patch("pcp.commands.build._get_working_diff", return_value=""), \

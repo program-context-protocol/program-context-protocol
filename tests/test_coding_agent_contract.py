@@ -95,6 +95,6 @@ def test_budget_circuit_breaker_checked_before_spawning_the_agent():
     session, not spending on it."""
     src = _source()
     take_session_idx = src.index("budget.take_session()")
-    subprocess_idx = src.index("result = subprocess.run(")
+    subprocess_idx = src.index("proc = subprocess.Popen(")
     assert take_session_idx < subprocess_idx, \
         "budget.take_session() must be checked before the coding-agent subprocess spawns, not after"

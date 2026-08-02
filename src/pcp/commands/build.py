@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sys
 import subprocess
 import threading
@@ -3599,16 +3600,38 @@ def _build_one_criterion(
 
         # Run Claude agent — wall-clock capped. A stuck/looping agent must
         # not be able to run unbounded just because it hasn't returned yet.
+        # start_new_session=True puts the child in its own process group so
+        # the timeout handler below can kill it AND any descendants (a
+        # background bash call, an MCP server the CLI spawned) with one
+        # os.killpg -- plain subprocess.run(timeout=...) only kills the
+        # direct `claude` child on timeout, orphaning everything under it
+        # (same failure class as the AppleMDM testcontainers worktree gap).
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=project_root, start_new_session=True,
+        )
         try:
-            result = subprocess.run(
-                cmd, input=agent_prompt, text=True, capture_output=True,
-                cwd=project_root, timeout=_build_agent_timeout_sec(),
-            )
+            stdout, stderr = proc.communicate(input=agent_prompt, timeout=_build_agent_timeout_sec())
+            result = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
         except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()  # reap, discard -- process is already dead
             timeout_sec = _build_agent_timeout_sec()
             console.print(f"[red]Claude agent timed out after {timeout_sec}s.[/red]")
             feedback = f"Previous attempt exceeded the {timeout_sec}s per-attempt timeout and was killed."
             attempt_history.append(f"Attempt {attempt}: {feedback}")
+            with _STATE_LOCK:
+                telemetry.record(
+                    pcp_dir,
+                    cycle="build", cycle_number=attempt,
+                    module=mod["name"], submodule=None, criterion_id=c["id"], run_id=run_log_id,
+                    files=[], languages=[], lines_added=0, lines_removed=0,
+                    model=attempt_model, result="timeout", errors=[feedback],
+                    duration_ms=timeout_sec * 1000,
+                )
             continue
 
         if result.returncode != 0:

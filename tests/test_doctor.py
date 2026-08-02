@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import time
 from unittest.mock import patch, MagicMock
 
 import yaml
@@ -8,7 +11,9 @@ from pcp.cli import cli
 from pcp.commands.doctor import (
     detect_tools, check_environment, _detect_one, _guess_deploy_command,
     detect_context7, configure_context7, check_schema_bloat, fix_schema_bloat,
+    check_orphaned_worktrees, fix_orphaned_worktrees, check_timeout_heavy_criteria,
 )
+from pcp import telemetry
 
 
 def _fake_which(available: set):
@@ -307,3 +312,100 @@ def test_doctor_cli_check_warns_on_bloat(tmp_path, monkeypatch):
         result = runner.invoke(cli, ["doctor", "--path", str(tmp_path), "--check"])
     assert result.exit_code == 0
     assert "schema bloat" in result.output.lower()
+
+
+# ── orphaned build worktrees (real git, not mocked -- worktree lifecycle is
+# exactly the thing that needs to be exercised against real git behavior) ──
+
+def _git(args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _repo_with_worktree(tmp_path, branch: str, age_hours: float = 0.0):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(["init", "-q"], root)
+    _git(["config", "user.email", "t@t"], root)
+    _git(["config", "user.name", "t"], root)
+    (root / "f.txt").write_text("x")
+    _git(["add", "-A"], root)
+    _git(["commit", "-qm", "init"], root)
+    wt_path = tmp_path / f"repo-{branch.replace('/', '-')}"
+    _git(["worktree", "add", "-q", "-b", branch, str(wt_path)], root)
+    ts = int(time.time() - age_hours * 3600)
+    env = {**os.environ, "GIT_AUTHOR_DATE": str(ts), "GIT_COMMITTER_DATE": str(ts)}
+    (wt_path / "g.txt").write_text("y")
+    subprocess.run(["git", "add", "-A"], cwd=wt_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "work"], cwd=wt_path, check=True, capture_output=True, env=env)
+    return root, wt_path
+
+
+def test_stale_pcp_worktree_is_flagged_past_default_threshold(tmp_path):
+    root, wt_path = _repo_with_worktree(tmp_path, "feat/widgets", age_hours=30)
+    orphans = check_orphaned_worktrees(root)
+    assert len(orphans) == 1
+    assert orphans[0]["path"] == str(wt_path)
+    assert orphans[0]["branch"] == "feat/widgets"
+
+
+def test_fresh_pcp_worktree_is_not_flagged(tmp_path):
+    root, _ = _repo_with_worktree(tmp_path, "feat/widgets", age_hours=0)
+    assert check_orphaned_worktrees(root) == []
+
+
+def test_non_pcp_branch_naming_is_never_flagged(tmp_path):
+    """A worktree a human created for unrelated work (not `feat/<module>` on a
+    `<repo>-<module>` sibling dir) must never be touched, no matter its age."""
+    root, _ = _repo_with_worktree(tmp_path, "some-other-branch", age_hours=100)
+    assert check_orphaned_worktrees(root) == []
+
+
+def test_env_override_changes_the_threshold(tmp_path, monkeypatch):
+    root, _ = _repo_with_worktree(tmp_path, "feat/widgets", age_hours=2)
+    monkeypatch.setenv("PCP_ORPHAN_WORKTREE_AGE_HOURS", "1")
+    assert len(check_orphaned_worktrees(root)) == 1
+
+
+def test_fix_orphaned_worktrees_actually_removes_it(tmp_path):
+    root, wt_path = _repo_with_worktree(tmp_path, "feat/widgets", age_hours=30)
+    orphans = check_orphaned_worktrees(root)
+    result = fix_orphaned_worktrees(root, orphans)
+    assert result["removed"] == [str(wt_path)]
+    assert result["errors"] == []
+    assert not wt_path.exists()
+    remaining = subprocess.run(["git", "branch", "--list", "feat/widgets"], cwd=root,
+                                capture_output=True, text=True).stdout
+    assert remaining.strip() == ""
+
+
+def test_no_git_repo_returns_empty(tmp_path):
+    (tmp_path / "not_a_repo").mkdir()
+    assert check_orphaned_worktrees(tmp_path / "not_a_repo") == []
+
+
+# ── timeout-heavy criterion telemetry advisory ──
+
+def test_timeout_heavy_criterion_flagged_at_threshold(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    for _ in range(2):
+        telemetry.record(pcp_dir, cycle="build", module="billing", criterion_id="A001", result="timeout")
+    findings = check_timeout_heavy_criteria(pcp_dir)
+    assert len(findings) == 1
+    assert "billing/A001" in findings[0]
+    assert "2 times" in findings[0]
+
+
+def test_below_threshold_is_silent(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    telemetry.record(pcp_dir, cycle="build", module="billing", criterion_id="A001", result="timeout")
+    assert check_timeout_heavy_criteria(pcp_dir) == []
+
+
+def test_successful_attempts_never_count_as_timeouts(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    for _ in range(5):
+        telemetry.record(pcp_dir, cycle="build", module="billing", criterion_id="A001", result="pass")
+    assert check_timeout_heavy_criteria(pcp_dir) == []
