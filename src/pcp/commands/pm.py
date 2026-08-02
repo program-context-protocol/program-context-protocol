@@ -246,7 +246,21 @@ def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
 
     criteria_map = {c["id"]: c for c in existing_criteria}
     for new_c in mod_result["acceptance_changes"].get("criteria", []):
-        criteria_map[new_c["id"]] = new_c
+        # Field-level merge onto the existing entry, not a full replacement --
+        # same reasoning as spec_changes's build_vs_buy/module_logic_breakdown
+        # preservation above, applied per-criterion. `verified_by` is
+        # deliberately excluded from _PM_CRITERION_KEEP_FIELDS (the LLM never
+        # sees it, and shouldn't have to), so the LLM's response can NEVER
+        # legitimately carry it -- a bare `criteria_map[id] = new_c` replace
+        # would silently strip it off any already-`pcp verify`'d criterion pm
+        # happens to touch for ANY reason, including an unrelated wording
+        # tweak elsewhere in the same module, corrupting the exact
+        # complete-but-unverified ambiguity `pcp verify` exists to prevent.
+        # Same logic protects evidence/notes/design_justification and any
+        # other field pm doesn't manage: preserved unless the response
+        # explicitly overwrites it.
+        existing_c = criteria_map.get(new_c["id"], {})
+        criteria_map[new_c["id"]] = {**existing_c, **new_c}
 
     merged_acceptance = {
         "version": "2.0",

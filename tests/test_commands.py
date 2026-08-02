@@ -668,6 +668,80 @@ def test_pm_preserves_existing_module_logic_breakdown_on_modify(temp_project):
     assert spec["module_logic_breakdown"] == ["session token issuance", "password hashing and verification"]
 
 
+def test_pm_preserves_verified_by_when_regenerating_an_existing_criterion(temp_project):
+    """Real bug, 2026-08-02: verified_by is deliberately excluded from
+    _PM_CRITERION_KEEP_FIELDS (the LLM never sees it, by design, to save
+    context), but the merge used to be a bare `criteria_map[id] = new_c` --
+    a full replace, not a field-level merge. So the moment pm's LLM response
+    touches an already-`pcp verify`'d criterion for ANY reason -- even an
+    unrelated wording tweak forcing it back into the response -- the
+    replacement silently dropped verified_by, corrupting exactly the
+    complete-but-unverified ambiguity `pcp verify` exists to prevent."""
+    pcp_dir = temp_project / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Objective\nBilling service.")
+    (pcp_dir / "strategy").mkdir()
+    (pcp_dir / "strategy" / "decomposition.md").write_text("# Decomp")
+
+    mod_dir = pcp_dir / "strategy" / "modules" / "billing"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "spec.yaml").write_text(yaml.dump({
+        "version": "2.0", "module": "billing", "description": "Handles billing.",
+        "objective_coverage": ["Billing"], "dependencies": [], "constraints": [],
+        "build_vs_buy": {"decision": "build_fresh", "rationale": "n/a", "candidates_considered": []},
+    }))
+    (mod_dir / "acceptance.yaml").write_text(yaml.dump({
+        "version": "2.0", "module": "billing", "criteria": [
+            {"id": "A001", "description": "Charge endpoint works.", "check": "manual",
+             "status": "complete", "verified_by": "pcp_verify:manual", "logic_tier": 1,
+             "build_vs_buy": {"decision": "build_fresh", "rationale": "n/a"}},
+        ],
+    }))
+
+    mock_pm_response = {
+        "capabilities_enumerated": ["reword A001's description"],
+        "overall_explanation": "Minor wording tweak to A001.",
+        "modules": [
+            {
+                "module_action": "modify",
+                "module_name": "billing",
+                "module_explanation": "Reword A001.",
+                "spec_changes": {
+                    "version": "2.0", "module": "billing", "description": "Handles billing.",
+                    "objective_coverage": ["Billing"], "dependencies": [], "constraints": [],
+                    "build_vs_buy": {"decision": "build_fresh", "rationale": "n/a", "candidates_considered": []},
+                },
+                "acceptance_changes": {
+                    "version": "2.0", "module": "billing", "criteria": [
+                        # The LLM never saw verified_by (projected out of its context),
+                        # so it structurally cannot return it here -- this is exactly
+                        # what a real pm response looks like for this case.
+                        {"id": "A001", "description": "Charge endpoint validates card and charges it.",
+                         "check": "manual", "status": "complete", "logic_tier": 1,
+                         "build_vs_buy": {"decision": "build_fresh", "rationale": "n/a"}},
+                    ],
+                },
+            }
+        ],
+    }
+    mock_val_response = {
+        "coverage_gaps": [], "contradictions": [], "overlaps": [],
+        "missing_modules": [], "coverage_score": 1.0,
+    }
+
+    with patch("pcp.llm.client.call_json") as mock_call_json, \
+            patch("pcp.commands.scan.scan"):
+        mock_call_json.side_effect = [mock_pm_response, mock_val_response]
+        runner = CliRunner()
+        result = runner.invoke(cli, ["pm", "Reword A001", "--path", str(temp_project)], input="y\n")
+
+    assert result.exit_code == 0
+    acc = yaml.safe_load((mod_dir / "acceptance.yaml").read_text())
+    a001 = next(c for c in acc["criteria"] if c["id"] == "A001")
+    assert a001["verified_by"] == "pcp_verify:manual"
+    assert a001["description"] == "Charge endpoint validates card and charges it."
+
+
 def test_pm_spans_multiple_modules_without_truncation(temp_project):
     """The real root-cause fix, 2026-07-20: pm's output used to be a single
     module_action/module_name -- a feature intent spanning 2+ modules got
