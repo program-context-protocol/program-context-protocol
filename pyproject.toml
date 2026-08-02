@@ -4,8 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "program-context-protocol"
-version = "0.12.4"
+version = "0.12.5"
 description = "PCP — prevent LLM hallucination and context drift across dev sessions"
+readme = "README.md"
 keywords = [
     "llm", "ai-agent", "context-drift", "spec-driven-development",
     "hallucination", "claude-code", "ci-cd", "agentic-coding",
@@ -31,6 +32,11 @@ graph = ["graphifyy>=0.8"]
 # Optional: pulls in a Chromium binary via `playwright install`, not needed
 # for anything else in this package.
 visual = ["playwright>=1.40"]
+
+[project.urls]
+Homepage = "https://github.com/program-context-protocol/program-context-protocol"
+Repository = "https://github.com/program-context-protocol/program-context-protocol"
+Issues = "https://github.com/program-context-protocol/program-context-protocol/issues"
 
 [project.scripts]
 pcp = "pcp.cli:cli"
