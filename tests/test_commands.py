@@ -831,7 +831,21 @@ def test_build_command(temp_project):
     # genuinely lack a `claude` binary on PATH (found 2026-07-18: this test
     # only ever passed locally, where a real `claude` happens to be
     # installed -- see doctor.py's _claude_bin_for_detection docstring).
+    # The coding-agent call itself now uses subprocess.Popen (so a timeout
+    # can killpg the whole process group), not subprocess.run -- patching
+    # only subprocess.run left it unmocked, hitting the same "no `claude`
+    # on this machine" gap the comment above already describes.
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self.returncode = 0
+            self.pid = 77777
+
+        def communicate(self, input=None, timeout=None):
+            return json.dumps({"is_error": False, "result": "done", "session_id": "s",
+                               "usage": {}, "total_cost_usd": 0.0, "duration_ms": 1}), ""
+
     with patch("subprocess.run") as mock_run, \
+            patch("pcp.commands.build.subprocess.Popen", side_effect=_FakePopen), \
             patch("pcp.commands.doctor.check_environment", return_value={}), \
             patch("pcp.commands.build._get_staged_files") as mock_staged, \
             patch("pcp.commands.build._get_unstaged_files") as mock_unstaged, \
