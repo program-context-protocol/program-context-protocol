@@ -212,15 +212,26 @@ def test_attempt_three_gets_fresh_session_with_failure_summary(tmp_path):
     calls = []
 
     def fake_run(cmd, **kwargs):
-        if "--session-id" in cmd or "--resume" in cmd:
-            calls.append({"cmd": list(cmd), "prompt": kwargs.get("input", "")})
         result = MagicMock()
         result.returncode = 0
-        result.stdout = json.dumps({"is_error": False, "result": "done", "session_id": "s",
-                                    "usage": {}, "total_cost_usd": 0.0, "duration_ms": 1})
+        result.stdout = ""
         return result
 
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self._cmd = cmd
+            self.returncode = 0
+            self.pid = 88888
+
+        def communicate(self, input=None, timeout=None):
+            if "--session-id" in self._cmd or "--resume" in self._cmd:
+                calls.append({"cmd": list(self._cmd), "prompt": input or ""})
+            stdout = json.dumps({"is_error": False, "result": "done", "session_id": "s",
+                                 "usage": {}, "total_cost_usd": 0.0, "duration_ms": 1})
+            return stdout, ""
+
     with patch("pcp.commands.build.subprocess.run", side_effect=fake_run), \
+         patch("pcp.commands.build.subprocess.Popen", side_effect=_FakePopen), \
          patch("pcp.commands.build._git_head", return_value="REF"), \
          patch("pcp.commands.build._get_changed_files_since", return_value=[]), \
          patch("pcp.commands.build._get_working_diff", return_value=""), \
