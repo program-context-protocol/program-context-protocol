@@ -1577,8 +1577,13 @@ def _build_agent_prompt(
             "`design_justification` block to this criterion in acceptance.yaml: "
             "`checklist_passed` (which design-system conventions this screen actually "
             "followed), `jtbd_framing` (one sentence, 'when a user is X, this lets them "
-            "Y' — not a restatement of the description), and `deviations_from_system` if "
-            "this screen needed a new pattern the system didn't have yet. If a "
+            "Y' — not a restatement of the description), `deviations_from_system` if "
+            "this screen needed a new pattern the system didn't have yet, and "
+            "`customizable`/`customization_notes` — set customizable: true only if this "
+            "screen exposes real user-configurable settings/preferences affecting its own "
+            "behavior (not just standard form inputs), with customization_notes stating "
+            "what's actually configurable; leave customizable: false for a fixed screen. "
+            "If a "
             "`webapp-testing` skill is available, use it to actually load the running "
             "page and verify it renders/behaves as intended before finishing — don't "
             "just trust that the code compiles."
@@ -4260,6 +4265,18 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
                 "  Genuinely rebuilding them:   [dim]PCP_ALLOW_REBUILD_LANDED=1 pcp build[/dim]"
             )
             sys.exit(2)
+        # Unconditional pass log on the clean path -- without this, "guard ran
+        # and found nothing" and "guard never ran" both show as zero telemetry
+        # records, indistinguishable from each other (see CTRL-035 just above,
+        # same shape). CTRL-038 previously only logged on the blocked branch.
+        telemetry.record(
+            pcp_dir, cycle="build", check="landed-work-guard", control_id="CTRL-038", result="pass",
+        )
+    else:
+        telemetry.record(
+            pcp_dir, cycle="build", check="landed-work-guard", control_id="CTRL-038",
+            result="skipped", errors=["PCP_ALLOW_REBUILD_LANDED=1 escape hatch active"],
+        )
 
     if not modules_to_build:
         console.print("[green]All acceptance criteria are complete. Nothing to build![/green]")

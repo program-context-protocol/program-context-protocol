@@ -130,7 +130,7 @@ Output schema:
           {
             "id": "A002",
             "description": "Clear description of the new exit criterion",
-            "check": "manual | ast_pattern | test_passes | file_exists",
+            "check": "manual | ast_pattern | test_passes | file_exists | dom_contains | url_responds | visual",
             "status": "pending",
             "logic_tier": 6,
             "build_vs_buy": {
@@ -152,6 +152,8 @@ Every NEW criterion MUST declare logic_tier (1-6, the cheapest rung that correct
 Every NEW criterion MUST also declare depends_on: a list of OTHER criterion ids (within the same module) that must be built first. Default to an EMPTY list -- most criteria are genuinely independent and should build in parallel. Only list a real id when this criterion's implementation would break or be meaningless without that other one existing first. When genuinely unsure, prefer the empty list -- a false dependency costs real parallelism for nothing.
 
 Every criterion SHOULD also declare `target`: the single primary file path it will create or modify (e.g. "src/storage/upload.py"). This is not documentation -- build.py schedules criterion-level parallelism from it. Two criteria run concurrently, each in its own isolated worktree blind to the other, ONLY when both declare a target and the targets differ; a criterion with no declared target has an unknown file surface and is run alone. Declaring accurate, DISTINCT targets is therefore what buys parallel builds. Two criteria that will genuinely both touch the same file must either declare that same target (so they are serialised) or be split differently -- never leave it blank hoping it works out.
+
+A criterion whose check is dom_contains, url_responds, or visual MUST also declare `url` (the page this check hits once the app is running -- e.g. "/dashboard"), and dom_contains ALSO needs `selector` (a CSS selector or literal text the page must contain). Without `url` the check has nothing to run against and will silently skip forever -- confirmed root cause, 2026-08-03, of a real dogfood project's automated UI checks sitting at 100% skip. Use check: manual instead if the page/route genuinely isn't known yet.
 """
 
 
