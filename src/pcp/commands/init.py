@@ -501,6 +501,33 @@ controls:
     enforcement: advisory
     description: "2026-07-24 incident (Project O, 3rd recurrence: 07-08, mid-July, 07-21-onward): pcp build's formal gated loop stopped being invoked, not by decision -- a real Postgres schema-bloat bug got killed and never relaunched -- while 31 commits landed via `pcp pm` + ad-hoc work over the next 3 days, telemetry.jsonl silent the whole time. Nothing previously surfaced that drift at the moment it started; it only became visible via manual transcript archaeology. Flags when commits continue past telemetry's last record by more than PCP_BUILD_LOOP_BYPASS_THRESHOLD_DAYS (default 3) -- inert until a project has at least one real telemetry record to compare against."
     ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-038
+    name: "Landed-work guard"
+    layer: build-loop
+    mechanism: "build.py landed-work preflight using orphaned_work.find_orphaned_work() -- checks, for each criterion pcp build is about to select from pending status, whether a merge/auto-commit already exists in main matching PCP's own commit conventions (Merge feat/<module>-<criterion_id>, or <module>/<criterion_id>: from the auto-commit path)"
+    tool: "n/a (deterministic)"
+    enforcement: hard_block
+    description: "2026-07-30 incident: pcp build selects work purely from pending status; a criterion whose landed commit never got its status written back gets rebuilt from scratch, paying full agent cost to reproduce code already merged and risking a second, conflicting implementation. Observed live -- thirteen minutes and $6.27 into a run rebuilding three already-merged criteria, with twelve criteria in that state across three modules. Hard-blocks the affected criterion before an agent session is spawned; PCP_ALLOW_REBUILD_LANDED=1 is the escape hatch for a genuine intentional rework of already-landed code."
+    ssdf_practice: ["PW.7.2", "PS.1.1"]
+
+  - id: CTRL-039
+    name: "Exposure-mode justification"
+    layer: wave-merge
+    mechanism: "build.py _run_wave_exposure_check() -- module_acceptance criterion.exposure.mode (ui/api/internal) + exposure.justification, placeholder/word-count check reusing CTRL-017's phrase list verbatim"
+    tool: "n/a (deterministic)"
+    enforcement: advisory
+    description: "2026-08-04: the Feature Exposure Ladder (nav_graph.py, design-audit.py) measures whether a UI-facing criterion is reachable through the built UI -- but a real feature can be legitimately exposed a different way (an API endpoint, an internal/background process) with no UI path planned at all, and scoring that as 'Built, Hidden' would be exactly the false discoverability crisis nav_graph.py's own docstring already names and was built to avoid for the undetermined case. `exposure.mode` is the escape hatch; this check makes it cost something to use -- api/internal without a real, non-placeholder justification on file is flagged. Absence of `exposure` is not a finding (default 'ui', pre-existing behavior). Report-first/advisory like every other wave-merge check on this list."
+    ssdf_practice: ["PW.1.1"]
+
+  - id: CTRL-040
+    name: "Cross-module user-flow wiring"
+    layer: wave-merge
+    mechanism: "flow_wiring.py run_flow() -- walks .pcp/strategy/user_flows.yaml's declared step sequences (navigate/click/fill/submit/assert_visible/assert_text) in a real headless browser (Playwright), once every module a flow spans has completed"
+    tool: "playwright (optional [visual] extra; skipped, not failed, when absent)"
+    enforcement: advisory
+    description: "2026-08-04: every existing wave-merge check validates CODE-level integration -- declared dependencies complete (CTRL-007), the merged test suite passes, a diff review doesn't object. None of them prove a real end-to-end USER JOURNEY spanning several modules still works once those modules are built by different agents in different waves -- a dashboard module and an export module can each pass their own criteria while the button one added never actually calls the other's endpoint. user_flows.yaml (human-authorized via `pcp amend user_flows`, same propose/diff/approve mechanic as decomposition.md/dependency_map.md) declares these journeys; this check is inert (no telemetry record) unless at least one declared flow's modules_spanned are all complete. Report-first/advisory like every other wave-merge check on this list."
+    ssdf_practice: ["PW.7.1", "PW.7.2"]
 """
 
 CONTEXT_MAP_TEMPLATE = """\
@@ -1341,6 +1368,39 @@ top_menu_bar:
   required_menus: ["File", "Edit", "View", "Help"]
 """
 
+USER_FLOWS_TEMPLATE = """\
+version: "1.0"
+
+# Critical end-to-end user journeys spanning MULTIPLE modules -- distinct
+# from any single module's own acceptance criteria, which never see past
+# their own module boundary. Walked for real in a headless browser by
+# CTRL-040's wave-merge flow-wiring check, once every module a flow spans
+# has completed. Human-authorized like every other file in this directory --
+# edit via `pcp amend user_flows "<change>"`, never by hand.
+#
+# base_url: default target every flow's relative step targets resolve
+# against (e.g. a local dev server or preview deploy). Override per-flow.
+# base_url: "http://localhost:3000"
+
+flows: []
+
+# Example (uncomment and adapt once the modules involved exist):
+# flows:
+#   - id: signup_to_dashboard
+#     description: "new user signs up, creates first project, sees it on the dashboard"
+#     modules_spanned: [auth, projects, dashboard]
+#     steps:
+#       - action: navigate
+#         target: /signup
+#       - action: fill
+#         target: "#email"
+#         value: "test@example.com"
+#       - action: click
+#         target: "#signup-submit"
+#       - action: assert_visible
+#         target: "#dashboard [data-project]"
+"""
+
 POLICY_TIER_DISTRIBUTION_TEMPLATE = """\
 package pcp.tier_distribution
 
@@ -1549,6 +1609,7 @@ def init(project_path: str, module_name: str | None, force: bool):
         pcp / "context_map.yaml": CONTEXT_MAP_TEMPLATE,
         pcp / "design_conventions.yaml": DESIGN_CONVENTIONS_TEMPLATE,
         pcp / "ui_kit_recipes.yaml": UI_KIT_RECIPES_TEMPLATE,
+        pcp / "strategy" / "user_flows.yaml": USER_FLOWS_TEMPLATE,
     }
 
     if module_name:

@@ -1032,6 +1032,23 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     _run_wave_nav_depth_check(pcp_dir, wave_modules, wave_number)
     _run_wave_menu_bar_check(pcp_dir, wave_modules, wave_number)
 
+    # 11.5. Exposure-mode justification (CTRL-039, advisory) — a UI-facing
+    # criterion declaring exposure.mode != 'ui' (deliberately exposed via
+    # API/internal instead of a screen) needs a real reason on file, not a
+    # bare declaration. Same placeholder-rejection posture as CTRL-017's
+    # build_vs_buy rationale check; report-first like every other check on
+    # this list until a measured false-positive rate says otherwise.
+    _run_wave_exposure_check(pcp_dir, wave_modules, wave_number)
+
+    # 11.6. Cross-module user-flow wiring (CTRL-040, advisory) — wave-merge
+    # up to this point validates CODE-level integration (deps complete,
+    # tests pass); this validates JOURNEY-level integration: can a declared
+    # end-to-end task spanning multiple modules actually be walked, step by
+    # step, in a real headless browser, now that this wave finished the last
+    # module it needed. Inert unless .pcp/strategy/user_flows.yaml declares
+    # at least one flow whose modules are all complete.
+    _run_wave_flow_wiring_check(pcp_dir, wave_modules, wave_number)
+
     # 12. UI kit recipe completeness + import verification (CTRL-028,
     # advisory) — inert unless .pcp/ui_kit_recipes.yaml exists.
     _run_wave_ui_kit_check(pcp_dir, wave_modules, wave_number)
@@ -3039,6 +3056,114 @@ def _run_wave_menu_bar_check(pcp_dir: Path, wave_modules: list[dict], wave_numbe
             f"{required}, but {', '.join(missing)} not found in any scanned UI-facing target file"
         )
     _wave_record(pcp_dir, wave_number, "menu-bar", "CTRL-027", findings, files=checked, result="pass")
+    for f in findings:
+        console.print(f"[yellow]{f}[/yellow]")
+    return findings
+
+
+def _run_wave_exposure_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
+    """CTRL-039, ADVISORY. `exposure.mode` (schema: module_acceptance
+    criterion) is the escape hatch out of nav_graph reachability measurement
+    and the Feature Exposure Ladder — a criterion can legitimately be built
+    with no UI path at all (exposed via an API endpoint, or purely internal/
+    background) instead of being wrongly scored as "Built, Hidden". Absence
+    of `exposure` on a UI-facing criterion is NOT a finding — default is
+    'ui', the behavior every UI criterion already had before this field
+    existed. Declaring 'api'/'internal' without a real reason on file is,
+    though: same placeholder-rejection posture as CTRL-017's build_vs_buy
+    rationale check (same phrase list/word-count floor, reused verbatim so
+    the two can't drift into disagreeing about what counts as a real reason).
+    """
+    findings: list[str] = []
+    checked: list[str] = []
+
+    for mod in wave_modules:
+        acc_path = pcp_dir / "strategy" / "modules" / mod["name"] / "acceptance.yaml"
+        if not acc_path.exists():
+            continue
+        acc = load_yaml(acc_path)
+        for c in acc.get("criteria", []):
+            if c.get("status") != "complete" or not _is_ui_facing_criterion(c):
+                continue
+            exposure = c.get("exposure") or {}
+            mode = exposure.get("mode", "ui")
+            if mode == "ui":
+                continue
+            checked.append(f"{mod['name']}/{c['id']}")
+            justification = (exposure.get("justification") or "").strip()
+            normalized = justification.lower().rstrip(".")
+            word_count = len(justification.split())
+            if not justification or normalized in _BVB_PLACEHOLDER_PHRASES or word_count < _BVB_MIN_WORDS:
+                findings.append(
+                    f"Exposure (advisory): '{mod['name']}/{c['id']}' declares exposure.mode={mode} "
+                    f"but justification reads as a placeholder, not a real reason: '{justification or '(empty)'}'"
+                )
+
+    _wave_record(pcp_dir, wave_number, "exposure-justification", "CTRL-039", findings, files=checked, result="pass")
+    for f in findings:
+        console.print(f"[yellow]{f}[/yellow]")
+    return findings
+
+
+def _run_wave_flow_wiring_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
+    """CTRL-040, ADVISORY (report-first, same rollout posture CTRL-019/020/
+    025/027 all took — earns hard-block only after a measured false-positive
+    rate says it deserves it). Every other wave-merge check validates
+    CODE-level integration (deps complete, tests pass, imports resolve);
+    none of them prove a real cross-module USER JOURNEY still works end to
+    end once its pieces land in different waves. See flow_wiring.py and
+    .pcp/strategy/user_flows.yaml (human-authorized via `pcp amend
+    user_flows`, same propose/diff/approve mechanic as decomposition.md/
+    dependency_map.md).
+
+    Stays completely inert — no telemetry record at all, same posture
+    CTRL-027/028 already established for a project that hasn't opted in —
+    unless user_flows.yaml declares at least one flow whose modules_spanned
+    are all complete AND at least one of them completed in THIS wave (so a
+    satisfied flow doesn't silently re-run and re-record at every later wave
+    forever)."""
+    from pcp import flow_wiring
+
+    flows = flow_wiring.load_flows(pcp_dir)
+    if not flows:
+        return []
+
+    all_complete: set[str] = set()
+    modules_dir = pcp_dir / "strategy" / "modules"
+    if modules_dir.exists():
+        for mod_path in sorted(p for p in modules_dir.iterdir() if p.is_dir()):
+            acc_path = mod_path / "acceptance.yaml"
+            if not acc_path.exists():
+                continue
+            acc = load_yaml(acc_path)
+            criteria = acc.get("criteria", [])
+            if criteria and all(c.get("status") == "complete" for c in criteria):
+                all_complete.add(mod_path.name)
+
+    top_base_url = None
+    try:
+        top_base_url = (load_yaml(pcp_dir / "strategy" / "user_flows.yaml") or {}).get("base_url")
+    except Exception:
+        pass
+
+    findings: list[str] = []
+    checked: list[str] = []
+    ran_any = False
+    for flow in flows:
+        if not flow_wiring.flow_is_runnable(flow, wave_modules, all_complete):
+            continue
+        ran_any = True
+        checked.append(flow.get("id", "?"))
+        ok, detail = flow_wiring.run_flow(flow, flow.get("base_url") or top_base_url)
+        if ok is False:
+            findings.append(f"Flow wiring (advisory): {detail}")
+        elif ok is None:
+            console.print(f"[dim]{detail}[/dim]")
+
+    if not ran_any:
+        return []
+
+    _wave_record(pcp_dir, wave_number, "flow-wiring", "CTRL-040", findings, files=checked, result="pass")
     for f in findings:
         console.print(f"[yellow]{f}[/yellow]")
     return findings

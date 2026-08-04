@@ -99,6 +99,22 @@
             "type": "string",
             "description": "Shell command that installs the direct-match dependency (e.g. 'pip install acroforge'). Required when install_only is true; ignored otherwise."
           },
+          "exposure": {
+            "type": "object",
+            "description": "Does this UI-facing criterion actually need to be reachable through the UI, or is it deliberately exposed a different way (API, internal/background)? Default when absent on a UI-facing criterion is 'ui' -- no finding. Declaring 'api'/'internal' is the escape hatch out of the Feature Exposure Ladder/nav_graph reachability measurement: pcp design-audit and build.py's CTRL-039 check require a real, non-placeholder justification whenever mode != ui, same posture as build_vs_buy's rationale field.",
+            "required": ["mode"],
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": ["ui", "api", "internal"]
+              },
+              "justification": {
+                "type": "string",
+                "description": "Required in spirit (not schema) whenever mode is 'api' or 'internal' -- e.g. 'exposed via POST /api/export, no UI surface planned this phase'. Empty/placeholder text here is exactly what CTRL-039 flags."
+              }
+            }
+          },
           "design_justification": {
             "type": "object",
             "description": "PCP Design lifecycle, stage 2 (Decide per-screen) -- only meaningful for UI-facing criteria. Not schema-required (whether a criterion is UI-facing isn't expressible as a JSON-schema condition on free-text description) -- absence on a real UI criterion is instead a finding surfaced by pcp design-audit, not a validation failure.",

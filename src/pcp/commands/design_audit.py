@@ -108,12 +108,30 @@ def build_design_audit(pcp_dir: Path) -> dict:
     nav_depth_missing = 0
     customizable_count = 0
 
+    non_ui_exposed = []
+
     if modules_dir.exists():
         for mod_path in sorted(p for p in modules_dir.iterdir() if p.is_dir()):
             acceptance = _load_yaml(mod_path / "acceptance.yaml")
             ui_criteria = []
             for c in acceptance.get("criteria", []):
                 if not _is_ui_facing_criterion(c):
+                    continue
+                exposure = c.get("exposure") or {}
+                exposure_mode = exposure.get("mode", "ui")
+                if exposure_mode != "ui":
+                    # Deliberately not on the Feature Exposure Ladder at all --
+                    # the ladder measures UI discoverability, and this
+                    # criterion declared it isn't exposed through the UI.
+                    # Listed separately so it's still visible in the audit
+                    # trail, never silently dropped or mis-scored as rung 1.
+                    non_ui_exposed.append({
+                        "module": mod_path.name,
+                        "id": c.get("id"),
+                        "description": c.get("description"),
+                        "mode": exposure_mode,
+                        "justification": exposure.get("justification", ""),
+                    })
                     continue
                 rung = _classify_rung(c, nav, _nav_depth_threshold())
                 if rung is None:
@@ -173,6 +191,7 @@ def build_design_audit(pcp_dir: Path) -> dict:
         "nav_depth": nav_depth_summary,
         "customization": customization_summary,
         "ui_archetype": ui_archetype,
+        "non_ui_exposed": non_ui_exposed,
     }
 
 
@@ -258,6 +277,26 @@ def _render_markdown(data: dict, timestamp: str) -> str:
     else:
         lines.append("_No UI-facing criteria yet._")
     lines.append("")
+
+    non_ui = data.get("non_ui_exposed") or []
+    lines += ["## Explicitly Non-UI-Exposed", ""]
+    if non_ui:
+        lines.append(
+            f"{len(non_ui)} UI-facing-looking criteria declare `exposure.mode` != `ui` — deliberately "
+            "exposed via API/internal instead of a screen, so they are excluded from the ladder above "
+            "rather than mis-scored as rung 1. See CTRL-039 for the justification-substance check."
+        )
+        lines.append("")
+        lines.append("| Criterion | Mode | Justification |")
+        lines.append("|---|---|---|")
+        for n in non_ui:
+            lines.append(
+                f"| {n['module']}/{n['id']}: {n['description']} | {n['mode']} | {n['justification'] or '_(none)_'} |"
+            )
+        lines.append("")
+    else:
+        lines.append("_No criteria declare a non-ui exposure mode._")
+        lines.append("")
 
     lines += ["## Top Menu Bar Convention", ""]
     if data["ui_archetype"] == "desktop_app":

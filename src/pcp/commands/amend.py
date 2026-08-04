@@ -80,6 +80,13 @@ def _targets(pcp_dir: Path) -> dict[str, SpecTarget]:
             guarded=True,
             description="current SDLC phase and its machine-enforced exit criteria",
         ),
+        "user_flows": SpecTarget(
+            name="strategy/user_flows.yaml",
+            path=pcp_dir / "strategy" / "user_flows.yaml",
+            key="content",
+            schema="user_flows",
+            description="critical end-to-end user journeys spanning multiple modules, walked for real by CTRL-040's wave-merge flow-wiring check",
+        ),
     }
 
 # Accepted aliases, so `pcp amend architecture.md` and `pcp amend
@@ -98,6 +105,9 @@ _ALIASES = {
     "sdlc-phase": "sdlc_phase",
     "sdlc_phase.yaml": "sdlc_phase",
     "SDLC_phase.yaml": "sdlc_phase",
+    "user-flows": "user_flows",
+    "user_flows.yaml": "user_flows",
+    "strategy/user_flows.yaml": "user_flows",
 }
 
 
@@ -115,7 +125,7 @@ def resolve_target_key(raw: str) -> str | None:
     key = normalised.replace("-", "_")
     return key if key in {
         "architecture", "decomposition", "dependency_map",
-        "ci_rules", "controls", "sdlc_phase",
+        "ci_rules", "controls", "sdlc_phase", "user_flows",
     } else None
 
 
@@ -230,7 +240,8 @@ def amend(target_file: str, change: str, project_path: str | None, yes: bool, al
     """Propose + human-approve a rewrite of a human-authorized .pcp/ file.
 
     TARGET_FILE is one of: architecture, decomposition, dependency_map,
-    ci_rules, controls, sdlc_phase (file names like `architecture.md` also work).
+    ci_rules, controls, sdlc_phase, user_flows (file names like
+    `architecture.md` also work).
 
     For objective.md/target_state.md use `pcp correct-objective`; for module
     spec.yaml/acceptance.yaml use `pcp pm`.
@@ -253,7 +264,7 @@ def amend(target_file: str, change: str, project_path: str | None, yes: bool, al
             sys.exit(2)
         console.print(
             f"[red]Error:[/red] {target_file} is not an amendable file. Choose one of: "
-            "architecture, decomposition, dependency_map, ci_rules, controls, sdlc_phase."
+            "architecture, decomposition, dependency_map, ci_rules, controls, sdlc_phase, user_flows."
         )
         sys.exit(2)
 
