@@ -158,7 +158,7 @@ def _max_vision_chars() -> int:
 
 
 VALID_CHECKS = {"ast_pattern", "file_exists", "test_passes", "manual", "dom_contains", "url_responds", "visual"}
-VALID_STATUSES = {"pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"}
+VALID_STATUSES = {"pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression", "obsolete"}
 VALID_LOGIC_TIERS = {1, 2, 3, 4, 5, 6}
 VALID_BVB_DECISIONS = {"reuse_whole", "reuse_partial", "reimplement_from_reference", "fork_adapt", "build_fresh"}
 VALID_MODULE_BVB_DECISIONS = VALID_BVB_DECISIONS | {"not_applicable"}

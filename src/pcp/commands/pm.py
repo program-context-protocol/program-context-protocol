@@ -209,33 +209,41 @@ def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
     spec_path = mod_dir / "spec.yaml"
     acc_path = mod_dir / "acceptance.yaml"
 
-    # Force version 2.0 regardless of what the LLM returned -- same reasoning
-    # as kickoff.py: a spec pm touches must always get logic_tier/build_vs_buy
-    # enforcement, never silently stay on (or revert to) the ungated 1.0 shape.
-    spec_changes = mod_result["spec_changes"]
-    spec_changes["version"] = "2.0"
+    coercion_warnings: list[str] = []
 
-    # On modify, a real prior module-level build_vs_buy decision must not be
-    # silently discarded just because this pm call's response omitted it --
-    # only coerce to a flagged placeholder if one never existed.
-    existing_spec = {}
-    if spec_path.exists():
-        try:
-            existing_spec = yaml.safe_load(spec_path.read_text()) or {}
-        except Exception:
-            pass
-    if "build_vs_buy" not in spec_changes and existing_spec.get("build_vs_buy"):
-        spec_changes["build_vs_buy"] = existing_spec["build_vs_buy"]
+    # spec_changes is legitimately absent when this pm call only touches
+    # acceptance.yaml (e.g. adding/editing criteria with no spec-level
+    # change) -- an existing spec.yaml is left untouched in that case,
+    # rather than assuming every pm call rewrites the spec.
+    if mod_result.get("spec_changes") is not None:
+        # Force version 2.0 regardless of what the LLM returned -- same
+        # reasoning as kickoff.py: a spec pm touches must always get
+        # logic_tier/build_vs_buy enforcement, never silently stay on (or
+        # revert to) the ungated 1.0 shape.
+        spec_changes = mod_result["spec_changes"]
+        spec_changes["version"] = "2.0"
 
-    # Same preservation rule for module_logic_breakdown -- the prompt tells
-    # the LLM to OMIT this key for a small, same-shape addition (deliberately,
-    # to avoid forcing a re-declaration on every trivial pm call), so an
-    # omitted key must mean "unchanged", not "delete the prior breakdown".
-    if "module_logic_breakdown" not in spec_changes and existing_spec.get("module_logic_breakdown"):
-        spec_changes["module_logic_breakdown"] = existing_spec["module_logic_breakdown"]
+        # On modify, a real prior module-level build_vs_buy decision must not
+        # be silently discarded just because this pm call's response omitted
+        # it -- only coerce to a flagged placeholder if one never existed.
+        existing_spec = {}
+        if spec_path.exists():
+            try:
+                existing_spec = yaml.safe_load(spec_path.read_text()) or {}
+            except Exception:
+                pass
+        if "build_vs_buy" not in spec_changes and existing_spec.get("build_vs_buy"):
+            spec_changes["build_vs_buy"] = existing_spec["build_vs_buy"]
 
-    coercion_warnings = _normalize_spec(spec_changes, mod_name)
-    spec_path.write_text(yaml.dump(spec_changes, default_flow_style=False))
+        # Same preservation rule for module_logic_breakdown -- the prompt tells
+        # the LLM to OMIT this key for a small, same-shape addition (deliberately,
+        # to avoid forcing a re-declaration on every trivial pm call), so an
+        # omitted key must mean "unchanged", not "delete the prior breakdown".
+        if "module_logic_breakdown" not in spec_changes and existing_spec.get("module_logic_breakdown"):
+            spec_changes["module_logic_breakdown"] = existing_spec["module_logic_breakdown"]
+
+        coercion_warnings += _normalize_spec(spec_changes, mod_name)
+        spec_path.write_text(yaml.dump(spec_changes, default_flow_style=False))
 
     # Save/Merge acceptance.yaml
     existing_criteria = []
@@ -247,7 +255,7 @@ def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
             pass
 
     criteria_map = {c["id"]: c for c in existing_criteria}
-    for new_c in mod_result["acceptance_changes"].get("criteria", []):
+    for new_c in mod_result.get("acceptance_changes", {}).get("criteria", []):
         # Field-level merge onto the existing entry, not a full replacement --
         # same reasoning as spec_changes's build_vs_buy/module_logic_breakdown
         # preservation above, applied per-criterion. `verified_by` is
@@ -347,10 +355,13 @@ def pm(intent: str, project_path: str | None):
             sys.exit(2)
         console.print(f"[bold]{mr.get('module_action', 'modify').upper()} module[/bold] [cyan]'{mod_name}'[/cyan]")
         console.print(f"[dim]{mr.get('module_explanation', '')}[/dim]")
-        console.print("[bold]Proposed spec.yaml changes:[/bold]")
-        console.print(yaml.dump(mr["spec_changes"], default_flow_style=False))
+        if mr.get("spec_changes"):
+            console.print("[bold]Proposed spec.yaml changes:[/bold]")
+            console.print(yaml.dump(mr["spec_changes"], default_flow_style=False))
+        else:
+            console.print("[bold]Proposed spec.yaml changes:[/bold] [dim](none -- acceptance.yaml only)[/dim]")
         console.print("[bold]Proposed acceptance.yaml criteria to add:[/bold]")
-        for c in mr["acceptance_changes"].get("criteria", []):
+        for c in mr.get("acceptance_changes", {}).get("criteria", []):
             console.print(f"  - [{c['id']}] {c['description']} (check: {c.get('check', 'manual')})")
         console.print("")
 

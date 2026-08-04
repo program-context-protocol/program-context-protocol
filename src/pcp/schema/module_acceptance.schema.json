@@ -63,7 +63,7 @@
           },
           "status": {
             "type": "string",
-            "enum": ["pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression"]
+            "enum": ["pending", "complete", "deferred", "blocked-ci", "blocked-secret", "blocked-regression", "obsolete"]
           },
           "verified_by": {
             "type": "string",
