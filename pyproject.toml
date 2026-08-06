@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "program-context-protocol"
-version = "0.12.9"
+version = "0.12.12"
 description = "PCP — prevent LLM hallucination and context drift across dev sessions"
 readme = "README.md"
 keywords = [
@@ -32,6 +32,12 @@ graph = ["graphifyy>=0.8"]
 # Optional: pulls in a Chromium binary via `playwright install`, not needed
 # for anything else in this package.
 visual = ["playwright>=1.40"]
+# Optional OTel tracing of PCP's own LLM calls (llm/otel_trace.py), additive
+# to token_ledger.yaml -- inert unless PCP_OTEL_ENDPOINT is also set, so the
+# base install never depends on this. Wire format is OpenTelemetry's GenAI
+# semantic conventions (vendor-neutral), viewable in self-hosted Langfuse or
+# any other OTLP-compatible backend.
+otel = ["opentelemetry-api>=1.24", "opentelemetry-sdk>=1.24", "opentelemetry-exporter-otlp-proto-http>=1.24"]
 
 [project.urls]
 Homepage = "https://github.com/program-context-protocol/program-context-protocol"

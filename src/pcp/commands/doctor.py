@@ -136,6 +136,16 @@ def detect_context7(project_root: Path) -> dict:
     }
 
 
+def detect_otel() -> dict:
+    """Pure detection for PCP's own optional LLM-call tracing (llm/otel_trace.py)
+    -- no project_root needed, this is process-env + installed-package only."""
+    import importlib.util
+
+    extra_installed = importlib.util.find_spec("opentelemetry") is not None
+    endpoint = os.environ.get("PCP_OTEL_ENDPOINT")
+    return {"extra_installed": extra_installed, "endpoint_configured": bool(endpoint)}
+
+
 def configure_context7(project_root: Path) -> bool:
     """Adds a context7 entry to .mcp.json, creating the file if absent and
     preserving any other MCP servers already declared there. Returns False
@@ -723,6 +733,15 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, fix_work
     )
     console.print(f"Context7 (live library docs for `pcp build`'s coding agent): {c7_status}")
 
+    otel = detect_otel()
+    if otel["endpoint_configured"] and otel["extra_installed"]:
+        otel_status = "[green]active[/green] (PCP_OTEL_ENDPOINT set, otel extra installed)"
+    elif otel["endpoint_configured"] and not otel["extra_installed"]:
+        otel_status = "[yellow]PCP_OTEL_ENDPOINT set but `otel` extra not installed[/yellow] (pip install program-context-protocol[otel])"
+    else:
+        otel_status = "[dim]inactive[/dim] (set PCP_OTEL_ENDPOINT to trace PCP's own LLM calls, additive to token_ledger.yaml)"
+    console.print(f"OTel tracing of PCP's own LLM calls: {otel_status}")
+
     # Context-route staleness (CTRL-021): a route resolving to zero files
     # silently starves agents of context — flag it here where humans look.
     from pcp import context_map
@@ -812,6 +831,7 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, fix_work
         },
         "browser_automation": {"assumed_available": True},
         "context7": context7,
+        "otel": otel,
         "agent_config_audit": {"findings": len(config_findings)},
         "version_drift": drift,
     }

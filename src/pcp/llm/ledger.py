@@ -14,6 +14,8 @@ from pathlib import Path
 
 import yaml
 
+from pcp.llm.otel_trace import record_span
+
 # Guards token_ledger.yaml's read-modify-write -- gate checks in build.py's
 # per-criterion loop that make an LLM call (architect-review, gate,
 # design-justification) run concurrently with each other (2026-07-18,
@@ -45,3 +47,4 @@ def _log_usage(pcp_dir: Path | None, command: str, model: str | None, session_id
             "cost_usd": cost_usd,
         })
         ledger_path.write_text(yaml.dump({"calls": entries}, default_flow_style=False))
+    record_span(command, model, session_id, usage, cost_usd)
