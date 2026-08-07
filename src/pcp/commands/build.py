@@ -3834,11 +3834,17 @@ def _build_one_criterion(
             if agent_session_id_actual:
                 transcript_path = find_transcript_for_session(agent_session_id_actual)
                 if transcript_path:
-                    run_capture(
+                    capture_result = run_capture(
                         pcp_dir, transcript_path,
                         source=f"build:{mod['name']}:{c['id']}",
                         session_id=agent_session_id_actual,
                     )
+                    for item in capture_result.get("escalations") or []:
+                        console.print(
+                            f"[yellow]⚠  high-severity decision logged, no enforcing criterion "
+                            f"({mod['name']}/{c['id']}):[/yellow] {item.get('summary', '')} "
+                            f"— consider `pcp pm \"{item.get('summary', '')}\"`"
+                        )
 
         # Running gates -- all thirteen checks below are mutually independent
         # (each reads disk/git/subprocess/an LLM call and writes only its own
@@ -4275,7 +4281,14 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
             _self_transcript = find_transcript_for_session(_self_session_id)
             if _self_transcript:
                 console.print("[dim]Capturing current session for business/technical drift before build...[/dim]")
-                run_capture(pcp_dir, _self_transcript, source=f"session:{_self_session_id}", session_id=_self_session_id)
+                _self_capture_result = run_capture(
+                    pcp_dir, _self_transcript, source=f"session:{_self_session_id}", session_id=_self_session_id,
+                )
+                for item in _self_capture_result.get("escalations") or []:
+                    console.print(
+                        f"[yellow]⚠  high-severity decision logged, no enforcing criterion:[/yellow] "
+                        f"{item.get('summary', '')} — consider `pcp pm \"{item.get('summary', '')}\"`"
+                    )
         except Exception as e:
             console.print(f"[dim]Self-capture skipped: {e}[/dim]")
 

@@ -69,4 +69,15 @@ def capture(project_path: str | None, transcript_file: str | None):
             f"[green]pcp capture:[/green] {result['business_count']} business item(s) -> .pcp/brd.md, "
             f"{result['technical_count']} technical item(s) -> .pcp/decision_log.jsonl"
         )
+        escalations = result.get("escalations") or []
+        if escalations:
+            console.print(
+                f"[yellow]⚠  {len(escalations)} high-severity technical decision(s) logged with no "
+                "enforcing acceptance criterion:[/yellow]"
+            )
+            for item in escalations:
+                summary = item.get("summary", "")
+                console.print(f"   - {summary}")
+                console.print(f"     Consider: pcp pm \"{summary}\"")
+
     sys.exit(0)

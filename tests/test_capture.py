@@ -77,6 +77,93 @@ def test_apply_technical_items_appends_decision_log(tmp_path):
     assert records[0]["source"] == "build:core:A001"
 
 
+def test_apply_technical_items_threads_severity_into_decision_log(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    capture.apply_technical_items(
+        pcp_dir,
+        [{"category": "architecture", "summary": "No durable store backs rollout state",
+          "evidence": "...", "severity": "high"}],
+        source="session:abc",
+        session_id="sess-1",
+    )
+    records = decision_log.load(pcp_dir)
+    assert records[0]["severity"] == "high"
+
+
+def test_apply_technical_items_defaults_severity_to_low(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    capture.apply_technical_items(
+        pcp_dir,
+        [{"category": "library-choice", "summary": "Chose Postgres", "evidence": "..."}],
+        source="session:abc",
+        session_id="sess-1",
+    )
+    records = decision_log.load(pcp_dir)
+    assert records[0]["severity"] == "low"
+
+
+def test_escalation_candidates_filters_to_high_severity_only():
+    items = [
+        {"summary": "no durable store", "severity": "high"},
+        {"summary": "picked yaml over json", "severity": "low"},
+        {"summary": "worth remembering", "severity": "medium"},
+    ]
+    result = capture.escalation_candidates(items)
+    assert len(result) == 1
+    assert result[0]["summary"] == "no durable store"
+
+
+def test_run_capture_surfaces_escalations(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Objective")
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, [("user", "hello"), ("assistant", "hi")])
+
+    mock_response = {
+        "business_items": [],
+        "technical_items": [
+            {"category": "architecture", "summary": "State resets on redeploy, no durable store",
+             "evidence": "...", "severity": "high"},
+        ],
+    }
+    with patch("pcp.llm.client.call_json") as mock_call_json:
+        mock_call_json.return_value = mock_response
+        result = capture.run_capture(pcp_dir, transcript, source="session:x", session_id="sess1")
+
+    assert len(result["escalations"]) == 1
+    assert result["escalations"][0]["summary"] == "State resets on redeploy, no durable store"
+
+
+def test_capture_cli_prints_escalation_suggestion(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Objective")
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, [("user", "hello"), ("assistant", "hi")])
+
+    mock_response = {
+        "business_items": [],
+        "technical_items": [
+            {"category": "architecture", "summary": "No durable store for rollout state",
+             "evidence": "...", "severity": "high"},
+        ],
+    }
+    with patch("pcp.llm.client.call_json") as mock_call_json:
+        mock_call_json.return_value = mock_response
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "capture", "--path", str(tmp_path), "--transcript-file", str(transcript),
+        ])
+
+    assert result.exit_code == 0
+    assert "high-severity technical decision" in result.output
+    assert "pcp pm" in result.output
+    assert "No durable store for rollout state" in result.output
+
+
 def test_run_capture_never_raises_on_bad_transcript(tmp_path):
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()

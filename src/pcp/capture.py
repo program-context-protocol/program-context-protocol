@@ -12,6 +12,14 @@ in brd.md for a human to act on via `pcp pm`, not auto-applied.
 Two trigger points call into run_capture(): the `pcp capture` CLI command
 (wired to a Claude Code SessionEnd hook, for human/PM/UAT sessions) and
 `pcp build`'s per-criterion loop (for autonomous coding-agent sessions).
+
+Each technical item is severity-tagged by the classifier (low/medium/high).
+decision_log.jsonl is itself advisory-only -- it feeds select_relevant() into
+future build prompts but enforces nothing -- so a "high" item (a real,
+currently-unmitigated risk no acceptance criterion covers) is additionally
+surfaced as a printed escalation suggestion (`escalation_candidates()`,
+never auto-applied) everywhere run_capture() is called, so it doesn't require
+a human to separately remember to go read decision_log.jsonl for it.
 """
 
 import gzip
@@ -50,6 +58,14 @@ item is clearly about one specific module from the given list, set module to tha
 exact name; if it's program-level, spans multiple modules, or you're not confident, set \
 module to null — do not guess.
 
+For each technical item, set severity to "high" only if the item describes a real, \
+currently-unmitigated risk that no existing acceptance criterion enforces — e.g. state that \
+gates a business-critical decision has no durable/persistent store, a security or \
+data-integrity gap, a single point of failure, a silent-failure path. "high" is for things \
+that should probably become an acceptance criterion, not just a note for later. Use "medium" \
+for a real tradeoff or workaround worth remembering but not urgent, and "low" for routine \
+implementation color (a library pick, a naming choice).
+
 Skip anything that's just routine back-and-forth with no durable decision (e.g. "run the \
 tests", "looks good", debugging noise). If nothing substantive was discussed, return empty lists.
 
@@ -61,7 +77,7 @@ Output schema:
     {"description": "...", "evidence": "short quoted excerpt", "supersedes": "BRD-001 or null", "drift_flag": "explanation or null", "module": "exact-module-name or null"}
   ],
   "technical_items": [
-    {"category": "library-choice|architecture|workaround|root-cause|other", "summary": "...", "evidence": "short quoted excerpt"}
+    {"category": "library-choice|architecture|workaround|root-cause|other", "summary": "...", "evidence": "short quoted excerpt", "severity": "low|medium|high"}
   ]
 }
 """
@@ -255,7 +271,25 @@ def apply_technical_items(pcp_dir: Path, items: list[dict], source: str, session
             category=item.get("category", "other"),
             summary=item.get("summary", ""),
             evidence=item.get("evidence", ""),
+            severity=item.get("severity", "low"),
         )
+
+
+def escalation_candidates(items: list[dict]) -> list[dict]:
+    """Deterministic filter, no LLM here -- same tier/posture as
+    kickoff.check_prior_art_evidence: the judgment (is this severity=="high")
+    already happened once, in classify_transcript's single call. This just
+    surfaces the ones that cleared that bar.
+
+    Closes a real gap: decision_log.jsonl is advisory-only (feeds
+    select_relevant() into future build prompts, never gates anything), so a
+    high-severity finding surfaced in an ad-hoc/human session -- outside
+    `pcp build`'s own loop -- had no forcing function into acceptance
+    criteria. Same shape as the objective-conflict gap CTRL-035 closed for
+    business-correction drift, but generic: this never blocks or auto-runs
+    `pcp pm` -- it only prints the suggestion so a human doesn't have to
+    remember to look for it."""
+    return [item for item in items if item.get("severity") == "high"]
 
 
 def archive_transcript(pcp_dir: Path, transcript_path: Path | None, session_id: str | None) -> str | None:
@@ -334,6 +368,7 @@ def run_capture(pcp_dir: Path, transcript_path: Path, source: str, session_id: s
         return {
             "business_count": len(business_items), "technical_count": len(technical_items),
             "archived_path": archived_path,
+            "escalations": escalation_candidates(technical_items),
         }
     except Exception as e:
         return {"skipped": f"capture failed: {e}", "archived_path": archived_path}
