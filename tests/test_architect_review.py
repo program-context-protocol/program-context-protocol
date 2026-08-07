@@ -3,6 +3,7 @@ from unittest.mock import patch, MagicMock
 from click.testing import CliRunner
 
 from pcp.cli import cli
+from pcp.commands.architect_review import select_relevant_adrs, _load_kb
 
 CLEAN_RESULT = {"findings": [], "summary": "No architecture violations found.", "blocks": 0, "warns": 0}
 
@@ -12,6 +13,60 @@ def _init_pcp(tmp_path):
     pcp_dir.mkdir()
     (pcp_dir / "architecture.md").write_text("# Architecture\nKeep modules decoupled.")
     return pcp_dir
+
+
+# ── bounded ADR selection (kb/adr/ token-discipline fix) ──
+
+def test_select_relevant_adrs_bounds_by_count(tmp_path):
+    adr_dir = tmp_path / "adr"
+    adr_dir.mkdir()
+    for i in range(1, 6):
+        (adr_dir / f"ADR-{i:03d}-topic.md").write_text(f"decision {i}")
+    files = sorted(adr_dir.glob("*.md"))
+
+    selected = select_relevant_adrs(files, limit=2, max_chars=10000)
+    assert [f.stem for f in selected] == ["ADR-004-topic", "ADR-005-topic"]
+
+
+def test_select_relevant_adrs_bounds_by_chars():
+    class FakePath:
+        def __init__(self, stem, size):
+            self.stem = stem
+            self._size = size
+
+        def stat(self):
+            return type("S", (), {"st_size": self._size})()
+
+    files = [FakePath(f"ADR-{i:03d}-x", 400) for i in range(1, 5)]
+    selected = select_relevant_adrs(files, limit=10, max_chars=900)
+    assert len(selected) == 2
+    assert [f.stem for f in selected] == ["ADR-003-x", "ADR-004-x"]
+
+
+def test_select_relevant_adrs_numeric_not_lexical_order(tmp_path):
+    adr_dir = tmp_path / "adr"
+    adr_dir.mkdir()
+    (adr_dir / "ADR-2-early.md").write_text("x")
+    (adr_dir / "ADR-10-later.md").write_text("y")
+    files = sorted(adr_dir.glob("*.md"))
+
+    selected = select_relevant_adrs(files, limit=10, max_chars=10000)
+    assert [f.stem for f in selected] == ["ADR-2-early", "ADR-10-later"]
+
+
+def test_select_relevant_adrs_empty_dir_returns_empty():
+    assert select_relevant_adrs([], limit=10, max_chars=10000) == []
+
+
+def test_load_kb_bounds_adr_count(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    adr_dir = pcp_dir / "kb" / "adr"
+    adr_dir.mkdir(parents=True)
+    for i in range(1, 26):
+        (adr_dir / f"ADR-{i:03d}-topic.md").write_text(f"decision {i}")
+
+    kb = _load_kb(pcp_dir, [])
+    assert kb.count("### ADR-") <= 20
 
 
 def test_no_diff_exits_clean(tmp_path):

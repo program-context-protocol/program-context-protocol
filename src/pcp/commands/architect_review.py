@@ -1,6 +1,8 @@
 """pcp architect-review — architecture principle review against persona + KB."""
 
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -71,18 +73,58 @@ def _load_persona(pcp_dir: Path) -> str:
     return persona_path.read_text()
 
 
+def _adr_sort_key(path: Path) -> tuple:
+    """Numeric ADR-NNN order, not lexical -- ADR-10 sorting before ADR-9 as
+    text would silently misorder once past single digits."""
+    m = re.match(r"ADR-(\d+)", path.stem)
+    return (int(m.group(1)) if m else 0, path.stem)
+
+
+def select_relevant_adrs(adr_files: list[Path], limit: int | None = None,
+                          max_chars: int | None = None) -> list[Path]:
+    """Deterministic, no LLM (rung 1) -- same bounded-selection shape as
+    decision_log.select_relevant(), applied to kb/adr/. Closes a real gap:
+    _load_kb() used to load every ADR file unconditionally into every
+    architect-review call ("small, high signal" was only true at zero-to-few
+    files) -- unbounded as kb/adr/ grows, exactly the token-discipline
+    violation decision_log.jsonl already had to solve for the same shape of
+    problem. See md_taxonomy_guide.md.
+
+    Newest-first (highest ADR-NNN number), bounded by count and chars.
+    PCP_ARCHITECT_REVIEW_MAX_ADRS (default 20), PCP_ARCHITECT_REVIEW_MAX_ADR_CHARS
+    (default 8000). Returned in ascending (oldest-first) order for readability."""
+    limit = limit if limit is not None else int(os.environ.get("PCP_ARCHITECT_REVIEW_MAX_ADRS", "20"))
+    max_chars = max_chars if max_chars is not None else int(
+        os.environ.get("PCP_ARCHITECT_REVIEW_MAX_ADR_CHARS", "8000")
+    )
+    if limit <= 0:
+        return []
+
+    ordered = sorted(adr_files, key=_adr_sort_key, reverse=True)
+    selected, used_chars = [], 0
+    for f in ordered:
+        if len(selected) >= limit:
+            break
+        size = f.stat().st_size
+        if used_chars + size > max_chars:
+            continue
+        selected.append(f)
+        used_chars += size
+    return sorted(selected, key=_adr_sort_key)
+
+
 def _load_kb(pcp_dir: Path, changed_files: list[str]) -> str:
-    """Load ADRs always. Load domain KB contextually based on changed files."""
+    """Load ADRs (bounded, see select_relevant_adrs). Load domain KB
+    contextually based on changed files."""
     kb_dir = pcp_dir / "kb"
     if not kb_dir.exists():
         return ""
 
     parts = []
 
-    # ADRs — always load (small, high signal)
     adr_dir = kb_dir / "adr"
     if adr_dir.exists():
-        adr_files = sorted(adr_dir.glob("*.md"))
+        adr_files = select_relevant_adrs(sorted(adr_dir.glob("*.md")))
         if adr_files:
             parts.append("## Architecture Decision Records\n")
             for f in adr_files:
