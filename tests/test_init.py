@@ -16,7 +16,7 @@ def test_init_scaffolds_expected_files(tmp_path):
         "controls.yaml", "SDLC_phase.yaml", "strategy/decomposition.md",
         "architect_persona.md", "kb/adr/ADR-001-example.md", "kb/domain/general.md",
         "policies/escalation.rego", "policies/bypass_approval.rego", "policies/coupling_threshold.rego",
-        "RECOMMENDED_PERMISSIONS.md", "design_system.md",
+        "RECOMMENDED_PERMISSIONS.md", "design_system.md", "logic_tier_guide.md", "md_taxonomy_guide.md",
     ]:
         assert (pcp / rel).exists(), f"missing {rel}"
 
