@@ -80,11 +80,18 @@ def test_diff_is_read_from_git_not_from_the_agents_own_envelope():
     separately, never trusted as the agent's own self-report. If this
     regresses (someone starts trusting envelope.get('files_changed') or
     similar), PCP would be trusting exactly the kind of unverified
-    self-report its own gates exist to catch everywhere else."""
+    self-report its own gates exist to catch everywhere else.
+
+    No closing paren in the matched substring (2026-08-08): both calls
+    gained an exclude_dirty kwarg (stale pre-existing worktree dirty state
+    must not leak into a different criterion's gate scope), a legitimate
+    signature extension that must not re-break this on the next one --
+    the check is "still git-based, still this ref", not "exactly these two
+    args and no more"."""
     src = _source()
-    assert "_get_changed_files_since(project_root, criterion_start_ref)" in src, \
+    assert "_get_changed_files_since(project_root, criterion_start_ref" in src, \
         "changed files must be computed from git state, not from the agent's own report"
-    assert "_get_working_diff(project_root, criterion_start_ref)" in src, \
+    assert "_get_working_diff(project_root, criterion_start_ref" in src, \
         "the diff gates evaluate must come from git, not from the agent's own report"
 
 

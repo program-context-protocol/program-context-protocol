@@ -1433,8 +1433,20 @@ _AUTO_COMMIT_EXCLUDES = tuple(
 
 
 def _is_pcp_operational(path: str) -> bool:
+    """Not real agent work product -- must never reach a gate/judge/scope-
+    guard as if it were. Originally PCP's own operational writes only
+    (token ledger, telemetry); extended to _AGENT_LOCAL_CONFIG (2026-08-08)
+    -- that tuple already excludes these files from _auto_commit_criterion's
+    STAGING (so a worktree branch never commits them), but nothing excluded
+    them from what changed_files/_get_working_diff show gates. Real gap:
+    .testmondata is seeded (untracked) into every fresh worktree by
+    _seed_testmon_cache and never cleaned up, so it sat in changed_files for
+    every criterion, in every worktree, indefinitely."""
     norm = path.replace("\\", "/").removeprefix("./")
-    return norm in _PCP_OPERATIONAL_PATHS or any(norm.startswith(d) for d in _PCP_OPERATIONAL_DIRS)
+    return (
+        norm in _PCP_OPERATIONAL_PATHS or any(norm.startswith(d) for d in _PCP_OPERATIONAL_DIRS)
+        or norm in _AGENT_LOCAL_CONFIG
+    )
 
 
 def _get_unstaged_files(cwd: Path) -> list[str]:
@@ -1467,6 +1479,28 @@ def _get_untracked_files(cwd: Path) -> list[str]:
     return [f.strip() for f in result.stdout.splitlines() if f.strip()]
 
 
+def _content_hash(cwd: Path, path: str) -> str | None:
+    """git's own content hash for a working-tree file (tracked or not --
+    `hash-object` just hashes bytes, it doesn't care about git status).
+    None if the file no longer exists. Used to tell "still dirty, untouched"
+    apart from "was dirty, then genuinely edited more" for the same path --
+    a plain path-set exclusion can't distinguish those, and a path this
+    criterion's own agent legitimately keeps working on (that happened to
+    already be dirty from an interrupted prior criterion) must never be
+    excluded just because its path matches."""
+    full = cwd / path
+    if not full.is_file():
+        return None
+    result = subprocess.run(
+        ["git", "hash-object", path], cwd=cwd, capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _snapshot_dirty_file_hashes(cwd: Path, paths: set[str]) -> dict[str, str | None]:
+    return {p: _content_hash(cwd, p) for p in paths}
+
+
 def _get_committed_files_since(cwd: Path, since_ref: str) -> list[str]:
     result = subprocess.run(
         ["git", "diff", "--name-only", "--diff-filter=ACMR", since_ref],
@@ -1477,7 +1511,22 @@ def _get_committed_files_since(cwd: Path, since_ref: str) -> list[str]:
     return [f.strip() for f in result.stdout.splitlines() if f.strip()]
 
 
-def _get_changed_files_since(cwd: Path, since_ref: str | None) -> list[str]:
+def _unchanged_since_snapshot(cwd: Path, path: str, exclude_dirty: dict[str, str | None]) -> bool:
+    """True only if path was in the pre-attempt dirty snapshot AND its
+    content hash hasn't moved since -- content-hash, not just path-set,
+    because a path this criterion's own agent keeps working on (which
+    happened to already be dirty from an interrupted prior criterion) must
+    never be excluded just because the path matches. A path-only exclusion
+    can't tell "still dirty, untouched" apart from "was dirty, then
+    genuinely edited more" -- both look identical from the path alone."""
+    if path not in exclude_dirty:
+        return False
+    return _content_hash(cwd, path) == exclude_dirty[path]
+
+
+def _get_changed_files_since(
+    cwd: Path, since_ref: str | None, exclude_dirty: dict[str, str | None] | None = None,
+) -> list[str]:
     """Everything the agent touched this criterion, however it left it:
     committed (diff since the criterion-start ref), staged, unstaged, or
     still untracked. Found dogfooding 2026-07-17 (round 2): the agent
@@ -1485,19 +1534,50 @@ def _get_changed_files_since(cwd: Path, since_ref: str | None) -> list[str]:
     the old staged+unstaged-only view reported 'No files were modified by
     the agent' against a 65-line committed implementation, then the gates
     judged an empty diff. An agent must not be able to make its work
-    invisible to the gates by committing it."""
+    invisible to the gates by committing it.
+
+    exclude_dirty (added 2026-08-08): the staged/unstaged/untracked buckets
+    have NO ref-scoping at all -- unlike the committed bucket below, which is
+    correctly scoped to since_ref. A worktree reused from an interrupted
+    prior run (_setup_worktree/_sync_worktree_to_base deliberately do NOT
+    clean a dirty reused worktree, to avoid discarding salvageable work) can
+    carry stale dirty files straight into a DIFFERENT criterion's gate scope
+    -- lint/SAST/architect-review then judge files this criterion never
+    touched. A {path: content_hash} snapshot (_snapshot_dirty_file_hashes),
+    taken BEFORE this criterion's first attempt starts: a path excluded only
+    if it was dirty then AND its content is byte-identical now (genuinely
+    untouched); anything newly dirty, newly staged, changed further, or
+    committed during this attempt still counts, since real work must never
+    be excluded by construction."""
     files = set(_get_staged_files(cwd) + _get_unstaged_files(cwd) + _get_untracked_files(cwd))
+    if exclude_dirty:
+        files = {f for f in files if not _unchanged_since_snapshot(cwd, f, exclude_dirty)}
     if since_ref:
         files.update(_get_committed_files_since(cwd, since_ref))
     return sorted(files)
 
 
-def _get_working_diff(cwd: Path, since_ref: str | None = None) -> str:
+def _get_working_diff(
+    cwd: Path, since_ref: str | None = None, exclude_dirty: dict[str, str | None] | None = None,
+) -> str:
     # :(exclude) pathspecs keep PCP's own operational writes (token ledger,
-    # telemetry, evidence) out of the diff the LLM judges see — see
-    # _PCP_OPERATIONAL_PATHS above for why. Diff base is the criterion-start
-    # ref when given (covers work the agent committed), falling back to HEAD.
-    excludes = [f":(exclude){p}" for p in _PCP_OPERATIONAL_PATHS] + \
+    # telemetry, evidence) AND agent-local config/caches (.claude/settings*.json,
+    # .testmondata -- see _AGENT_LOCAL_CONFIG) out of the diff the LLM judges
+    # see. Diff base is the criterion-start ref when given (covers work the
+    # agent committed), falling back to HEAD.
+    #
+    # exclude_dirty (2026-08-08, same reasoning as _get_changed_files_since's
+    # own parameter): `git diff since_ref -- .` compares a COMMIT ref against
+    # the CURRENT working tree, so a file left dirty by an interrupted PRIOR
+    # criterion (worktree reuse deliberately doesn't clean a dirty tree) still
+    # shows up in the diff architect-review/gate's judge reads for THIS
+    # criterion, even though _get_changed_files_since's file LIST already
+    # excludes it. Resolved to the unchanged-since-snapshot subset ONCE (same
+    # content-hash check, not a bare path match -- see _unchanged_since_
+    # snapshot) so a path this criterion's own agent kept editing is never
+    # excluded just because it happened to already be dirty beforehand.
+    unchanged_dirty = {p for p in (exclude_dirty or {}) if _unchanged_since_snapshot(cwd, p, exclude_dirty)}
+    excludes = [f":(exclude){p}" for p in (*_PCP_OPERATIONAL_PATHS, *_AGENT_LOCAL_CONFIG, *unchanged_dirty)] + \
                [f":(exclude){d.rstrip('/')}" for d in _PCP_OPERATIONAL_DIRS]
     base = since_ref or "HEAD"
     result = subprocess.run(
@@ -1529,7 +1609,7 @@ def _get_working_diff(cwd: Path, since_ref: str | None = None) -> str:
     # would surface them too but mutates the index during what must stay a
     # pure gate evaluation.
     for path in _get_untracked_files(cwd):
-        if _is_pcp_operational(path):
+        if _is_pcp_operational(path) or path in unchanged_dirty:
             continue
         shown = subprocess.run(
             ["git", "diff", "--no-index", "--", os.devnull, path],
@@ -3985,6 +4065,20 @@ def _build_one_criterion(
     # Everything the agent does this criterion — committed or not — is
     # measured against this ref, so committing can't hide work from gates.
     criterion_start_ref = _git_head(project_root)
+    # Content-hash snapshot ({path: hash}) of whatever was ALREADY dirty
+    # (staged/unstaged/untracked) before this criterion's first attempt even
+    # starts -- passed to _get_changed_files_since/_get_working_diff as
+    # exclude_dirty. Closes a real gap: a worktree reused from an interrupted
+    # prior run keeps its stale dirty state by design (_sync_worktree_to_base
+    # won't touch a dirty tree), so without this snapshot that leftover state
+    # leaks into THIS criterion's gate scope even though this criterion's own
+    # agent never touched it. Content-hash, not just path, so a path this
+    # criterion's own agent keeps working on (which happened to already be
+    # dirty) is never excluded just because the path matches.
+    pre_existing_dirty_files = _snapshot_dirty_file_hashes(
+        project_root,
+        set(_get_staged_files(project_root) + _get_unstaged_files(project_root) + _get_untracked_files(project_root)),
+    )
 
     # run_log bracket — pre/post audit entry, actor="pcp-build-agent" so this
     # is queryable as real pipeline work, distinct from manual/interactive
@@ -4179,16 +4273,18 @@ def _build_one_criterion(
             pass
 
         # Run checks. PCP's own operational writes (token ledger, telemetry)
-        # are not agent work product — never fed to gates or the scope guard.
+        # and stale pre-existing dirty state (see pre_existing_dirty_files
+        # above) are not this criterion's agent work product — never fed to
+        # gates or the scope guard.
         changed_files = [
-            f for f in _get_changed_files_since(project_root, criterion_start_ref)
+            f for f in _get_changed_files_since(project_root, criterion_start_ref, exclude_dirty=pre_existing_dirty_files)
             if not _is_pcp_operational(f)
         ]
 
         if not changed_files:
             console.print("[yellow]No files were modified by the agent (committed or uncommitted).[/yellow]")
 
-        diff = _get_working_diff(project_root, criterion_start_ref)
+        diff = _get_working_diff(project_root, criterion_start_ref, exclude_dirty=pre_existing_dirty_files)
 
         lines_added, lines_removed = telemetry.count_diff_lines(diff)
         usage = agent_usage.get("usage", {})

@@ -10,6 +10,7 @@ from pcp.commands.build import (
     _get_working_diff,
     _is_pcp_operational,
     _run_gate_check,
+    _snapshot_dirty_file_hashes,
 )
 
 
@@ -51,12 +52,99 @@ def test_uncommitted_and_untracked_work_still_visible(tmp_path):
     assert "new_untracked.py" in files
 
 
+# ── stale pre-existing dirty state (win2mac dogfood, 2026-08-08) ──
+# A worktree reused from an interrupted prior run keeps its dirty state by
+# design (_sync_worktree_to_base won't touch a dirty tree) -- without
+# exclude_dirty, that leftover state leaks into a DIFFERENT criterion's
+# gate scope even though this criterion's own agent never touched it.
+
+def test_pre_existing_dirty_file_excluded_when_untouched(tmp_path):
+    start = _repo(tmp_path)
+    (tmp_path / "stale.py").write_text("leftover = 1\n")  # dirty BEFORE this "criterion" starts
+    pre_existing = _snapshot_dirty_file_hashes(tmp_path, {"stale.py"})
+
+    files = _get_changed_files_since(tmp_path, start, exclude_dirty=pre_existing)
+    assert files == []
+    diff = _get_working_diff(tmp_path, start, exclude_dirty=pre_existing)
+    assert "leftover" not in diff
+
+
+def test_pre_existing_dirty_file_still_counted_once_actually_touched(tmp_path):
+    """Content-hash, not path-only: excluding the SNAPSHOT must not exclude
+    real new work on that same path -- if this criterion's own agent edits
+    it further (even a path that happened to already be dirty), that's
+    genuine new content and must still reach the gates."""
+    start = _repo(tmp_path)
+    (tmp_path / "stale.py").write_text("leftover = 1\n")
+    pre_existing = _snapshot_dirty_file_hashes(tmp_path, {"stale.py"})  # hash of the ORIGINAL content
+    (tmp_path / "stale.py").write_text("leftover = 1\nreal_new_work = 2\n")  # content moved on
+
+    files = _get_changed_files_since(tmp_path, start, exclude_dirty=pre_existing)
+    assert files == ["stale.py"]
+    diff = _get_working_diff(tmp_path, start, exclude_dirty=pre_existing)
+    assert "real_new_work" in diff
+
+
+def test_committed_work_never_excluded_by_pre_existing_dirty(tmp_path):
+    """exclude_dirty only applies to the staged/unstaged/untracked buckets --
+    anything the agent actually COMMITTED during this attempt is unambiguous
+    real work and must never be excluded, even if the same path happened to
+    be dirty before this criterion started."""
+    start = _repo(tmp_path)
+    (tmp_path / "stale.py").write_text("leftover = 1\n")
+    pre_existing = _snapshot_dirty_file_hashes(tmp_path, {"stale.py"})
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "agent committed real work over the stale file")
+
+    files = _get_changed_files_since(tmp_path, start, exclude_dirty=pre_existing)
+    assert files == ["stale.py"]
+
+
+def test_content_hash_helpers(tmp_path):
+    from pcp.commands.build import _content_hash, _unchanged_since_snapshot
+    _repo(tmp_path)
+    (tmp_path / "f.py").write_text("a = 1\n")
+    h1 = _content_hash(tmp_path, "f.py")
+    assert h1 is not None
+    assert _content_hash(tmp_path, "does_not_exist.py") is None
+
+    snapshot = {"f.py": h1}
+    assert _unchanged_since_snapshot(tmp_path, "f.py", snapshot) is True
+    (tmp_path / "f.py").write_text("a = 2\n")
+    assert _unchanged_since_snapshot(tmp_path, "f.py", snapshot) is False
+    assert _unchanged_since_snapshot(tmp_path, "not_in_snapshot.py", snapshot) is False
+
+
+def test_pre_existing_untracked_file_excluded_from_diff_synthesis(tmp_path):
+    """The untracked-file diff-synthesis loop (git diff never shows untracked
+    files on its own) must also respect exclude_dirty, not just the tracked
+    `git diff` pathspec exclusion."""
+    start = _repo(tmp_path)
+    (tmp_path / "stale_untracked.py").write_text("leftover_untracked = 1\n")
+    pre_existing = _snapshot_dirty_file_hashes(tmp_path, {"stale_untracked.py"})
+
+    diff = _get_working_diff(tmp_path, start, exclude_dirty=pre_existing)
+    assert "leftover_untracked" not in diff
+
+
 def test_operational_paths_detected():
     assert _is_pcp_operational(".pcp/token_ledger.yaml")
     assert _is_pcp_operational(".pcp/telemetry.jsonl")
     assert _is_pcp_operational(".pcp/evidence/auth/A1/attempt_1/gate.txt")
     assert _is_pcp_operational(".pcp/transcripts/abc.jsonl.gz")
     assert _is_pcp_operational("./.pcp/token_ledger.yaml")
+
+
+def test_agent_local_config_now_also_operational():
+    """Real gap closed 2026-08-08: .testmondata is seeded (untracked) into
+    every fresh worktree and never cleaned up, so it sat in changed_files/
+    the working diff for every criterion indefinitely -- unlike
+    _PCP_OPERATIONAL_PATHS, _AGENT_LOCAL_CONFIG was excluded from commit
+    staging but never from what gates see."""
+    assert _is_pcp_operational(".testmondata")
+    assert _is_pcp_operational(".testmondata-journal")
+    assert _is_pcp_operational(".claude/settings.json")
+    assert _is_pcp_operational(".claude/settings.local.json")
 
 
 def test_agent_deliverables_not_operational():

@@ -136,6 +136,21 @@ read it as grounding; a module can trace itself back to a researched section
 via `category_reference`. Reactive use too: run it with `--gap "<capability>"`
 when a coverage check flags something missing.
 
+## The build agent doesn't get the last word on itself
+
+The same session that writes the code routinely writes the test too — a test
+shaped around what's about to be built, not the actual requirement, can pass
+every gate that only checks "do tests pass" or "is this architecturally
+consistent." For criteria you mark as carrying real logic (`adversarial_review:
+true` — a scoring model, a validation rule, anything beyond CRUD), PCP spawns
+a second, independent coding-agent session with one job: try to prove the
+first agent's tests are tautological, mocked-around, or that the
+implementation is a stub dressed up to look real. It reads the actual test
+file, reads the actual implementation, and runs the tests itself rather than
+trusting that green means real. A criterion only survives if that independent
+pass genuinely couldn't find a problem — not because nothing looked
+suspicious at a glance.
+
 ## Audit-grade evidence, not just green checkmarks
 
 Every gate call tags its telemetry record with a control ID and the files in
