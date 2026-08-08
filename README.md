@@ -79,6 +79,18 @@ reuse-as-dependency / fork-adapt / reference-pattern-only / build-fresh
 *before* code gets written. Rationale is recorded per module, not left to
 whether the agent happened to think of it that day.
 
+## Grounded against real prior art, not just the vision doc
+
+Module/capability coverage checks only ever compare against what the vision
+doc says — an omitted-but-standard capability for that product category is
+silently absent, never flagged. `pcp inspiration-art "<description>"`
+proposes the product's category (or categories — many real products span
+more than one) with each category's typical modules and typical screens,
+human-approved into `.pcp/strategy/inspiration_art.md`. `pcp kickoff`/`pcp pm`
+read it as grounding; a module can trace itself back to a researched section
+via `category_reference`. Reactive use too: run it with `--gap "<capability>"`
+when a coverage check flags something missing.
+
 ## Modularity, enforced
 
 Every module is a guest — can leave without drama, arrive without surgery.
