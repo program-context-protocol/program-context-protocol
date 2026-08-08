@@ -1,5 +1,23 @@
 
 
+# ── Screen/shared-entity DECOMPOSE-FIRST instructions actually shipped ──
+# (2026-08-08) -- prompt-only additions have no unit-testable behavior of
+# their own; this just locks in that the instruction text survives an edit.
+
+def test_kickoff_prompt_instructs_screen_field():
+    from pcp.commands.kickoff import SYSTEM_PROMPT
+    assert "`screen`" in SYSTEM_PROMPT
+    assert "shared_entities_enumerated" in SYSTEM_PROMPT
+    assert "owns_entities" in SYSTEM_PROMPT
+
+
+def test_pm_prompt_instructs_screen_field():
+    from pcp.commands.pm import SYSTEM_PROMPT
+    assert "`screen`" in SYSTEM_PROMPT
+    assert "shared_entities_enumerated" in SYSTEM_PROMPT
+    assert "owns_entities" in SYSTEM_PROMPT
+
+
 # ── Orphaned modules from a prior kickoff (2026-07-27 Project S dogfood) ──
 
 def test_orphaned_modules_from_a_prior_kickoff_are_reported(tmp_path, capsys):
