@@ -1,3 +1,4 @@
+import os
 import stat
 import subprocess
 import textwrap
@@ -116,6 +117,132 @@ def test_merge_module_branch_brings_in_the_commit(tmp_path):
     assert ok, output
     assert (repo / "add.py").exists()
     _cleanup_worktree(repo, "add", wt)
+
+
+# ── worktree merge hazards (win2mac dogfood, 2026-08-08) ──
+
+def test_merge_discards_declared_regenerated_files_instead_of_refusing(tmp_path):
+    """Reproduces "your local changes would be overwritten by merge": main
+    has an UNCOMMITTED edit to a fixture, the incoming branch has a
+    DIFFERENT COMMITTED version of the same file. Without the declared-glob
+    fix, plain `git merge` refuses outright. With a matching
+    merge_regenerated_globs.yaml, the local edit is discarded first (it's
+    declared as fine to lose) and the merge succeeds, landing the branch's
+    committed version."""
+    from pcp.commands.build import _merge_module_branch, _setup_worktree, _cleanup_worktree
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tests" / "fixtures").mkdir(parents=True)
+    (repo / "tests" / "fixtures" / "snap.json").write_text('{"v": "committed-base"}\n')
+    _git(["add", "tests/fixtures/snap.json"], repo)
+    _git(["commit", "-q", "-m", "add fixture"], repo)
+
+    wt = _setup_worktree(repo, "mod")
+    (wt / "tests" / "fixtures" / "snap.json").write_text('{"v": "worktree-committed"}\n')
+    _git(["add", "tests/fixtures/snap.json"], wt)
+    _git(["commit", "-q", "-m", "feat: regenerate fixture"], wt)
+
+    # Main has its OWN uncommitted edit to the same file -- this is exactly
+    # what makes plain `git merge` refuse.
+    (repo / "tests" / "fixtures" / "snap.json").write_text('{"v": "main-local-dirty"}\n')
+
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "merge_regenerated_globs.yaml").write_text(
+        "patterns:\n  - \"tests/fixtures/*.json\"\n"
+    )
+
+    ok, output = _merge_module_branch(repo, "mod", pcp_dir=pcp_dir)
+    assert ok, output
+    assert (repo / "tests" / "fixtures" / "snap.json").read_text() == '{"v": "worktree-committed"}\n'
+    _cleanup_worktree(repo, "mod", wt)
+
+
+def test_merge_still_refuses_when_dirty_file_not_declared(tmp_path):
+    """Control case -- without a matching declared pattern, the real git
+    refusal must still happen (this fix must not silently discard work it
+    was never told is safe to lose)."""
+    from pcp.commands.build import _merge_module_branch, _setup_worktree, _cleanup_worktree
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "important.txt").write_text("committed-base\n")
+    _git(["add", "important.txt"], repo)
+    _git(["commit", "-q", "-m", "add file"], repo)
+
+    wt = _setup_worktree(repo, "mod")
+    (wt / "important.txt").write_text("worktree-committed\n")
+    _git(["add", "important.txt"], wt)
+    _git(["commit", "-q", "-m", "feat: change"], wt)
+
+    (repo / "important.txt").write_text("main-local-dirty-real-work\n")
+
+    ok, output = _merge_module_branch(repo, "mod", pcp_dir=None)
+    assert not ok
+    assert (repo / "important.txt").read_text() == "main-local-dirty-real-work\n"
+    _cleanup_worktree(repo, "mod", wt)
+
+
+def test_merge_survives_append_only_flagged_file(tmp_path):
+    """Reproduces the real crash: an append-only-flagged .pcp/telemetry.jsonl
+    (evidence_chain.set_append_only) that the incoming branch also has a
+    different committed version of. Plain `git merge` gets EPERM writing it
+    (macOS chflags uappnd rejects a non-append write) and gives up mid-merge.
+    The fix clears the flag before merging and restores it after, regardless
+    of outcome."""
+    import platform
+    import stat as stat_module
+    if platform.system() != "Darwin":
+        pytest.skip("append-only (chflags uappnd) is macOS-only")
+
+    from pcp.commands.build import _merge_module_branch, _setup_worktree, _cleanup_worktree
+    from pcp.evidence_chain import set_append_only
+
+    repo = _init_repo(tmp_path / "repo")
+    pcp_dir = repo / ".pcp"
+    pcp_dir.mkdir()
+    telem = pcp_dir / "telemetry.jsonl"
+    telem.write_text('{"line": 1}\n')
+    _git(["add", ".pcp/telemetry.jsonl"], repo)
+    _git(["commit", "-q", "-m", "add telemetry"], repo)
+    set_append_only(telem)
+    try:
+        assert os.stat(telem).st_flags & stat_module.UF_APPEND, "test setup didn't actually set the flag"
+
+        wt = _setup_worktree(repo, "mod")
+        (wt / ".pcp" / "telemetry.jsonl").write_text('{"line": 1}\n{"line": 2}\n')
+        _git(["add", ".pcp/telemetry.jsonl"], wt)
+        _git(["commit", "-q", "-m", "feat: append telemetry"], wt)
+
+        ok, output = _merge_module_branch(repo, "mod", pcp_dir=pcp_dir)
+        assert ok, output
+        # _merge_module_branch itself appends a "worktree-merge" telemetry
+        # record right after merging -- a real, expected side effect (and
+        # proof the flag was correctly restored to append-only BEFORE that
+        # write, since a pure O_APPEND write still succeeds under uappnd).
+        # Just check the merged content survived, not exact file equality.
+        merged_content = telem.read_text()
+        assert merged_content.startswith('{"line": 1}\n{"line": 2}\n')
+        # Restored afterward -- the hardening posture must not stay weakened.
+        assert os.stat(telem).st_flags & stat_module.UF_APPEND
+        _cleanup_worktree(repo, "mod", wt)
+    finally:
+        from pcp.evidence_chain import clear_append_only
+        clear_append_only(telem)  # test cleanup must be able to delete tmp_path
+
+
+def test_load_merge_regenerated_globs_absent_file_is_empty(tmp_path):
+    from pcp.commands.build import _load_merge_regenerated_globs
+    assert _load_merge_regenerated_globs(tmp_path / ".pcp") == []
+
+
+def test_load_merge_regenerated_globs_reads_patterns(tmp_path):
+    from pcp.commands.build import _load_merge_regenerated_globs
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "merge_regenerated_globs.yaml").write_text(
+        "patterns:\n  - \"a/*.json\"\n  - \"b/c.txt\"\n"
+    )
+    assert _load_merge_regenerated_globs(pcp_dir) == ["a/*.json", "b/c.txt"]
 
 
 def test_cleanup_worktree_removes_worktree_and_branch(tmp_path):

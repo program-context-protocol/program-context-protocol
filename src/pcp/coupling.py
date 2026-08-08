@@ -36,10 +36,16 @@ def _hub_modules(G: nx.DiGraph) -> set[str]:
 def build_dependency_graph(modules: dict[str, dict]) -> nx.DiGraph:
     """modules: {module_name: spec_dict}. Edge A->B means A depends on B.
     Dependencies pointing outside this module set are ignored (external/
-    already-built, not something this graph can score)."""
+    already-built, not something this graph can score).
+
+    A module's self-declared `aggregator: true` (spec.yaml) is carried as a
+    node attribute -- compute_coupling reads it to exempt intentional
+    aggregator/launcher/deployment-orchestrator modules from the god_module
+    check, the one violation type that previously had no exemption path at
+    all (unlike hub-inbound scoring below)."""
     G = nx.DiGraph()
-    for name in modules:
-        G.add_node(name)
+    for name, spec in modules.items():
+        G.add_node(name, aggregator=bool(spec.get("aggregator")))
     for name, spec in modules.items():
         for dep in (spec.get("dependencies") or []):
             if dep in modules and dep != name:
@@ -54,14 +60,23 @@ def compute_coupling(G: nx.DiGraph) -> dict:
 
     Edges into a hub module (shared infrastructure) don't count against the
     direct-dependency penalty — depending on a genuine shared kernel isn't
-    the harmful coupling this score is meant to catch. Cycles and god-modules
-    still count regardless of hub status: a cycle through 'core', or a module
-    with too many outgoing deps, is still a real structural problem."""
+    the harmful coupling this score is meant to catch. Edges OUT of a
+    self-declared aggregator (spec.yaml's `aggregator: true` -- a launcher/
+    deployment-orchestrator module) get the symmetric exemption: depending
+    on many things is that module's whole job, not incidental coupling.
+    Real gap, win2mac dogfood 2026-08-08: a deployment module legitimately
+    depending on everything it deploys had no way to say so, and got
+    flagged the same as accidental god-module coupling.
+
+    Cycles still count regardless of hub/aggregator status: a cycle through
+    'core' or through a declared aggregator is still a real structural
+    problem no self-declaration should be able to wave off."""
     hubs = _hub_modules(G)
-    scored_edges = [(a, b) for a, b in G.edges if b not in hubs]
+    aggregators = {n for n, data in G.nodes(data=True) if data.get("aggregator")}
+    scored_edges = [(a, b) for a, b in G.edges if b not in hubs and a not in aggregators]
     direct_deps = len(scored_edges)
     cycles = [c for c in nx.simple_cycles(G) if len(c) > 1]
-    god_modules = [n for n in G.nodes if G.out_degree(n) > GOD_MODULE_THRESHOLD]
+    god_modules = [n for n in G.nodes if G.out_degree(n) > GOD_MODULE_THRESHOLD and n not in aggregators]
 
     score = 1.0 - DEP_PENALTY * direct_deps - CYCLE_PENALTY * len(cycles) - GOD_MODULE_PENALTY * len(god_modules)
     score = max(0.0, min(1.0, score))
@@ -95,6 +110,7 @@ def compute_coupling(G: nx.DiGraph) -> dict:
         "circular_dependencies": len(cycles),
         "god_modules": god_modules,
         "hub_modules": sorted(hubs),
+        "aggregator_modules": sorted(aggregators),
     }
 
 

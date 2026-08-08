@@ -143,3 +143,64 @@ def test_gate_check_stores_full_judge_response(tmp_path):
     stored = json.loads((pcp_dir / rec["evidence_path"]).read_text())
     assert stored["summary"] == "drifted"
     assert stored["regressions"] == ["r1", "r2"]
+
+
+# ── baseline test-failure exclusion (win2mac dogfood, 2026-08-08) ──
+
+def test_all_failures_baselined_does_not_block(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("pcp.commands.build.qa.run_test_suite", return_value={
+        "tool": "pytest", "passed": False, "output": "2 failed",
+        "failed_test_ids": ["tests/test_a.py::test_x", "tests/test_b.py::test_y"],
+    }), patch("pcp.commands.build.qa.load_baseline_test_failures",
+              return_value={"tests/test_a.py::test_x", "tests/test_b.py::test_y"}):
+        violations = _run_test_suite_check(pcp_dir, tmp_path, CTX)
+
+    assert violations == []
+    rec = _last_qa_record(pcp_dir)
+    assert rec["result"] == "advisory"
+    assert rec["errors"]  # the exclusion itself is recorded, not silently dropped
+
+
+def test_a_new_failure_alongside_baselined_ones_still_blocks(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("pcp.commands.build.qa.run_test_suite", return_value={
+        "tool": "pytest", "passed": False, "output": "2 failed",
+        "failed_test_ids": ["tests/test_a.py::test_x", "tests/test_new.py::test_regression"],
+    }), patch("pcp.commands.build.qa.load_baseline_test_failures",
+              return_value={"tests/test_a.py::test_x"}):
+        violations = _run_test_suite_check(pcp_dir, tmp_path, CTX)
+
+    assert violations  # the NEW failure still blocks
+    assert "NOT in the baseline" in violations[0]
+    rec = _last_qa_record(pcp_dir)
+    assert rec["result"] == "block"
+
+
+def test_failures_with_no_baseline_file_block_as_before(tmp_path):
+    """No baseline captured yet -- unchanged behavior, everything blocks."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("pcp.commands.build.qa.run_test_suite", return_value={
+        "tool": "pytest", "passed": False, "output": "1 failed",
+        "failed_test_ids": ["tests/test_a.py::test_x"],
+    }), patch("pcp.commands.build.qa.load_baseline_test_failures", return_value=set()):
+        violations = _run_test_suite_check(pcp_dir, tmp_path, CTX)
+
+    assert violations  # no baseline means nothing is excluded
+
+
+def test_unparseable_failure_ids_fail_closed_even_with_a_baseline(tmp_path):
+    """A collection error/crash produces no clean FAILED lines -- empty
+    failed_test_ids must never be read as 'nothing new failed'."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("pcp.commands.build.qa.run_test_suite", return_value={
+        "tool": "pytest", "passed": False, "output": "INTERNALERROR>", "failed_test_ids": [],
+    }), patch("pcp.commands.build.qa.load_baseline_test_failures",
+              return_value={"tests/test_a.py::test_x"}):
+        violations = _run_test_suite_check(pcp_dir, tmp_path, CTX)
+
+    assert violations  # fails closed -- still blocks

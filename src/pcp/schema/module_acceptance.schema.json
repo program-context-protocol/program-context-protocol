@@ -95,6 +95,10 @@
               }
             }
           },
+          "adversarial_review": {
+            "type": "boolean",
+            "description": "Opt-in, for the small number of criteria carrying a project's actual differentiators (a real algorithm, a scoring/routing/validation model -- not CRUD). When true, build.py's _run_adversarial_review spawns a SEPARATE real coding-agent session (CTRL-041) whose only job is to try to disprove the primary build agent's own self-report -- read the actual test file for tautological/mocked assertions, read the actual implementation for stubs/hardcoded returns, run the tests itself rather than trust 'tests passed'. Closes a real gap: the primary agent writes the test AND the code in the same session, so a test shaped around what it's about to build (not the true requirement) can pass gates that only check 'do tests pass' / 'is this architecturally consistent'. Real cost, real agent session per completion -- default false, deliberately not run on ordinary criteria."
+          },
           "install_only": {
             "type": "boolean",
             "description": "Set when priorart found a direct match and a human confirmed it (not an automated confidence heuristic) -- see CLAUDE.md's install-only fast path. build.py's _build_one_criterion skips the full TDD/architect-review/LLM-gate cycle for this criterion: interactive human approval (or --yes), run install_command, then a deterministic smoke test only (full test suite + Layer 1 ci_rules -- CTRL-034). Requires install_command. Declining the approval prompt, or a failed smoke test, falls through to the normal full build path -- this is never a silent skip."

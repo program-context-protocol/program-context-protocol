@@ -1,5 +1,6 @@
 """pcp build — autonomous agent execution loop to implement pending criteria."""
 
+import fnmatch
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from pcp.llm.client import _claude_bin, _log_usage
 from pcp.pcp_status import write_pcp_md
 from pcp import decision_log
 from pcp import chain_guard
+from pcp.evidence_chain import set_append_only, clear_append_only
 from pcp import integrity_audit
 from pcp import librarian
 from pcp import narrative_lint
@@ -540,26 +542,114 @@ def _setup_worktree(project_root: Path, module_name: str) -> Path:
     return wt_path
 
 
+def _load_merge_regenerated_globs(pcp_dir: Path) -> list[str]:
+    """Project-declared glob patterns for files that legitimately differ on
+    every run (fixtures with fresh timestamps, coverage/tracking JSON, a
+    generated snapshot, ...) -- optional `.pcp/merge_regenerated_globs.yaml`:
+        patterns:
+          - "tests/fixtures/*.snapshot.json"
+          - "coverage/tracking.json"
+
+    Real incident, win2mac dogfood 2026-08-08: files shaped like this
+    repeatedly triggered git's "local changes would be overwritten by merge"
+    refusal and left the worktree abandoned. `_PCP_OPERATIONAL_PATHS` (see
+    above) already solves the identical shape for PCP's OWN bookkeeping
+    files (real incident, 2026-07-27) by keeping the worktree branch from
+    ever committing them -- but it has no visibility into a project's own
+    regenerated artifacts, which is exactly the "every project has to
+    discover and fix this themselves" gap this closes. Absent file means an
+    empty list -- fully backward compatible, opt-in, never scaffolded by
+    `pcp init` (a human declares this only once they've actually hit it)."""
+    path = Path(pcp_dir) / "merge_regenerated_globs.yaml"
+    if not path.exists():
+        return []
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+        return [p for p in (data.get("patterns") or []) if isinstance(p, str)]
+    except Exception:
+        return []  # fails open -- an unreadable/malformed file must not block every merge
+
+
+def _discard_regenerated_files_before_merge(project_root: Path, pcp_dir: Path | None) -> list[str]:
+    """Discards project_root's own uncommitted changes to project-declared
+    regenerated files right before a merge, so git's "would be overwritten"
+    refusal never fires on a file nobody actually needs to keep. Only ever
+    touches a file that matches a declared pattern -- real agent work is
+    never at risk from this. Returns the files actually discarded, purely
+    so the caller can log what happened, not silently."""
+    if pcp_dir is None:
+        return []
+    patterns = _load_merge_regenerated_globs(pcp_dir)
+    if not patterns:
+        return []
+    dirty = set(_get_unstaged_files(project_root)) | set(_get_staged_files(project_root))
+    to_discard = sorted(f for f in dirty if any(fnmatch.fnmatch(f, pat) for pat in patterns))
+    if to_discard:
+        subprocess.run(["git", "checkout", "--", *to_discard], cwd=project_root, capture_output=True)
+    return to_discard
+
+
+_APPEND_ONLY_FILE_NAMES = ("telemetry.jsonl", "decision_log.jsonl", "bypass_log.yaml")
+
+
+def _clear_append_only_for_merge(project_root: Path) -> list[Path]:
+    """git needs to read/write these files like any other tracked file
+    during a merge; the append-only OS flag (evidence_chain.set_append_only)
+    is enforced at the kernel level regardless of which process is writing,
+    so git itself gets EPERM ("Operation not permitted") on a real merge
+    that touches one of them -- real incident, win2mac dogfood 2026-08-08,
+    merge gave up mid-operation with no graceful handling. PCP's own log
+    writers already clear/restore the flag around their own writes
+    (bypass_log.py, see test_bypass_log_write_survives_append_only_flag);
+    git has no such awareness, so this does it on git's behalf. Best-effort/
+    no-op posture inherited from set_append_only/clear_append_only
+    themselves (macOS only, silent elsewhere)."""
+    cleared = []
+    for name in _APPEND_ONLY_FILE_NAMES:
+        p = project_root / ".pcp" / name
+        if p.exists():
+            clear_append_only(p)
+            cleared.append(p)
+    return cleared
+
+
+def _restore_append_only(paths: list[Path]) -> None:
+    for p in paths:
+        if p.exists():
+            set_append_only(p)
+
+
 def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | None = None) -> tuple[bool, str]:
     branch = f"feat/{module_name}"
-    result = subprocess.run(
-        ["git", "merge", "--no-ff", branch, "-m", f"Merge {branch}"],
-        cwd=project_root, capture_output=True, text=True,
-    )
-    ok = result.returncode == 0
-    if not ok:
-        # Leave NO half-merged state behind. Without this, a conflicting merge
-        # leaves project_root mid-MERGE with conflict markers in the tree, and
-        # every subsequent git command in that repo fails on unmerged paths --
-        # so one conflicted criterion takes down the whole run and everything
-        # after it, including criteria that had already passed their gates.
-        # That is what made 2026-07-25's `.claude/settings.json` add/add
-        # conflict so destructive: that fix removed one CAUSE of a conflict,
-        # this handles the CONSEQUENCE of any conflict at all. The caller
-        # already treats `ok=False` as a failure and leaves the worktree up
-        # for manual resolution -- aborting here only cleans the main repo,
-        # it does not discard the branch or the agent's work.
-        subprocess.run(["git", "merge", "--abort"], cwd=project_root, capture_output=True)
+    discarded = _discard_regenerated_files_before_merge(project_root, pcp_dir)
+    if discarded:
+        shown = ", ".join(discarded[:5]) + ("..." if len(discarded) > 5 else "")
+        console.print(f"[dim]Discarded local changes to {len(discarded)} project-declared regenerated file(s) before merge: {shown}[/dim]")
+
+    cleared_flags = _clear_append_only_for_merge(project_root)
+    try:
+        result = subprocess.run(
+            ["git", "merge", "--no-ff", branch, "-m", f"Merge {branch}"],
+            cwd=project_root, capture_output=True, text=True,
+        )
+        ok = result.returncode == 0
+        if not ok:
+            # Leave NO half-merged state behind. Without this, a conflicting merge
+            # leaves project_root mid-MERGE with conflict markers in the tree, and
+            # every subsequent git command in that repo fails on unmerged paths --
+            # so one conflicted criterion takes down the whole run and everything
+            # after it, including criteria that had already passed their gates.
+            # That is what made 2026-07-25's `.claude/settings.json` add/add
+            # conflict so destructive: that fix removed one CAUSE of a conflict,
+            # this handles the CONSEQUENCE of any conflict at all. The caller
+            # already treats `ok=False` as a failure and leaves the worktree up
+            # for manual resolution -- aborting here only cleans the main repo,
+            # it does not discard the branch or the agent's work.
+            subprocess.run(["git", "merge", "--abort"], cwd=project_root, capture_output=True)
+    finally:
+        # Restored regardless of outcome -- the security hardening posture
+        # must not stay weakened just because a merge failed.
+        _restore_append_only(cleared_flags)
     # Conflict-rate telemetry (2026-07-17): AgenticFlict (arXiv:2604.03551)
     # measured a 27.67% merge-conflict baseline for agent-authored PRs; PCP's
     # worktree-isolated wave merges should beat that, and now the data to
@@ -725,6 +815,28 @@ def _finding_blames_outside_wave(finding: str, wave_mod_names: set[str]) -> bool
     return bool(m) and m.group(1) not in wave_mod_names
 
 
+def _finding_is_program_wide(finding: str) -> bool:
+    """Is this finding about the PROGRAM's overall health, not this wave's
+    own criteria? CTRL-008 (validate-strategy, see _run_wave_merge step 3)
+    checks whether modules COLLECTIVELY cover objective.md -- a question
+    about the whole program's decomposition, not evidence that any specific
+    criterion just built is broken. Same non-attributable treatment as
+    `_finding_blames_outside_wave`, for the same reason: a wave gate that
+    reopens correct, tested work over a coverage-score dip it had nothing to
+    do with is not conservative, it is wasted rebuild cost for no real signal.
+
+    Real gap, win2mac dogfood 2026-08-08: reopened 6 genuinely good, tested,
+    working criteria because of a program-wide coverage score alongside two
+    unrelated findings elsewhere -- CTRL-008's own known unreliability
+    (deterministic keyword-overlap scorer, see coverage_audit.py) compounded
+    into real wasted work, not just a noisy number nobody acted on.
+
+    Deterministic, rung 1: `strategy_findings.append(f"validate-strategy: ...")`
+    is this file's own only producer of this shape (_run_wave_merge step 3),
+    so the fixed prefix is a reliable match, not a guess."""
+    return finding.startswith("validate-strategy:")
+
+
 def _reopen_wave_criteria(pcp_dir: Path, wave_modules: list[dict], wave_number: int,
                           findings: list[str]) -> None:
     """Un-complete the criteria a blocking wave gate just judged defective.
@@ -761,13 +873,16 @@ def _reopen_wave_criteria(pcp_dir: Path, wave_modules: list[dict], wave_number: 
     from pcp import escalations
 
     wave_mod_names = {m["name"] for m in wave_modules}
-    external = [f for f in findings if _finding_blames_outside_wave(f, wave_mod_names)]
+    external = [
+        f for f in findings
+        if _finding_blames_outside_wave(f, wave_mod_names) or _finding_is_program_wide(f)
+    ]
     attributable = [f for f in findings if f not in external]
     if findings and not attributable:
         console.print(
             f"[yellow]Wave {wave_number} blocked by {len(external)} finding(s) about "
-            "module(s) outside this wave — criteria NOT reopened, because this wave's "
-            "own work is not what the gate objected to.[/yellow]"
+            "module(s) outside this wave or the program overall — criteria NOT reopened, "
+            "because this wave's own work is not what the gate objected to.[/yellow]"
         )
         for f in external:
             console.print(f"[dim]   external: {f}[/dim]")
@@ -848,18 +963,51 @@ def _run_wave_merge(pcp_dir: Path, wave_modules: list[dict], wave_start_ref: str
     _wave_record(pcp_dir, wave_number, "contract", "CTRL-007", contract_findings, files=wave_mod_names)
     findings += contract_findings
 
-    # 2. Full integration test suite on the merged state.
-    test_result = qa.run_test_suite(project_root)
+    # 2. Full integration test suite on the merged state. pcp_dir passed with
+    # no changed_files -- always unscoped here by design (see run_test_suite's
+    # docstring), and the one call site guaranteed to run a genuine full
+    # suite, so it's also where the auto-measured timeout baseline should come
+    # from (see _load_measured_timeout/_record_measured_duration in qa.py).
+    test_result = qa.run_test_suite(project_root, pcp_dir=pcp_dir)
     test_findings: list[str] = []
     wave_evidence_path = None
     if test_result["tool"]:
         wave_evidence_path = evidence.store(
             pcp_dir, "_wave", f"wave_{wave_number}", wave_number, "test-suite", test_result["output"],
         )
+    wave_test_result_override = None
+    advisory_note: list[str] = []
     if test_result["tool"] and not test_result["passed"]:
-        test_findings.append(f"Wave integration suite ({test_result['tool']}) FAILED — full output: {wave_evidence_path}\n{test_result['output'][-1500:]}")
-    _wave_record(pcp_dir, wave_number, "test-suite", "CTRL-001", test_findings, files=wave_mod_names,
-                 result="skipped" if not test_result["tool"] else None, evidence_path=wave_evidence_path)
+        # Same baseline exclusion as the per-criterion gate (_run_test_suite_
+        # check) -- this is the call site bug report #4 was actually about:
+        # the unscoped wave-merge run blocking an ENTIRE wave (every module
+        # in it) on a pre-existing failure nothing in this wave caused.
+        failed_ids = set(test_result.get("failed_test_ids") or [])
+        baseline = qa.load_baseline_test_failures(pcp_dir)
+        new_failures = failed_ids - baseline
+        if failed_ids and baseline and not new_failures:
+            console.print(
+                f"[dim]Wave integration suite: {len(failed_ids)} failing test(s), all already "
+                f"baselined as pre-existing -- not blocking this wave.[/dim]"
+            )
+            wave_test_result_override = "advisory"
+            advisory_note = [
+                f"{len(failed_ids)} failing test(s) excluded, already in baseline_test_failures.yaml: "
+                f"{', '.join(sorted(failed_ids)[:5])}{'...' if len(failed_ids) > 5 else ''}"
+            ]
+        else:
+            baseline_note = (
+                f"\n({len(new_failures)} of {len(failed_ids)} failure(s) are NOT in the baseline)"
+                if baseline and failed_ids else ""
+            )
+            test_findings.append(
+                f"Wave integration suite ({test_result['tool']}) FAILED — full output: {wave_evidence_path}\n{test_result['output'][-1500:]}{baseline_note}"
+            )
+    _wave_record(
+        pcp_dir, wave_number, "test-suite", "CTRL-001", advisory_note or test_findings, files=wave_mod_names,
+        result=wave_test_result_override or ("skipped" if not test_result["tool"] else None),
+        evidence_path=wave_evidence_path,
+    )
     findings += test_findings
 
     # 3. validate-strategy re-check — coverage/coupling after this wave's changes.
@@ -1405,9 +1553,33 @@ def _is_ui_facing_criterion(criterion: dict) -> bool:
     decide whether to mention the design system). False negatives just mean
     a UI criterion doesn't get the design-system hint; false positives just
     mean a harmless, ignorable pointer gets included for a non-UI criterion.
-    Neither costs anything beyond a few extra prompt tokens."""
+    Neither costs anything beyond a few extra prompt tokens.
+
+    Deliberately UNAWARE of `exposure.mode` -- CTRL-039 (_run_wave_exposure_check)
+    and design_audit's "non_ui_exposed" bucket both NEED the raw keyword signal
+    kept separate from exposure, so they can validate "this looks UI-facing by
+    keyword but declared itself api/internal -- is the justification real?" as
+    two distinct facts. A caller that wants "and exposure doesn't already
+    explain this away" (nav-depth's advisory noise, a real dogfood complaint --
+    see _criterion_needs_nav_depth) must check exposure itself, not get it
+    folded in here."""
     text = criterion.get("description", "").lower()
     return any(kw in text for kw in UI_KEYWORDS)
+
+
+def _criterion_needs_nav_depth(criterion: dict) -> bool:
+    """UI-facing by keyword AND not already opted out via exposure.mode.
+
+    Real dogfood complaint, win2mac 2026-08-08: nav-depth's advisory
+    "declare nav_depth" warning fired on backend-only criteria whose
+    description happened to contain a UI keyword (e.g. "view", "dashboard")
+    without implying any screen at all. A criterion that already declared
+    `exposure: {mode: api|internal}` (CTRL-039's existing mechanism for "no
+    UI surface here") has made that call explicitly -- nav-depth, unlike
+    CTRL-039 itself, has no reason to re-litigate it via keywords."""
+    if not _is_ui_facing_criterion(criterion):
+        return False
+    return criterion.get("exposure", {}).get("mode") not in ("api", "internal")
 
 
 _QA_TAIL = (
@@ -1846,8 +2018,34 @@ def _run_test_suite_check(pcp_dir: Path, project_root: Path, ctx: dict) -> list[
             pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "test-suite", result["output"],
         )
     if result["tool"] and not result["passed"]:
+        # Baseline exclusion (feature request, win2mac dogfood 2026-08-08):
+        # if every currently-failing test was already accepted as pre-
+        # existing debt via `pcp build --capture-test-baseline`, this
+        # criterion's OWN attempt didn't cause it -- don't block on it.
+        # Fails closed when failed_test_ids couldn't be parsed at all (a
+        # collection error/crash, not a clean per-test failure list) --
+        # an empty parse must never be read as "nothing new failed".
+        failed_ids = set(result.get("failed_test_ids") or [])
+        baseline = qa.load_baseline_test_failures(pcp_dir)
+        new_failures = failed_ids - baseline
+        if failed_ids and baseline and not new_failures:
+            console.print(
+                f"[dim]Test suite: {len(failed_ids)} failing test(s), all already baselined as "
+                f"pre-existing (`pcp build --capture-test-baseline`) -- not blocking this criterion.[/dim]"
+            )
+            _qa_record(
+                pcp_dir, ctx, "test-suite",
+                [f"{len(failed_ids)} failing test(s) excluded, already in baseline_test_failures.yaml: "
+                 f"{', '.join(sorted(failed_ids)[:5])}{'...' if len(failed_ids) > 5 else ''}"],
+                control_id="CTRL-001", tool=result["tool"], evidence_path=evidence_path, result="advisory",
+            )
+            return []
+        baseline_note = (
+            f"\n({len(new_failures)} of {len(failed_ids)} failure(s) are NOT in the baseline)"
+            if baseline and failed_ids else ""
+        )
         violations.append(
-            f"Test suite ({result['tool']}) FAILED — full output: {evidence_path}\n{result['output'][-1500:]}"
+            f"Test suite ({result['tool']}) FAILED — full output: {evidence_path}\n{result['output'][-1500:]}{baseline_note}"
         )
     _qa_record(pcp_dir, ctx, "test-suite", violations, control_id="CTRL-001", tool=result["tool"], evidence_path=evidence_path)
     return violations
@@ -2986,7 +3184,7 @@ def _run_wave_nav_depth_check(pcp_dir: Path, wave_modules: list[dict], wave_numb
             continue
         acc = load_yaml(acc_path)
         for c in acc.get("criteria", []):
-            if c.get("status") != "complete" or not _is_ui_facing_criterion(c):
+            if c.get("status") != "complete" or not _criterion_needs_nav_depth(c):
                 continue
             checked.append(f"{mod['name']}/{c['id']}")
             depth = c.get("nav_depth")
@@ -3103,6 +3301,183 @@ def _run_wave_exposure_check(pcp_dir: Path, wave_modules: list[dict], wave_numbe
     _wave_record(pcp_dir, wave_number, "exposure-justification", "CTRL-039", findings, files=checked, result="pass")
     for f in findings:
         console.print(f"[yellow]{f}[/yellow]")
+    return findings
+
+
+def _adversarial_review_timeout_sec() -> int:
+    return int(os.environ.get("PCP_ADVERSARIAL_REVIEW_TIMEOUT_SEC", "900"))
+
+
+def _adversarial_review_max_budget_usd() -> str:
+    return os.environ.get("PCP_ADVERSARIAL_REVIEW_MAX_BUDGET_USD", "3")
+
+
+def _build_adversarial_review_prompt(mod_name: str, c: dict, diff: str) -> str:
+    """The reviewer's whole job is to try to DISPROVE, not to help. Explicit
+    investigation steps (read the test, read the impl, actually run it) --
+    without them a review-only agent tends to just re-read the diff and
+    restate what it already says, the same shallow pass the primary gates
+    already do."""
+    return f"""You are an ADVERSARIAL code reviewer. Your ONLY job is to try to PROVE this
+implementation does NOT actually satisfy the criterion below -- that its tests are
+tautological, mocked-around, or trivially satisfiable without real logic behind them,
+or that the implementation is a stub/hardcoded value dressed up to look real.
+
+You are not the author and you owe the author no charity. Default to suspicion. A
+criterion only survives this review if you genuinely could not find a real problem
+after actually investigating -- not because nothing looked suspicious at a glance.
+
+## Criterion under review ({mod_name}/{c.get('id', '?')})
+{c.get('description', '')}
+
+## Investigate for real -- you have Read/Grep/Bash tool access in this repo
+1. Find and read the actual test file(s) exercising this criterion. Are the assertions
+   checking real computed output against a real expected value, or are they trivial/
+   tautological (asserting a mock was called, asserting a constant, asserting something
+   true regardless of what the implementation actually does)?
+2. Read the actual implementation. Does it genuinely implement the described behavior,
+   or is it a stub, a hardcoded return that happens to match the test's expectation, or
+   does it call out to something mocked/faked that would never work against real input?
+3. Actually RUN the relevant tests yourself (you have Bash) and read the real output --
+   do not just trust that "tests exist and are green" means the criterion is real.
+4. Watch for the specific failure patterns already found elsewhere in real projects this
+   protocol governs: checks that structurally cannot fail, evidence substituted with a
+   stub on failure and reported as a pass, an implementation whose exports/behavior
+   don't actually match what callers need.
+
+## Diff under review
+```diff
+{diff[:15000]}
+```
+
+## Output
+You MUST NOT edit, write, or delete any file in this repository -- you are producing a
+review verdict only, not fixing anything. Output ONLY valid JSON (no prose, no markdown,
+no code fences):
+{{
+  "is_real": true or false,
+  "confidence": 0.0 to 1.0,
+  "red_flags": ["specific, evidence-based finding -- cite the actual file/line/test name you checked"],
+  "reasoning": "what you actually did to investigate and why you reached this conclusion, 2-4 sentences"
+}}
+"""
+
+
+def _run_adversarial_review(
+    pcp_dir: Path, project_root: Path, mod: dict, c: dict, diff: str, budget: "_BuildBudget",
+) -> list[str]:
+    """CTRL-041, opt-in via the criterion's own `adversarial_review: true`
+    (module_acceptance.schema.json). Runs after the primary build agent's
+    attempt has already passed every other gate, right before the criterion
+    would be marked complete -- see this function's caller.
+
+    A SEPARATE real coding-agent session, not a lightweight diff-only judge
+    call like architect-review/gate -- proving fakery requires actually
+    running the tests and reading the real files, which a Haiku call handed
+    only a diff string cannot do. Reuses the same per-attempt policy
+    discipline as the primary build agent's own coding-agent call (explicit
+    budget circuit breaker checked before spawning, explicit wall-clock
+    timeout, explicit dollar ceiling, cost fed back into the run-level
+    budget tracker) but is a deliberately SEPARATE, isolated function --
+    _build_one_criterion is protected by test_coding_agent_contract.py's
+    structural guard and is the highest-blast-radius code in this repo;
+    this feature does not need to touch its internals, only its return
+    value (the diff it already computed for gate evaluation).
+
+    Real cost, real agent session -- gated behind an explicit per-criterion
+    opt-in specifically so it only runs for "the small number of criteria
+    carrying a project's actual differentiators" (the framing this feature
+    was requested under), not every criterion in a build.
+
+    Known limitation: relies on the prompt instruction, not a verified
+    read-only permission mode, to keep the reviewing agent from editing
+    files -- not independently confirmed safe against a reviewer that
+    ignores the instruction. Documented, not silently assumed solid."""
+    if not c.get("adversarial_review"):
+        return []
+    if not diff.strip():
+        return []  # nothing to review -- e.g. an install_only criterion, which never sets adversarial_review anyway
+
+    ctx = {"module": mod["name"], "submodule": None, "criterion_id": c["id"], "attempt": 0, "files": []}
+
+    try:
+        budget.take_session()
+    except BudgetExceeded:
+        console.print(f"[yellow]Adversarial review skipped for {mod['name']}/{c['id']}: session circuit breaker.[/yellow]")
+        return []
+
+    console.print(f"[dim]Adversarial review ({mod['name']}/{c['id']}): spawning an independent reviewer...[/dim]")
+    prompt = _build_adversarial_review_prompt(mod["name"], c, diff)
+    session_id = str(uuid.uuid4())
+    cmd = [
+        _claude_bin(), "-p",
+        "--permission-mode", "acceptEdits",
+        "--output-format", "json",
+        "--max-budget-usd", _adversarial_review_max_budget_usd(),
+        "--session-id", session_id,
+    ]
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=project_root, start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(input=prompt, timeout=_adversarial_review_timeout_sec())
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
+        # Infra failure, not a real finding -- fails OPEN, same posture as
+        # _gate_infrastructure_failure elsewhere in this file. A criterion
+        # must not be blocked forever because the reviewer's own process hung.
+        _qa_record(
+            pcp_dir, ctx, "adversarial-review", [f"timed out after {_adversarial_review_timeout_sec()}s"],
+            control_id="CTRL-041", result="error",
+        )
+        return []
+
+    if proc.returncode != 0:
+        _qa_record(
+            pcp_dir, ctx, "adversarial-review", [f"reviewer process exited {proc.returncode}: {stderr[-500:]}"],
+            control_id="CTRL-041", result="error",
+        )
+        return []
+
+    try:
+        envelope = json.loads(stdout)
+        if envelope.get("is_error"):
+            _qa_record(
+                pcp_dir, ctx, "adversarial-review", [envelope.get("result", "")[:500]],
+                control_id="CTRL-041", result="error",
+            )
+            return []
+        with _STATE_LOCK:
+            _log_usage(
+                pcp_dir, "adversarial-review", None, envelope.get("session_id"),
+                envelope.get("usage", {}), envelope.get("total_cost_usd"),
+            )
+        budget.add_cost(envelope.get("total_cost_usd"))
+        verdict = json.loads(envelope.get("result", "{}"))
+    except (json.JSONDecodeError, TypeError, KeyError) as e:
+        _qa_record(
+            pcp_dir, ctx, "adversarial-review", [f"could not parse reviewer verdict: {e}"],
+            control_id="CTRL-041", result="error",
+        )
+        return []
+
+    findings: list[str] = []
+    if verdict.get("is_real") is False:
+        red_flags = verdict.get("red_flags") or []
+        reasoning = verdict.get("reasoning", "")
+        findings.append(
+            f"Adversarial review (CTRL-041): the independent reviewer could NOT confirm "
+            f"{mod['name']}/{c['id']} is genuinely implemented "
+            f"(confidence={verdict.get('confidence', '?')}). Reasoning: {reasoning} "
+            f"Red flags: {'; '.join(red_flags) if red_flags else '(none listed)'}"
+        )
+
+    _qa_record(pcp_dir, ctx, "adversarial-review", findings, control_id="CTRL-041")
     return findings
 
 
@@ -3594,7 +3969,7 @@ def _build_one_criterion(
                 budget=budget,
             )
             if ok:
-                return True, []
+                return True, [], ""
             # Falls through to the normal full build loop below — a
             # declined approval or failed smoke test is a real signal
             # this wasn't actually a direct match, not a reason to give up.
@@ -3602,6 +3977,9 @@ def _build_one_criterion(
     feedback = None
     success = False
     block_findings: list[str] = []
+    diff = ""  # populated inside the attempt loop; stays "" if every attempt
+               # errored before reaching gate evaluation (adversarial review
+               # has nothing to review in that case anyway -- see the caller)
     attempt_history: list[str] = []
     agent_session_id = str(uuid.uuid4())
     # Everything the agent does this criterion — committed or not — is
@@ -3981,7 +4359,7 @@ def _build_one_criterion(
         except Exception as e:
             console.print(f"[dim]run-log end skipped: {e}[/dim]")
 
-    return success, block_findings
+    return success, block_findings, diff
 
 
 def _mark_criterion_complete(mod: dict, criterion_id: str, verified_by: str = "pcp_build") -> None:
@@ -4068,12 +4446,25 @@ def _build_module_worker_inner(
     if not _criteria_parallel_enabled(mod):
         for c in mod["pending_criteria"]:
             console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
-            success, block_findings = _build_one_criterion(
+            success, block_findings, diff = _build_one_criterion(
                 pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget, yes,
                 module_wave_number=module_wave_number,
             )
 
             if success:
+                # CTRL-041, opt-in via c["adversarial_review"] -- see
+                # _run_adversarial_review's docstring. Checked BEFORE
+                # _mark_criterion_complete, not after: the whole point is an
+                # independent try-to-disprove pass before completion is final,
+                # not a post-hoc audit note nobody acts on.
+                adversarial_findings = _run_adversarial_review(pcp_dir, project_root, mod, c, diff, budget)
+                if adversarial_findings:
+                    console.print(f"[red]✗ Adversarial review disputes Criterion [{c['id']}] — NOT marked complete:[/red]")
+                    for f in adversarial_findings:
+                        console.print(f"  ✗ {f}")
+                    _record_escalation(pcp_dir, mod["name"], c["id"], adversarial_findings)
+                    _write_progress(pcp_dir, mod["name"], c["id"], 0, "failed")
+                    return {"module": mod["name"], "success": False, "failed_criterion": c["id"], "block_findings": adversarial_findings}
                 console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
                 _mark_criterion_complete(mod, c["id"])
                 _write_progress(pcp_dir, mod["name"], c["id"], 0, "done")
@@ -4105,11 +4496,19 @@ def _build_module_worker_inner(
         if len(wave_criteria) == 1:
             c = wave_criteria[0]
             console.print(f"\n[bold underline]Criterion [{c['id']}]:[/bold underline] {c['description']}")
-            success, block_findings = _build_one_criterion(
+            success, block_findings, diff = _build_one_criterion(
                 pcp_dir, project_root, mod, c, build_model, build_model_explicit, budget, yes,
                 module_wave_number=module_wave_number, criterion_wave_number=wave_number,
             )
             if success:
+                adversarial_findings = _run_adversarial_review(pcp_dir, project_root, mod, c, diff, budget)
+                if adversarial_findings:
+                    console.print(f"[red]✗ Adversarial review disputes Criterion [{c['id']}] — NOT marked complete:[/red]")
+                    for f in adversarial_findings:
+                        console.print(f"  ✗ {f}")
+                    _record_escalation(pcp_dir, mod["name"], c["id"], adversarial_findings)
+                    _write_progress(pcp_dir, mod["name"], c["id"], 0, "failed")
+                    return {"module": mod["name"], "success": False, "failed_criterion": c["id"], "block_findings": adversarial_findings}
                 console.print(f"[green]✓ Criterion [{c['id']}] passed all gates successfully![/green]")
                 _mark_criterion_complete(mod, c["id"])
                 _write_progress(pcp_dir, mod["name"], c["id"], 0, "done")
@@ -4127,7 +4526,7 @@ def _build_module_worker_inner(
         )
         units = {c["id"]: f"{mod['name']}-{c['id']}" for c in wave_criteria}
         worktrees = {c["id"]: _setup_worktree(project_root, units[c["id"]]) for c in wave_criteria}
-        results: dict[str, tuple[bool, list[str]]] = {}
+        results: dict[str, tuple[bool, list[str], str]] = {}
         with ThreadPoolExecutor(
             max_workers=min(_max_parallel_criteria(), len(wave_criteria))
         ) as executor:
@@ -4148,15 +4547,28 @@ def _build_module_worker_inner(
                     # to a graceful failure result rather than letting the
                     # run-level circuit breaker crash out with a raw
                     # traceback mid-wave.
-                    results[cid] = (False, [f"budget circuit breaker: exceeded {budget.max_sessions} agent sessions this run"])
+                    results[cid] = (False, [f"budget circuit breaker: exceeded {budget.max_sessions} agent sessions this run"], "")
 
         any_failed = False
         failed_id = None
         failed_findings: list[str] = []
         for c in wave_criteria:
             cid = c["id"]
-            success, block_findings = results.get(cid, (False, ["no result — worker crashed"]))
+            success, block_findings, _diff = results.get(cid, (False, ["no result — worker crashed"], ""))
             if success:
+                # CTRL-041 (_run_adversarial_review) is deliberately NOT
+                # wired into this concurrent (ThreadPoolExecutor) path yet --
+                # the genuinely concurrent result-unpacking here carries more
+                # risk than the two direct-call sites it IS wired into. A
+                # criterion opted in here still gets marked complete without
+                # the extra check; flagged loud so that's a visible gap, not
+                # a silent one.
+                if c.get("adversarial_review"):
+                    console.print(
+                        f"[yellow]Note: {mod['name']}/{cid} declares adversarial_review=true but is "
+                        "building in a parallel criterion wave — CTRL-041 is not yet wired into that "
+                        "path, so this criterion is completing WITHOUT the independent review.[/yellow]"
+                    )
                 ok, merge_output = _merge_module_branch(project_root, units[cid], pcp_dir=pcp_dir)
                 if ok:
                     _cleanup_worktree(project_root, units[cid], worktrees[cid])
@@ -4182,7 +4594,7 @@ def _build_module_worker_inner(
                     )
                     _cleanup_worktree(project_root, units[cid], worktrees[cid])
                     retry_wt = _setup_worktree(project_root, units[cid])
-                    retry_ok, retry_findings = _build_one_criterion(
+                    retry_ok, retry_findings, _retry_diff = _build_one_criterion(
                         pcp_dir, retry_wt, mod, c, build_model, build_model_explicit, budget, yes,
                         module_wave_number=module_wave_number, criterion_wave_number=wave_number,
                     )
@@ -4243,7 +4655,12 @@ def _refresh_state(pcp_dir: Path, modules_dir: Path) -> None:
               help="Project root override.")
 @click.option("--yes", "yes", is_flag=True,
               help="Skip the interactive install-only approval prompt (CI/non-interactive use — opt-in, not default). Only affects criteria/modules declaring install_only; every other criterion builds exactly as before.")
-def build(module_name: str | None, project_path: str | None, yes: bool):
+@click.option("--capture-test-baseline", "capture_test_baseline", is_flag=True,
+              help="Run the full test suite once and record every currently-failing test as accepted "
+                   "pre-existing debt (.pcp/baseline_test_failures.yaml) — mirrors `pcp check --baseline`'s "
+                   "brownfield-grace pattern, extended to the test suite. Explicit only, never automatic: "
+                   "a test failure could be a real regression, not debt. Does not build anything; exits after capturing.")
+def build(module_name: str | None, project_path: str | None, yes: bool, capture_test_baseline: bool):
     """Run autonomous AI coding loops for pending acceptance criteria.
 
     This is the HEADLESS executor (ThreadPoolExecutor, worktree-per-criterion,
@@ -4259,6 +4676,18 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
     except NoPCPDir as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(2)
+
+    if capture_test_baseline:
+        project_root = pcp_dir.parent
+        console.print("[dim]Running the full test suite once to capture pre-existing failures...[/dim]")
+        data = qa.capture_test_failure_baseline(project_root, pcp_dir)
+        console.print(f"[green]✓[/green] {data['total']} pre-existing failing test(s) recorded to "
+                      f"[cyan]baseline_test_failures.yaml[/cyan]. Future gates won't block on these.")
+        for t in data["failing_tests"][:20]:
+            console.print(f"   {t}")
+        if data["total"] > 20:
+            console.print(f"   ... and {data['total'] - 20} more")
+        return
 
     try:
         chain_guard.assert_chain_integrity(pcp_dir)

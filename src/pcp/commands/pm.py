@@ -1,12 +1,19 @@
 """pcp pm — translate natural language intent to spec modifications."""
 
+import contextlib
 import os
+import re
 import sys
 import json
 from pathlib import Path
 import click
 import yaml
 from rich.console import Console
+
+try:
+    import fcntl
+except ImportError:  # Windows -- no-op lock, same best-effort posture as
+    fcntl = None      # the append-only OS flag elsewhere in this codebase.
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir, get_modules_dir
 from pcp.llm import client as llm
@@ -102,6 +109,8 @@ DECOMPOSE FIRST applies to UI pages too: for a NEW criterion whose description i
 
 A real feature intent routinely spans MORE THAN ONE existing or new module (e.g. "add payments" may touch billing, notifications, and auth) -- do not force everything into a single module just because the schema used to only allow one. `modules` is a LIST: include one entry per module this intent actually touches, whether that's one module or several. Analyze which module (or modules) are responsible, and for each, generate the updated or new spec and acceptance criteria for that module only.
 
+Set `spec_changes` to null (omit the key or use JSON null) for a module entry whenever this intent needs NO module-level change -- e.g. a pure acceptance-criteria status change, a wording tweak to one criterion, adding a criterion that doesn't alter the module's description/dependencies/constraints. Emitting a non-null `spec_changes` causes that module's ENTIRE spec.yaml to be rewritten from your output -- do this only when a real module-level field is actually changing, never just because the module is being touched at all. When in doubt, prefer null.
+
 Ensure that new acceptance criteria IDs do not conflict with existing ones within their own module (e.g. if a module already has A001, its new ones start at A002).
 
 You must output ONLY valid JSON — no prose, no markdown, no code fences.
@@ -132,9 +141,9 @@ Output schema:
         "dependencies": ["dependency-module-name"],
         "constraints": [],
         "build_vs_buy": {
-          "decision": "not_applicable",
-          "rationale": "Pure business-logic module -- no whole-module tool-adoption choice; see per-criterion build_vs_buy instead.",
-          "candidates_considered": []
+          "decision": "OMIT this whole build_vs_buy key if this module's module-level build-vs-buy decision is unchanged by this intent -- it will be preserved automatically from the existing spec. Only include it when you are actually setting or changing that decision. exactly one of: reuse_whole, reuse_partial, reimplement_from_reference, fork_adapt, build_fresh, not_applicable",
+          "rationale": "One sentence -- the real reason, not a placeholder. Only present when the key above is included.",
+          "candidates_considered": ["Real candidates actually considered, not invented"]
         }
       },
       "acceptance_changes": {
@@ -169,6 +178,26 @@ Every criterion SHOULD also declare `target`: the single primary file path it wi
 
 A criterion whose check is dom_contains, url_responds, or visual MUST also declare `url` (the page this check hits once the app is running -- e.g. "/dashboard"), and dom_contains ALSO needs `selector` (a CSS selector or literal text the page must contain). Without `url` the check has nothing to run against and will silently skip forever -- confirmed root cause, 2026-08-03, of a real dogfood project's automated UI checks sitting at 100% skip. Use check: manual instead if the page/route genuinely isn't known yet.
 """
+
+
+def _known_criterion_ids(pcp_dir: Path) -> dict[str, set[str]]:
+    """Every module's existing criterion IDs, read fresh right before the LLM
+    call -- the snapshot the LLM's context reflects. See _write_one_module's
+    ID-collision guard: an ID in this snapshot is a legitimate edit no matter
+    how much its description changes; an ID NOT in this snapshot that
+    collides with something on disk by write-time is a real concurrent-write
+    collision."""
+    known: dict[str, set[str]] = {}
+    modules_dir = pcp_dir / "strategy" / "modules"
+    if not modules_dir.exists():
+        return known
+    for acc_path in modules_dir.glob("*/acceptance.yaml"):
+        try:
+            data = yaml.safe_load(acc_path.read_text()) or {}
+            known[acc_path.parent.name] = {c["id"] for c in data.get("criteria", []) if isinstance(c, dict) and "id" in c}
+        except Exception:
+            known[acc_path.parent.name] = set()
+    return known
 
 
 def _load_project_context(pcp_dir: Path) -> tuple[str, int]:
@@ -222,14 +251,91 @@ def _load_project_context(pcp_dir: Path) -> tuple[str, int]:
     return "\n".join(parts), dropped
 
 
-def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
+@contextlib.contextmanager
+def _module_write_lock(mod_dir: Path):
+    """Exclusive lock for one module's spec/acceptance read-merge-write cycle.
+
+    Real incident, win2mac dogfood 2026-08-08: two concurrent `pcp pm` calls
+    on the same module both computed the same "next available" criterion ID
+    from the same stale on-disk snapshot (the LLM picks the ID, reading
+    whatever acceptance.yaml looked like when THIS call's context was built).
+    The second process's write then silently clobbered the first's new
+    criterion entirely -- not a merge conflict, a plain last-writer-wins file
+    overwrite, since criteria_map[id] = {**existing, **new} treats same-ID
+    entries as "the same criterion, being edited" unconditionally.
+
+    This lock closes the write-time half of that race (serializes the
+    read-merge-write so a second process sees the first's write before it
+    merges); `_write_one_module`'s ID-collision check below closes the other
+    half (the ID itself was chosen from stale context, so even serialized,
+    the second call's `new_c["id"]` may already be taken by unrelated
+    content once it's this call's turn).
+
+    POSIX advisory lock; best-effort no-op on platforms without fcntl, same
+    posture as this codebase's other OS-specific hardening (chflags uappnd)."""
+    if fcntl is None:
+        yield
+        return
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = mod_dir / ".pm.lock"
+    with open(lock_path, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _next_free_criterion_id(existing_ids: set[str], preferred: str) -> str:
+    """Smallest ID >= preferred, sharing preferred's prefix/zero-padding,
+    not already in existing_ids. Falls back to a suffixed variant when
+    preferred doesn't parse as prefix+digits (should not happen given the
+    schema, but must not crash a real pm call over it)."""
+    m = re.match(r"^([A-Za-z]*)(\d+)$", preferred)
+    if not m:
+        n = 2
+        candidate = f"{preferred}-{n}"
+        while candidate in existing_ids:
+            n += 1
+            candidate = f"{preferred}-{n}"
+        return candidate
+    prefix, num_str = m.groups()
+    width = len(num_str)
+    candidate_n = int(num_str)
+    for eid in existing_ids:
+        m2 = re.match(rf"^{re.escape(prefix)}(\d+)$", eid)
+        if m2:
+            candidate_n = max(candidate_n, int(m2.group(1)) + 1)
+    candidate = f"{prefix}{candidate_n:0{width}d}"
+    while candidate in existing_ids:
+        candidate_n += 1
+        candidate = f"{prefix}{candidate_n:0{width}d}"
+    return candidate
+
+
+def _write_one_module(pcp_dir: Path, mod_result: dict, known_ids: set[str] | None = None) -> list[str]:
     """Applies one module's spec_changes/acceptance_changes to disk -- same
     coercion/merge logic the old single-module pm always had, now callable
-    per-entry in the modules list. Returns coercion warnings."""
+    per-entry in the modules list. Returns coercion warnings.
+
+    known_ids is the set of criterion IDs that existed in THIS call's LLM
+    context (see pm()'s _known_criterion_ids snapshot) -- required to tell a
+    legitimate edit (an ID the LLM saw and is intentionally updating, however
+    much the description changes) apart from a real concurrent-write
+    collision (an ID the LLM believed was free, that something else claimed
+    first). Defaults to None (treated as empty) for direct test callers that
+    don't exercise the collision path.
+
+    The whole read-merge-write cycle runs under _module_write_lock -- see its
+    docstring for the concurrent-pm-calls race this closes."""
     mod_name = mod_result.get("module_name", "").strip().lower()
     mod_dir = pcp_dir / "strategy" / "modules" / mod_name
-    mod_dir.mkdir(parents=True, exist_ok=True)
 
+    with _module_write_lock(mod_dir):
+        return _write_one_module_locked(mod_dir, mod_name, mod_result, known_ids or set())
+
+
+def _write_one_module_locked(mod_dir: Path, mod_name: str, mod_result: dict, known_ids: set[str]) -> list[str]:
     spec_path = mod_dir / "spec.yaml"
     acc_path = mod_dir / "acceptance.yaml"
 
@@ -271,6 +377,15 @@ def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
         if "owns_entities" not in spec_changes and existing_spec.get("owns_entities"):
             spec_changes["owns_entities"] = existing_spec["owns_entities"]
 
+        # Same preservation rule for category_reference -- the prompt already
+        # tells the LLM to omit this "rather than guessing" when unsure, but
+        # nothing carried the real existing value forward when it did, so an
+        # established prior-art/category decision trail was silently deleted
+        # by any later pm call that touched this module for an unrelated
+        # reason (real incident, win2mac, 2026-08-08).
+        if "category_reference" not in spec_changes and existing_spec.get("category_reference"):
+            spec_changes["category_reference"] = existing_spec["category_reference"]
+
         coercion_warnings += _normalize_spec(spec_changes, mod_name)
         spec_path.write_text(yaml.dump(spec_changes, default_flow_style=False))
 
@@ -285,6 +400,32 @@ def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
 
     criteria_map = {c["id"]: c for c in existing_criteria}
     for new_c in mod_result.get("acceptance_changes", {}).get("criteria", []):
+        existing_c = criteria_map.get(new_c["id"], {})
+
+        # ID-collision guard: new_c["id"] was chosen by the LLM from whatever
+        # acceptance.yaml looked like when THIS pm call's context was built --
+        # under _module_write_lock we're now looking at the actual current
+        # on-disk state, which a concurrent pm call may have already changed.
+        #
+        # known_ids (the snapshot taken right before the LLM call) is the
+        # correct signal, NOT a description diff -- an earlier version of
+        # this guard used "description changed" as the collision signal and
+        # broke the ordinary case of pm legitimately rewording an existing
+        # criterion (caught by test_pm_preserves_verified_by_when_regenerating_
+        # an_existing_criterion). An ID already in known_ids is a real edit no
+        # matter how much the description changes. An ID NOT in known_ids
+        # that already exists on disk now means someone else claimed it first
+        # -- an actual collision.
+        if new_c["id"] not in known_ids and existing_c:
+            old_id = new_c["id"]
+            new_id = _next_free_criterion_id(set(criteria_map.keys()), old_id)
+            new_c["id"] = new_id
+            coercion_warnings.append(
+                f"{mod_name}/{old_id}: ID collision with a different criterion already on disk "
+                f"(likely a concurrent `pcp pm` call) -- renumbered to {new_id}"
+            )
+            existing_c = {}
+
         # Field-level merge onto the existing entry, not a full replacement --
         # same reasoning as spec_changes's build_vs_buy/module_logic_breakdown
         # preservation above, applied per-criterion. `verified_by` is
@@ -298,7 +439,6 @@ def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
         # Same logic protects evidence/notes/design_justification and any
         # other field pm doesn't manage: preserved unless the response
         # explicitly overwrites it.
-        existing_c = criteria_map.get(new_c["id"], {})
         criteria_map[new_c["id"]] = {**existing_c, **new_c}
 
     merged_acceptance = {
@@ -329,6 +469,11 @@ def pm(intent: str, project_path: str | None):
 
     context_str, dropped = _load_project_context(pcp_dir)
     user_prompt = f"## Intent\n{intent}\n\n{context_str}"
+    # Snapshot of every module's existing criterion IDs at the moment the
+    # LLM's context was assembled -- see _write_one_module's ID-collision
+    # guard for why this snapshot, not a description-diff, is the correct
+    # signal for "is this ID a legitimate edit or a collision".
+    known_ids_by_module = _known_criterion_ids(pcp_dir)
 
     if dropped:
         console.print(
@@ -400,7 +545,10 @@ def pm(intent: str, project_path: str | None):
 
     coercion_warnings: list[str] = []
     for mr in modules_result:
-        coercion_warnings += _write_one_module(pcp_dir, mr)
+        mod_name_for_lookup = (mr.get("module_name") or "").strip().lower()
+        coercion_warnings += _write_one_module(
+            pcp_dir, mr, known_ids=known_ids_by_module.get(mod_name_for_lookup, set())
+        )
 
     console.print(f"[green]✓[/green] {len(modules_result)} module(s) updated.")
     if coercion_warnings:

@@ -59,7 +59,7 @@ def _run_build_one_criterion(tmp_path, build_model, build_model_explicit, test_s
          patch("pcp.commands.build._run_architect_review", return_value=[]), \
          patch("pcp.commands.build._run_gate_check", return_value=[]), \
          patch("pcp.commands.build.find_transcript_for_session", return_value=None):
-        success, findings = _build_one_criterion(pcp_dir, tmp_path, mod, c, build_model, build_model_explicit, budget)
+        success, findings, _diff = _build_one_criterion(pcp_dir, tmp_path, mod, c, build_model, build_model_explicit, budget)
 
     return success, findings, captured_models
 

@@ -17,7 +17,10 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
+
+import yaml
 
 # Real incident, 2026-07-18 (Project O dogfood): these were bare
 # module constants with no env override -- a real project's test suite
@@ -28,18 +31,83 @@ from pathlib import Path
 # pattern as llm/client.py's _timeout() (PCP_LLM_TIMEOUT) and
 # PCP_BUILD_AGENT_TIMEOUT_SEC -- read lazily so a test can monkeypatch the
 # env var and see the effect without reimporting this module.
-def _timeout_test() -> int:
-    return int(os.environ.get("PCP_QA_TEST_TIMEOUT_SEC", "300"))
+_TIMEOUT_SAFETY_MULTIPLIER = 1.5
+_MIN_MEASURED_TIMEOUT_SEC = 60
 
 
-def test_timeout_info() -> tuple[int, bool]:
+def _qa_timing_path(pcp_dir: Path) -> Path:
+    return Path(pcp_dir) / "qa_timing.yaml"
+
+
+def _load_measured_timeout(pcp_dir: Path | None) -> int | None:
+    """A prior FULL (unscoped) test run's measured wall-clock, scaled by a
+    safety margin, used instead of the fixed 300s guess once one exists.
+
+    Real incident, win2mac dogfood 2026-08-08: a healthy 390-560s suite hit
+    the 300s default on every single build attempt until PCP_QA_TEST_TIMEOUT_SEC
+    was found and set manually, three times, in three different sessions. The
+    env override (2026-07-18 fix, see below) works but is opt-in and has to be
+    rediscovered per project; this makes the common case self-correcting after
+    one real full run instead of requiring that discovery at all.
+
+    Fails open (None) on any read/parse problem, same posture as every other
+    best-effort .pcp/ read in this codebase -- an unreadable cache must not be
+    the reason a test gate misbehaves."""
+    if pcp_dir is None:
+        return None
+    path = _qa_timing_path(pcp_dir)
+    if not path.exists():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+        measured = (data.get("test_suite") or {}).get("measured_seconds")
+        if not isinstance(measured, (int, float)) or measured <= 0:
+            return None
+        return max(_MIN_MEASURED_TIMEOUT_SEC, int(measured * _TIMEOUT_SAFETY_MULTIPLIER))
+    except Exception:
+        return None
+
+
+def _record_measured_duration(pcp_dir: Path | None, tool: str, seconds: float) -> None:
+    """Best-effort -- an unwritable .pcp/ must not break the test gate. Only
+    ever WIDENS the recorded measurement (max of old/new): one unusually fast
+    run must never shrink the timeout back down and reintroduce false
+    timeouts on the next normal-speed run."""
+    if pcp_dir is None or seconds <= 0:
+        return
+    path = _qa_timing_path(pcp_dir)
+    try:
+        data = {}
+        if path.exists():
+            data = yaml.safe_load(path.read_text()) or {}
+        prior = (data.get(tool) or {}).get("measured_seconds", 0)
+        data[tool] = {"measured_seconds": max(prior, round(seconds, 1))}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.dump(data, default_flow_style=False))
+    except Exception:
+        pass
+
+
+def _timeout_test(pcp_dir: Path | None = None) -> int:
+    env = os.environ.get("PCP_QA_TEST_TIMEOUT_SEC")
+    if env is not None:
+        return int(env)
+    measured = _load_measured_timeout(pcp_dir)
+    if measured is not None:
+        return measured
+    return 300
+
+
+def test_timeout_info(pcp_dir: Path | None = None) -> tuple[int, bool]:
     """(effective timeout seconds, True if PCP_QA_TEST_TIMEOUT_SEC is unset
-    and the 300s default is silently in effect) -- lets a build run print
-    this loud instead of a wrong-environment failure (e.g. the DB the tests
-    hit isn't the one intended) surfacing as an indistinguishable "timed
-    out", same masking this module's own docstring above already documents
-    for the slow-suite case."""
-    return _timeout_test(), "PCP_QA_TEST_TIMEOUT_SEC" not in os.environ
+    and neither a manually-tuned nor an auto-measured value is in effect) --
+    lets a build run print this loud instead of a wrong-environment failure
+    (e.g. the DB the tests hit isn't the one intended) surfacing as an
+    indistinguishable "timed out", same masking this module's own docstring
+    above already documents for the slow-suite case."""
+    return _timeout_test(pcp_dir), (
+        "PCP_QA_TEST_TIMEOUT_SEC" not in os.environ and _load_measured_timeout(pcp_dir) is None
+    )
 
 
 def _partial_output(exc: subprocess.TimeoutExpired) -> str:
@@ -74,11 +142,13 @@ def _partial_output(exc: subprocess.TimeoutExpired) -> str:
     return "\n\n" + "\n\n".join(parts)
 
 
-def _timeout_message(tool: str, exc: subprocess.TimeoutExpired | None = None) -> str:
+def _timeout_message(tool: str, exc: subprocess.TimeoutExpired | None = None,
+                     pcp_dir: Path | None = None) -> str:
     """A bare "timed out" in the evidence file reads as "the test suite failed"
     to whoever opens it next -- it names neither the limit that was hit nor the
     knob that changes it, so the natural next move is to go debug tests that
-    may well be fine. Say which limit, and say the default is a default.
+    may well be fine. Say which limit, and say whether it's a default, an
+    auto-measured baseline, or a manual override -- not just "default or not".
 
     Also append whatever the process actually managed to say -- see
     _partial_output for why advice-without-data was not enough.
@@ -86,12 +156,17 @@ def _timeout_message(tool: str, exc: subprocess.TimeoutExpired | None = None) ->
     The limit is read off the exception when one is given. `test_timeout_info()`
     reports the limit in effect *now*, which is not necessarily the one that
     killed this process -- `exc.timeout` is the value that actually applied."""
-    seconds, is_default = test_timeout_info()
+    seconds, is_unmeasured_default = test_timeout_info(pcp_dir)
     if exc is not None and exc.timeout:
         actual = int(exc.timeout)
-        is_default = is_default and actual == seconds
+        is_unmeasured_default = is_unmeasured_default and actual == seconds
         seconds = actual
-    suffix = " (PCP default — not tuned for this project)" if is_default else ""
+    if "PCP_QA_TEST_TIMEOUT_SEC" in os.environ:
+        suffix = " (manually set via PCP_QA_TEST_TIMEOUT_SEC)"
+    elif is_unmeasured_default:
+        suffix = " (PCP default — not tuned for this project)"
+    else:
+        suffix = " (auto-measured from a prior full run, with safety margin)"
     msg = (
         f"{tool} exceeded the {seconds}s PCP_QA_TEST_TIMEOUT_SEC limit{suffix} and was killed. "
         f"No test result was produced — this is NOT a test failure. Either the suite genuinely "
@@ -165,8 +240,68 @@ def testmon_available(project_root: Path) -> bool:
     return "--testmon" in (r.stdout + r.stderr)
 
 
+def _parse_failed_test_ids(pytest_output: str) -> set[str]:
+    """Extract failing test node IDs from pytest's own short summary --
+    "FAILED path::test - reason" lines, printed by default with -q, no extra
+    plugin needed. This is the identity baseline_test_failures.yaml matches
+    against (see capture_test_failure_baseline/load_baseline_test_failures)."""
+    ids = set()
+    for line in pytest_output.splitlines():
+        line = line.strip()
+        if line.startswith("FAILED "):
+            node_id = line[len("FAILED "):].split(" - ", 1)[0].strip()
+            if node_id:
+                ids.add(node_id)
+    return ids
+
+
+def baseline_test_failures_path(pcp_dir: Path) -> Path:
+    return Path(pcp_dir) / "baseline_test_failures.yaml"
+
+
+def load_baseline_test_failures(pcp_dir: Path | None) -> set[str]:
+    """Test node IDs explicitly accepted as pre-existing debt via
+    `pcp build --capture-test-baseline` -- deliberately NOT auto-grandfathered
+    the way unverified_complete_baseline.yaml is (orphaned_work.py): a test
+    failure could be a real regression the agent just introduced, and
+    silently accepting whatever fails on first contact risks masking that on
+    the very run that adopts this feature. A human/PM runs the capture
+    explicitly, same posture as ci_rules.yaml's existing `pcp check
+    --baseline` (check.py) -- this is that same brownfield-grace concept,
+    extended from Layer 1 AST rules to the test suite, which never had an
+    equivalent (real gap, win2mac dogfood 2026-08-08: a pre-existing bug
+    anywhere in a 1500-test suite blocked every unrelated criterion in every
+    unrelated module, forever, with no way to say "already known")."""
+    if pcp_dir is None:
+        return set()
+    path = baseline_test_failures_path(pcp_dir)
+    if not path.exists():
+        return set()
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+        return set(data.get("failing_tests") or [])
+    except Exception:
+        return set()  # fails open -- an unreadable baseline must not block every gate
+
+
+def capture_test_failure_baseline(project_root: Path, pcp_dir: Path) -> dict:
+    """Runs the full, unscoped test suite once and records every currently-
+    failing test node ID as accepted debt. `pcp build --capture-test-baseline`
+    is the only writer -- never called automatically."""
+    result = _run_pytest(project_root, test_paths=None, incremental=False, pcp_dir=pcp_dir)
+    failing = sorted((result or {}).get("failed_test_ids") or [])
+    from datetime import datetime, timezone
+    data = {
+        "failing_tests": failing,
+        "total": len(failing),
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    baseline_test_failures_path(pcp_dir).write_text(yaml.dump(data, default_flow_style=False))
+    return data
+
+
 def _run_pytest(project_root: Path, test_paths: list[str] | None = None,
-                incremental: bool = False) -> dict | None:
+                incremental: bool = False, pcp_dir: Path | None = None) -> dict | None:
     """Run pytest, optionally letting testmon skip tests it knows are unaffected.
 
     Path scoping (impact.py) reduces BREADTH -- which tests are eligible. It
@@ -195,12 +330,20 @@ def _run_pytest(project_root: Path, test_paths: list[str] | None = None,
         return None
     use_testmon = incremental and testmon_available(project_root)
     args = [pytest_bin, "-q"] + (["--testmon"] if use_testmon else []) + list(test_paths or [])
+    start = time.monotonic()
     try:
         result = subprocess.run(
-            args, capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
+            args, capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(pcp_dir),
         )
     except subprocess.TimeoutExpired as e:
-        return {"tool": "pytest", "passed": False, "output": _timeout_message("pytest", e)}
+        return {"tool": "pytest", "passed": False, "output": _timeout_message("pytest", e, pcp_dir)}
+    elapsed = time.monotonic() - start
+    # Only a genuinely unscoped run's duration is a valid full-suite
+    # measurement -- a scoped/testmon-narrowed run would under-measure and
+    # cause false timeouts on the next real full run (wave-merge, or any
+    # per-criterion run where scoping fell back to full).
+    if not test_paths:
+        _record_measured_duration(pcp_dir, "test_suite", elapsed)
 
     # Exit code 5 = no tests collected. Under testmon that is the SUCCESS case
     # -- "nothing this change touches" -- and it is also what a broken testmon
@@ -209,25 +352,29 @@ def _run_pytest(project_root: Path, test_paths: list[str] | None = None,
     if use_testmon and result.returncode not in (0, 1):
         plain = subprocess.run(
             [pytest_bin, "-q", *(test_paths or [])],
-            capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
+            capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(pcp_dir),
         )
+        plain_full = plain.stdout + plain.stderr
         return {
             "tool": "pytest", "passed": plain.returncode in (0, 5),
-            "output": (plain.stdout + plain.stderr)[-3000:],
+            "output": plain_full[-3000:],
             "scoped_to": test_paths or None, "incremental": False,
             "pytest_bin": pytest_bin,
             "testmon_fallback": f"testmon exited {result.returncode}; re-ran full scope",
+            "failed_test_ids": sorted(_parse_failed_test_ids(plain_full)),
         }
 
     passed = result.returncode == 0 or result.returncode == 5
+    full_output = result.stdout + result.stderr
     return {
-        "tool": "pytest", "passed": passed, "output": (result.stdout + result.stderr)[-3000:],
+        "tool": "pytest", "passed": passed, "output": full_output[-3000:],
         "scoped_to": test_paths or None, "incremental": use_testmon,
         "pytest_bin": pytest_bin,
+        "failed_test_ids": sorted(_parse_failed_test_ids(full_output)),
     }
 
 
-def _run_npm_test(project_root: Path) -> dict | None:
+def _run_npm_test(project_root: Path, pcp_dir: Path | None = None) -> dict | None:
     pkg = project_root / "package.json"
     if not pkg.exists() or not shutil.which("npm"):
         return None
@@ -237,24 +384,28 @@ def _run_npm_test(project_root: Path) -> dict | None:
         return None
     if "test" not in data.get("scripts", {}):
         return None
+    start = time.monotonic()
     try:
         result = subprocess.run(
-            ["npm", "test", "--silent"], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
+            ["npm", "test", "--silent"], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(pcp_dir),
         )
     except subprocess.TimeoutExpired as e:
-        return {"tool": "npm test", "passed": False, "output": _timeout_message("npm test", e)}
+        return {"tool": "npm test", "passed": False, "output": _timeout_message("npm test", e, pcp_dir)}
+    _record_measured_duration(pcp_dir, "test_suite", time.monotonic() - start)
     return {"tool": "npm test", "passed": result.returncode == 0, "output": (result.stdout + result.stderr)[-3000:]}
 
 
-def _run_go_test(project_root: Path) -> dict | None:
+def _run_go_test(project_root: Path, pcp_dir: Path | None = None) -> dict | None:
     if not (project_root / "go.mod").exists() or not shutil.which("go"):
         return None
+    start = time.monotonic()
     try:
         result = subprocess.run(
-            ["go", "test", "./..."], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(),
+            ["go", "test", "./..."], capture_output=True, text=True, cwd=project_root, timeout=_timeout_test(pcp_dir),
         )
     except subprocess.TimeoutExpired as e:
-        return {"tool": "go test", "passed": False, "output": _timeout_message("go test", e)}
+        return {"tool": "go test", "passed": False, "output": _timeout_message("go test", e, pcp_dir)}
+    _record_measured_duration(pcp_dir, "test_suite", time.monotonic() - start)
     return {"tool": "go test", "passed": result.returncode == 0, "output": (result.stdout + result.stderr)[-3000:]}
 
 
@@ -300,12 +451,12 @@ def run_test_suite(project_root: Path, pcp_dir: Path | None = None, changed_file
             test_paths = None  # scoping failed -- fall back to the full suite, don't propagate
 
     if test_paths and project_tool(project_root, "pytest"):
-        out = _run_pytest(project_root, test_paths, incremental=True)
+        out = _run_pytest(project_root, test_paths, incremental=True, pcp_dir=pcp_dir)
         if out is not None:
             return out
 
     for runner in (_run_pytest, _run_npm_test, _run_go_test):
-        out = runner(project_root)
+        out = runner(project_root, pcp_dir=pcp_dir)
         if out is not None:
             return out
     return {"tool": None, "passed": True, "output": ""}

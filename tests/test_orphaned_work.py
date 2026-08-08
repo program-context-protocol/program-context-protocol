@@ -99,9 +99,15 @@ def test_format_is_empty_when_nothing_found():
 
 
 def test_format_names_the_evidence_and_refuses_to_auto_fix():
+    """Fixed 2026-08-08 (win2mac dogfood): this used to recommend `pcp pm` for
+    a pure status flip, which regenerates the whole spec from an LLM and can
+    silently drop real content. Must point at `pcp verify` instead -- the
+    surgical, status-only, deterministic write path."""
     lines = format_findings([{"module": "billing", "criterion_id": "A001",
                               "branch": "feat/billing-A001", "status": "pending",
                               "evidence": "Merge feat/billing-A001", "description": "d"}])
     body = "\n".join(lines)
     assert "Merge feat/billing-A001" in body
-    assert "human-approved" in body and "will not flip status on its own" in body
+    assert "pcp verify billing A001" in body
+    assert "Do NOT use `pcp pm`" in body
+    assert "human-approved" not in body  # old (buggy) message text, must be gone

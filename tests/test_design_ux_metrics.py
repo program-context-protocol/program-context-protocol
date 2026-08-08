@@ -128,6 +128,22 @@ def test_nav_depth_skips_non_ui_and_incomplete_criteria(tmp_path):
     assert _run_wave_nav_depth_check(pcp_dir, [{"name": "widgets"}], 0) == []
 
 
+def test_nav_depth_skips_criterion_declaring_non_ui_exposure(tmp_path):
+    """Fixed 2026-08-08 (win2mac dogfood): a backend-only criterion whose
+    description happens to contain a UI keyword ("dashboard") used to get
+    flagged for missing nav_depth even after explicitly opting out via
+    exposure.mode -- irrelevant noise on every non-UI build. CTRL-039 itself
+    must still see this criterion (it validates the justification), only
+    nav-depth's own advisory should stop firing on it."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _mod(pcp_dir, criteria=[
+        {"id": "A1", "description": "Internal metrics dashboard data pulled by a cron job, no screen",
+         "status": "complete", "exposure": {"mode": "internal", "justification": "Background job only, no UI."}},
+    ])
+    assert _run_wave_nav_depth_check(pcp_dir, [{"name": "widgets"}], 0) == []
+
+
 def test_nav_depth_records_telemetry_advisory(tmp_path):
     pcp_dir = tmp_path / ".pcp"
     pcp_dir.mkdir()

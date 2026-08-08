@@ -251,12 +251,17 @@ def format_findings(found: list[dict]) -> list[str]:
         f"already merged into this branch — the status is stale, not the code:"
     ]
     for f in found[:12]:
-        lines.append(f"   {f['module']}/{f['criterion_id']}  <- commit: {f['evidence']}")
+        lines.append(f"   {f['module']}/{f['criterion_id']}  <- commit: {f['evidence']}  "
+                     f"(fix: pcp verify {f['module']} {f['criterion_id']})")
     if len(found) > 12:
         lines.append(f"   ... and {len(found) - 12} more")
     lines.append(
-        "Verify, then mark them complete via `pcp pm` — acceptance.yaml is human-approved, "
-        "so PCP will not flip status on its own. Leaving it stale makes the next build "
-        "redo finished work."
+        "Use `pcp verify` (command above) to flip status once you've confirmed the merged work "
+        "really satisfies this criterion -- it re-runs the criterion's own deterministic check "
+        "and only touches status/verified_by, not the rest of the spec. Do NOT use `pcp pm` for "
+        "this: pm regenerates the whole spec.yaml/acceptance.yaml from an LLM's understanding of "
+        "your prompt, which can silently drop real content (build_vs_buy rationale, category_reference, "
+        "etc.) that the prompt didn't happen to restate -- real incident, win2mac, 2026-08-08. "
+        "Leaving it stale makes the next build redo finished work."
     )
     return lines

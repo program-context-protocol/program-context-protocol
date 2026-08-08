@@ -149,6 +149,69 @@ def test_run_pytest_passes_overridden_timeout_to_subprocess(tmp_path, monkeypatc
     assert mock_run.call_args.kwargs["timeout"] == 900
 
 
+# ── auto-measured timeout (win2mac dogfood, 2026-08-08): a healthy 390-560s
+# suite hit the fixed 300s default on every attempt until PCP_QA_TEST_TIMEOUT_SEC
+# was found and set by hand, three separate times. A full (unscoped) run now
+# records its own duration so the default self-corrects after one real run. ──
+
+def test_measured_timeout_used_when_no_env_override(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "qa_timing.yaml").write_text("test_suite:\n  measured_seconds: 400\n")
+    assert qa._timeout_test(pcp_dir) == int(400 * 1.5)
+
+
+def test_env_override_wins_over_measured_timeout(tmp_path, monkeypatch):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "qa_timing.yaml").write_text("test_suite:\n  measured_seconds: 400\n")
+    monkeypatch.setenv("PCP_QA_TEST_TIMEOUT_SEC", "111")
+    assert qa._timeout_test(pcp_dir) == 111
+
+
+def test_measured_timeout_floors_at_minimum(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "qa_timing.yaml").write_text("test_suite:\n  measured_seconds: 10\n")
+    assert qa._timeout_test(pcp_dir) == qa._MIN_MEASURED_TIMEOUT_SEC
+
+
+def test_no_pcp_dir_falls_back_to_300():
+    assert qa._timeout_test(None) == 300
+
+
+def test_unscoped_full_run_records_measured_duration(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+            patch("pcp.qa.subprocess.run") as mock_run, \
+            patch("pcp.qa.time.monotonic", side_effect=[1000.0, 1247.3]):
+        mock_run.return_value = MagicMock(returncode=0, stdout="10 passed", stderr="")
+        qa.run_test_suite(tmp_path, pcp_dir=pcp_dir)
+    import yaml
+    data = yaml.safe_load((pcp_dir / "qa_timing.yaml").read_text())
+    assert data["test_suite"]["measured_seconds"] == 247.3
+
+
+def test_scoped_run_does_not_record_measurement(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+            patch("pcp.qa.subprocess.run") as mock_run, \
+            patch("pcp.impact.blast_radius_test_paths", return_value=["tests/test_x.py"]):
+        mock_run.return_value = MagicMock(returncode=0, stdout="1 passed", stderr="")
+        qa.run_test_suite(tmp_path, pcp_dir=pcp_dir, changed_files=["src/x.py"])
+    assert not (pcp_dir / "qa_timing.yaml").exists()
+
+
+def test_measured_duration_never_shrinks(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    qa._record_measured_duration(pcp_dir, "test_suite", 500.0)
+    qa._record_measured_duration(pcp_dir, "test_suite", 200.0)  # an unusually fast run
+    assert qa._load_measured_timeout(pcp_dir) == int(500.0 * 1.5)
+
+
 def test_scoping_is_the_default_not_an_opt_in(monkeypatch):
     """It used to be opt-in behind PCP_QA_TEST_SELECTION=impact and defaulted
     OFF, while the code's own docstrings described scoped-per-criterion as the
@@ -347,3 +410,57 @@ def test_testmon_detection_asks_the_same_pytest_that_will_run(tmp_path):
         run.return_value = MagicMock(returncode=0, stdout="--testmon", stderr="")
         assert qa.testmon_available(tmp_path) is True
     assert run.call_args.args[0][0] == str(d / "pytest")
+
+
+# ── baseline test-failure exclusion (win2mac dogfood, 2026-08-08) ──
+# A pre-existing bug anywhere in a real project's suite used to block every
+# unrelated criterion in every unrelated module, forever. Mirrors ci_rules.yaml's
+# existing baseline_violations.yaml brownfield-grace pattern (check.py
+# --baseline), extended from Layer 1 AST rules to the test suite itself.
+
+_PYTEST_SHORT_SUMMARY = """\
+============================= short test summary info ==============================
+FAILED tests/test_legacy.py::test_old_broken_thing - AssertionError: assert 1 == 2
+FAILED tests/test_flaky.py::test_sometimes_fails - ConnectionError: timed out
+====================== 2 failed, 340 passed in 12.34s =======================
+"""
+
+
+def test_parse_failed_test_ids_extracts_node_ids():
+    ids = qa._parse_failed_test_ids(_PYTEST_SHORT_SUMMARY)
+    assert ids == {"tests/test_legacy.py::test_old_broken_thing", "tests/test_flaky.py::test_sometimes_fails"}
+
+
+def test_parse_failed_test_ids_empty_on_clean_output():
+    assert qa._parse_failed_test_ids("340 passed in 5.1s\n") == set()
+
+
+def test_load_baseline_test_failures_absent_file_is_empty(tmp_path):
+    assert qa.load_baseline_test_failures(tmp_path / ".pcp") == set()
+
+
+def test_load_baseline_test_failures_none_pcp_dir_is_empty():
+    assert qa.load_baseline_test_failures(None) == set()
+
+
+def test_capture_test_failure_baseline_writes_current_failures(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+            patch("pcp.qa.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stdout=_PYTEST_SHORT_SUMMARY, stderr="")
+        data = qa.capture_test_failure_baseline(tmp_path, pcp_dir)
+
+    assert data["total"] == 2
+    assert set(data["failing_tests"]) == {"tests/test_legacy.py::test_old_broken_thing", "tests/test_flaky.py::test_sometimes_fails"}
+    assert qa.load_baseline_test_failures(pcp_dir) == set(data["failing_tests"])
+
+
+def test_run_pytest_result_carries_failed_test_ids(tmp_path):
+    with patch("shutil.which", return_value="/usr/bin/pytest"), \
+            patch("pcp.qa.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stdout=_PYTEST_SHORT_SUMMARY, stderr="")
+        result = qa.run_test_suite(tmp_path)
+    assert result["failed_test_ids"] == sorted([
+        "tests/test_legacy.py::test_old_broken_thing", "tests/test_flaky.py::test_sometimes_fails",
+    ])

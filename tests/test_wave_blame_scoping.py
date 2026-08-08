@@ -8,7 +8,7 @@ incomplete dependency can never pass, and every attempt reverts merged work.
 """
 import yaml
 
-from pcp.commands.build import _finding_blames_outside_wave, _reopen_wave_criteria
+from pcp.commands.build import _finding_blames_outside_wave, _finding_is_program_wide, _reopen_wave_criteria
 
 
 def _module(pcp_dir, name, ids, status="complete"):
@@ -45,6 +45,54 @@ def test_a_finding_naming_no_dependency_is_never_external():
               "Wave integration suite (pytest) FAILED",
               "coupling violation: circular dependency"):
         assert _finding_blames_outside_wave(f, {"anything"}) is False
+
+
+# ── CTRL-008 (validate-strategy) is program-wide, not wave-specific
+# (win2mac dogfood 2026-08-08: reopened 6 genuinely good, tested criteria
+# over a coverage-score dip that had nothing to do with their correctness) ──
+
+def test_validate_strategy_finding_is_program_wide():
+    f = "validate-strategy: coverage=62%, coupling=91%, gaps=3, severe coupling violations=0 — full result: ..."
+    assert _finding_is_program_wide(f) is True
+
+
+def test_a_real_wave_finding_is_not_program_wide():
+    for f in ("path traversal: ../../etc/passwd escapes root",
+              "Wave integration suite (pytest) FAILED",
+              "Wave architect-review: general: hardcoded secret → Fix: use env var"):
+        assert _finding_is_program_wide(f) is False
+
+
+def test_purely_program_wide_block_leaves_merged_criteria_complete(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    mod = _module(pcp_dir, "billing", ["A001", "A002"])
+    _reopen_wave_criteria(pcp_dir, [mod], 1, [
+        "validate-strategy: coverage=62%, coupling=91%, gaps=3, severe coupling violations=0 — full result: ...",
+    ])
+    assert _status(pcp_dir, "billing") == {"A001": "complete", "A002": "complete"}
+
+
+def test_program_wide_block_still_records_an_escalation(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    mod = _module(pcp_dir, "billing", ["A001"])
+    _reopen_wave_criteria(pcp_dir, [mod], 1, [
+        "validate-strategy: coverage=62%, coupling=91%, gaps=3, severe coupling violations=0 — full result: ...",
+    ])
+    esc = yaml.safe_load((pcp_dir / "escalations.yaml").read_text())
+    items = esc.get("escalations", esc) if isinstance(esc, dict) else esc
+    assert len(items) == 1
+
+
+def test_program_wide_finding_alongside_a_real_one_still_reopens(tmp_path):
+    """Same 'mixed findings still reopen' rule as the outside-module case --
+    a genuine wave-level defect is not excused by an unrelated coverage dip."""
+    pcp_dir = tmp_path / ".pcp"
+    mod = _module(pcp_dir, "billing", ["A001"])
+    _reopen_wave_criteria(pcp_dir, [mod], 1, [
+        "validate-strategy: coverage=62%, coupling=91%, gaps=3, severe coupling violations=0 — full result: ...",
+        "Wave integration suite (pytest) FAILED",
+    ])
+    assert _status(pcp_dir, "billing") == {"A001": "pending"}
 
 
 # ── the reopen decision ───────────────────────────────────────────────────────

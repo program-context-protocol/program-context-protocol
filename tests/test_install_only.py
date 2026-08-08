@@ -104,7 +104,7 @@ def test_criterion_level_fast_path_skips_agent_spawn(tmp_path):
     c = {"id": "A001", "description": "x", "install_only": True, "install_command": "true"}
     budget = _BuildBudget(10)
     with patch("pcp.commands.build._claude_bin", side_effect=AssertionError("agent should not spawn")):
-        success, findings = _build_one_criterion(pcp_dir, tmp_path, mod, c, None, False, budget, True)
+        success, findings, _diff = _build_one_criterion(pcp_dir, tmp_path, mod, c, None, False, budget, True)
     assert success is True
     assert findings == []
 

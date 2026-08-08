@@ -43,6 +43,57 @@ def test_god_module_detected_when_out_degree_exceeds_threshold():
     assert any(v["type"] == "god_module" for v in result["coupling_violations"])
 
 
+# ── aggregator exemption (win2mac dogfood, 2026-08-08) ──
+# The symmetric case to hub_modules: a launcher/deployment-orchestrator
+# module's high OUT-degree is the design, not accidental coupling.
+
+def test_declared_aggregator_exempt_from_god_module():
+    modules = {
+        "deployer": {"dependencies": ["a", "b", "c", "d"], "aggregator": True},
+        "a": {"dependencies": []}, "b": {"dependencies": []},
+        "c": {"dependencies": []}, "d": {"dependencies": []},
+    }
+    result = coupling.compute_coupling(_graph(modules))
+    assert "deployer" not in result["god_modules"]
+    assert not any(v["type"] == "god_module" for v in result["coupling_violations"])
+    assert result["aggregator_modules"] == ["deployer"]
+
+
+def test_undeclared_module_with_many_deps_still_flagged():
+    """The exemption is opt-in -- a module that just happens to have many
+    deps without declaring aggregator: true is unaffected, unchanged
+    behavior from test_god_module_detected_when_out_degree_exceeds_threshold."""
+    modules = {
+        "hub": {"dependencies": ["a", "b", "c", "d"]},
+        "a": {"dependencies": []}, "b": {"dependencies": []},
+        "c": {"dependencies": []}, "d": {"dependencies": []},
+    }
+    result = coupling.compute_coupling(_graph(modules))
+    assert "hub" in result["god_modules"]
+    assert result["aggregator_modules"] == []
+
+
+def test_aggregators_outgoing_edges_exempt_from_direct_dependency_penalty():
+    modules = {
+        "deployer": {"dependencies": ["a", "b"], "aggregator": True},
+        "a": {"dependencies": []}, "b": {"dependencies": []},
+    }
+    result = coupling.compute_coupling(_graph(modules))
+    assert result["direct_dependencies"] == 0
+    assert result["coupling_score"] == 1.0
+
+
+def test_cycle_through_an_aggregator_still_counts():
+    """Same rule as hub-through-cycle -- self-declaration never waives a
+    real circular dependency."""
+    modules = {
+        "deployer": {"dependencies": ["a"], "aggregator": True},
+        "a": {"dependencies": ["deployer"]},
+    }
+    result = coupling.compute_coupling(_graph(modules))
+    assert result["circular_dependencies"] == 1
+
+
 def test_hub_module_excluded_from_direct_dependency_penalty():
     """A widely-depended-on 'core' module (more than half the others depend on
     it) is shared infrastructure, not harmful coupling -- shouldn't penalize

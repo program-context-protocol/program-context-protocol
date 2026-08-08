@@ -246,7 +246,7 @@ def test_attempt_three_gets_fresh_session_with_failure_summary(tmp_path):
          patch("pcp.commands.build._run_build_vs_buy_justification_check", return_value=[]), \
          patch("pcp.commands.build.find_transcript_for_session", return_value=None), \
          patch("pcp.commands.build.spend.check_ceiling", return_value=(True, "ok")):
-        success, _ = _build_one_criterion(pcp_dir, tmp_path, mod, c, llm.BUILD_MODEL, False, budget)
+        success, _, _diff = _build_one_criterion(pcp_dir, tmp_path, mod, c, llm.BUILD_MODEL, False, budget)
 
     assert success is True
     assert len(calls) == 3
