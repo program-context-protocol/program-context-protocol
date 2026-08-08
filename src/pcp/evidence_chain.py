@@ -58,7 +58,7 @@ def verify_chain(records: list[dict]) -> list[dict]:
     record() API entirely), so there is no hash claim to have been broken.
     Conflating that with a real break was a real bug, found 2026-08-08 on
     first live contact with `pcp build`'s new hard-fail-on-broken-chain gate
-    (chain_guard.assert_chain_integrity): a win2mac decision_log.jsonl entry
+    (chain_guard.assert_chain_integrity): a Project W decision_log.jsonl entry
     hand-appended by a build-session agent (bypassing decision_log.record()
     entirely — real, dated evidence of the exact ad-hoc-bypass problem
     CTRL-037 exists to catch) got flagged identically to actual tampering

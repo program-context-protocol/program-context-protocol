@@ -129,7 +129,7 @@ def test_append_only_is_noop_off_macos(tmp_path, monkeypatch):
     clear_append_only(p)
 
 
-# ── Unchained legacy/ad-hoc entries -- real win2mac incident, 2026-08-08 ──
+# ── Unchained legacy/ad-hoc entries -- real Project W incident, 2026-08-08 ──
 # tier1-pipeline's `pcp build` hard-blocked on decision_log.jsonl's SECOND
 # entry: a build-session agent had hand-appended a record (no prev_hash/
 # entry_hash at all, shape "type"/"module"/"criterion"/"decision" instead of
