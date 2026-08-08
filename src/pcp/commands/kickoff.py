@@ -418,7 +418,7 @@ def check_shared_entity_ownership(shared_entities: list[str], module_specs: dict
     `dependencies` wiring instead reuses machinery PCP already has: wave
     ordering (build.py) already forces a dependency to build first, and
     CTRL-007 already blocks a dependent module until its deps are 100%
-    complete -- same mechanism ontology-foundry's ad-hoc `core-data-model`
+    complete -- same mechanism Project O's ad-hoc `core-data-model`
     module already benefits from, just never checked for."""
     owner_of: dict[str, str] = {}
     for mod_name, spec in module_specs.items():
