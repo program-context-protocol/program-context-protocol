@@ -79,6 +79,20 @@ reuse-as-dependency / fork-adapt / reference-pattern-only / build-fresh
 *before* code gets written. Rationale is recorded per module, not left to
 whether the agent happened to think of it that day.
 
+## Modularity, enforced
+
+Every module is a guest — can leave without drama, arrive without surgery.
+Beyond coupling analysis (circular deps, God modules), PCP catches the
+shared-data-model drift that breaks multi-agent builds silently: when two
+modules both touch the same entity (e.g. `Task`, `Order`) with no declared
+owner, each build agent invents its own shape independently. A module
+declares `owns_entities` for what it canonically owns; any other module
+referencing it must declare a real `dependencies` edge back to the owner —
+checked deterministically, not left to whether the agent noticed. Same
+mechanism extends to `dependency_map.md` (auto-generated module build order +
+inter-module contracts) and per-criterion `screen` grouping, so a BRD-implied
+page can't silently end up with zero criteria behind it.
+
 ## Install
 
 Requires `git` and the `claude` CLI on `PATH`.
