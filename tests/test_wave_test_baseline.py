@@ -1,4 +1,4 @@
-"""Wave-merge test-suite baseline exclusion (win2mac dogfood, 2026-08-08).
+"""Wave-merge test-suite baseline exclusion (Project W dogfood, 2026-08-08).
 
 Bug report: a pre-existing bug anywhere in the unscoped wave-merge test run
 used to block every unrelated criterion in every unrelated module, forever

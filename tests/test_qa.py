@@ -149,7 +149,7 @@ def test_run_pytest_passes_overridden_timeout_to_subprocess(tmp_path, monkeypatc
     assert mock_run.call_args.kwargs["timeout"] == 900
 
 
-# ── auto-measured timeout (win2mac dogfood, 2026-08-08): a healthy 390-560s
+# ── auto-measured timeout (Project W dogfood, 2026-08-08): a healthy 390-560s
 # suite hit the fixed 300s default on every attempt until PCP_QA_TEST_TIMEOUT_SEC
 # was found and set by hand, three separate times. A full (unscoped) run now
 # records its own duration so the default self-corrects after one real run. ──
@@ -412,7 +412,7 @@ def test_testmon_detection_asks_the_same_pytest_that_will_run(tmp_path):
     assert run.call_args.args[0][0] == str(d / "pytest")
 
 
-# ── baseline test-failure exclusion (win2mac dogfood, 2026-08-08) ──
+# ── baseline test-failure exclusion (Project W dogfood, 2026-08-08) ──
 # A pre-existing bug anywhere in a real project's suite used to block every
 # unrelated criterion in every unrelated module, forever. Mirrors ci_rules.yaml's
 # existing baseline_violations.yaml brownfield-grace pattern (check.py

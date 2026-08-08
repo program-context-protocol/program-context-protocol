@@ -64,7 +64,7 @@ def compute_coupling(G: nx.DiGraph) -> dict:
     self-declared aggregator (spec.yaml's `aggregator: true` -- a launcher/
     deployment-orchestrator module) get the symmetric exemption: depending
     on many things is that module's whole job, not incidental coupling.
-    Real gap, win2mac dogfood 2026-08-08: a deployment module legitimately
+    Real gap, Project W dogfood 2026-08-08: a deployment module legitimately
     depending on everything it deploys had no way to say so, and got
     flagged the same as accidental god-module coupling.
 

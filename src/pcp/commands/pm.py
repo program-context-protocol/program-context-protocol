@@ -255,7 +255,7 @@ def _load_project_context(pcp_dir: Path) -> tuple[str, int]:
 def _module_write_lock(mod_dir: Path):
     """Exclusive lock for one module's spec/acceptance read-merge-write cycle.
 
-    Real incident, win2mac dogfood 2026-08-08: two concurrent `pcp pm` calls
+    Real incident, Project W dogfood 2026-08-08: two concurrent `pcp pm` calls
     on the same module both computed the same "next available" criterion ID
     from the same stale on-disk snapshot (the LLM picks the ID, reading
     whatever acceptance.yaml looked like when THIS call's context was built).
@@ -382,7 +382,7 @@ def _write_one_module_locked(mod_dir: Path, mod_name: str, mod_result: dict, kno
         # nothing carried the real existing value forward when it did, so an
         # established prior-art/category decision trail was silently deleted
         # by any later pm call that touched this module for an unrelated
-        # reason (real incident, win2mac, 2026-08-08).
+        # reason (real incident, Project W, 2026-08-08).
         if "category_reference" not in spec_changes and existing_spec.get("category_reference"):
             spec_changes["category_reference"] = existing_spec["category_reference"]
 

@@ -48,7 +48,7 @@ def test_a_finding_naming_no_dependency_is_never_external():
 
 
 # ── CTRL-008 (validate-strategy) is program-wide, not wave-specific
-# (win2mac dogfood 2026-08-08: reopened 6 genuinely good, tested criteria
+# (Project W dogfood 2026-08-08: reopened 6 genuinely good, tested criteria
 # over a coverage-score dip that had nothing to do with their correctness) ──
 
 def test_validate_strategy_finding_is_program_wide():

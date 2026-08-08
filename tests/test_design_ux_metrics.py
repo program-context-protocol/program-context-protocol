@@ -129,7 +129,7 @@ def test_nav_depth_skips_non_ui_and_incomplete_criteria(tmp_path):
 
 
 def test_nav_depth_skips_criterion_declaring_non_ui_exposure(tmp_path):
-    """Fixed 2026-08-08 (win2mac dogfood): a backend-only criterion whose
+    """Fixed 2026-08-08 (Project W dogfood): a backend-only criterion whose
     description happens to contain a UI keyword ("dashboard") used to get
     flagged for missing nav_depth even after explicitly opting out via
     exposure.mode -- irrelevant noise on every non-UI build. CTRL-039 itself

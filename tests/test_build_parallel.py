@@ -119,7 +119,7 @@ def test_merge_module_branch_brings_in_the_commit(tmp_path):
     _cleanup_worktree(repo, "add", wt)
 
 
-# ── worktree merge hazards (win2mac dogfood, 2026-08-08) ──
+# ── worktree merge hazards (Project W dogfood, 2026-08-08) ──
 
 def test_merge_discards_declared_regenerated_files_instead_of_refusing(tmp_path):
     """Reproduces "your local changes would be overwritten by merge": main

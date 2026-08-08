@@ -145,7 +145,7 @@ def test_gate_check_stores_full_judge_response(tmp_path):
     assert stored["regressions"] == ["r1", "r2"]
 
 
-# ── baseline test-failure exclusion (win2mac dogfood, 2026-08-08) ──
+# ── baseline test-failure exclusion (Project W dogfood, 2026-08-08) ──
 
 def test_all_failures_baselined_does_not_block(tmp_path):
     pcp_dir = tmp_path / ".pcp"

@@ -550,7 +550,7 @@ def _load_merge_regenerated_globs(pcp_dir: Path) -> list[str]:
           - "tests/fixtures/*.snapshot.json"
           - "coverage/tracking.json"
 
-    Real incident, win2mac dogfood 2026-08-08: files shaped like this
+    Real incident, Project W dogfood 2026-08-08: files shaped like this
     repeatedly triggered git's "local changes would be overwritten by merge"
     refusal and left the worktree abandoned. `_PCP_OPERATIONAL_PATHS` (see
     above) already solves the identical shape for PCP's OWN bookkeeping
@@ -597,7 +597,7 @@ def _clear_append_only_for_merge(project_root: Path) -> list[Path]:
     during a merge; the append-only OS flag (evidence_chain.set_append_only)
     is enforced at the kernel level regardless of which process is writing,
     so git itself gets EPERM ("Operation not permitted") on a real merge
-    that touches one of them -- real incident, win2mac dogfood 2026-08-08,
+    that touches one of them -- real incident, Project W dogfood 2026-08-08,
     merge gave up mid-operation with no graceful handling. PCP's own log
     writers already clear/restore the flag around their own writes
     (bypass_log.py, see test_bypass_log_write_survives_append_only_flag);
@@ -825,7 +825,7 @@ def _finding_is_program_wide(finding: str) -> bool:
     reopens correct, tested work over a coverage-score dip it had nothing to
     do with is not conservative, it is wasted rebuild cost for no real signal.
 
-    Real gap, win2mac dogfood 2026-08-08: reopened 6 genuinely good, tested,
+    Real gap, Project W dogfood 2026-08-08: reopened 6 genuinely good, tested,
     working criteria because of a program-wide coverage score alongside two
     unrelated findings elsewhere -- CTRL-008's own known unreliability
     (deterministic keyword-overlap scorer, see coverage_audit.py) compounded
@@ -1570,7 +1570,7 @@ def _is_ui_facing_criterion(criterion: dict) -> bool:
 def _criterion_needs_nav_depth(criterion: dict) -> bool:
     """UI-facing by keyword AND not already opted out via exposure.mode.
 
-    Real dogfood complaint, win2mac 2026-08-08: nav-depth's advisory
+    Real dogfood complaint, Project W 2026-08-08: nav-depth's advisory
     "declare nav_depth" warning fired on backend-only criteria whose
     description happened to contain a UI keyword (e.g. "view", "dashboard")
     without implying any screen at all. A criterion that already declared
@@ -2018,7 +2018,7 @@ def _run_test_suite_check(pcp_dir: Path, project_root: Path, ctx: dict) -> list[
             pcp_dir, ctx["module"], ctx["criterion_id"], ctx["attempt"], "test-suite", result["output"],
         )
     if result["tool"] and not result["passed"]:
-        # Baseline exclusion (feature request, win2mac dogfood 2026-08-08):
+        # Baseline exclusion (feature request, Project W dogfood 2026-08-08):
         # if every currently-failing test was already accepted as pre-
         # existing debt via `pcp build --capture-test-baseline`, this
         # criterion's OWN attempt didn't cause it -- don't block on it.

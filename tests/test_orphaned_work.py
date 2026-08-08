@@ -99,7 +99,7 @@ def test_format_is_empty_when_nothing_found():
 
 
 def test_format_names_the_evidence_and_refuses_to_auto_fix():
-    """Fixed 2026-08-08 (win2mac dogfood): this used to recommend `pcp pm` for
+    """Fixed 2026-08-08 (Project W dogfood): this used to recommend `pcp pm` for
     a pure status flip, which regenerates the whole spec from an LLM and can
     silently drop real content. Must point at `pcp verify` instead -- the
     surgical, status-only, deterministic write path."""

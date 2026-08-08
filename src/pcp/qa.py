@@ -43,7 +43,7 @@ def _load_measured_timeout(pcp_dir: Path | None) -> int | None:
     """A prior FULL (unscoped) test run's measured wall-clock, scaled by a
     safety margin, used instead of the fixed 300s guess once one exists.
 
-    Real incident, win2mac dogfood 2026-08-08: a healthy 390-560s suite hit
+    Real incident, Project W dogfood 2026-08-08: a healthy 390-560s suite hit
     the 300s default on every single build attempt until PCP_QA_TEST_TIMEOUT_SEC
     was found and set manually, three times, in three different sessions. The
     env override (2026-07-18 fix, see below) works but is opt-in and has to be
@@ -269,7 +269,7 @@ def load_baseline_test_failures(pcp_dir: Path | None) -> set[str]:
     explicitly, same posture as ci_rules.yaml's existing `pcp check
     --baseline` (check.py) -- this is that same brownfield-grace concept,
     extended from Layer 1 AST rules to the test suite, which never had an
-    equivalent (real gap, win2mac dogfood 2026-08-08: a pre-existing bug
+    equivalent (real gap, Project W dogfood 2026-08-08: a pre-existing bug
     anywhere in a 1500-test suite blocked every unrelated criterion in every
     unrelated module, forever, with no way to say "already known")."""
     if pcp_dir is None:

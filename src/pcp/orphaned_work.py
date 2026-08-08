@@ -261,7 +261,7 @@ def format_findings(found: list[dict]) -> list[str]:
         "and only touches status/verified_by, not the rest of the spec. Do NOT use `pcp pm` for "
         "this: pm regenerates the whole spec.yaml/acceptance.yaml from an LLM's understanding of "
         "your prompt, which can silently drop real content (build_vs_buy rationale, category_reference, "
-        "etc.) that the prompt didn't happen to restate -- real incident, win2mac, 2026-08-08. "
+        "etc.) that the prompt didn't happen to restate -- real incident, Project W, 2026-08-08. "
         "Leaving it stale makes the next build redo finished work."
     )
     return lines

@@ -1,7 +1,7 @@
 import yaml
 
 
-# ── spec_changes preservation (win2mac dogfood, 2026-08-08) ──
+# ── spec_changes preservation (Project W dogfood, 2026-08-08) ──
 # `pcp pm` used for a narrow, acceptance-only intent still emitted a
 # spec_changes object that omitted category_reference/build_vs_buy -- since
 # _write_one_module writes spec_changes as the WHOLE new spec.yaml, an
@@ -88,7 +88,7 @@ def test_spec_yaml_untouched_when_spec_changes_is_none(tmp_path):
     assert yaml.safe_load((mod_dir / "spec.yaml").read_text()) == original
 
 
-# ── criterion-ID race (win2mac dogfood, 2026-08-08) ──
+# ── criterion-ID race (Project W dogfood, 2026-08-08) ──
 # Two concurrent `pcp pm` calls on the same module both computed the same
 # "next available" ID from the same stale snapshot; the second write
 # silently clobbered the first's new criterion. Simulated here by writing a

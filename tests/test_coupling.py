@@ -43,7 +43,7 @@ def test_god_module_detected_when_out_degree_exceeds_threshold():
     assert any(v["type"] == "god_module" for v in result["coupling_violations"])
 
 
-# ── aggregator exemption (win2mac dogfood, 2026-08-08) ──
+# ── aggregator exemption (Project W dogfood, 2026-08-08) ──
 # The symmetric case to hub_modules: a launcher/deployment-orchestrator
 # module's high OUT-degree is the design, not accidental coupling.
 

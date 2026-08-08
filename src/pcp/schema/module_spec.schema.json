@@ -65,7 +65,7 @@
     },
     "aggregator": {
       "type": "boolean",
-      "description": "This module is intentionally an aggregator/hub/launcher/deployment-orchestrator -- depending on many other modules is the design, not a coupling violation. Exempts this module from coupling.py's god_module check (currently the only violation type with no exemption path at all -- a module more than GOD_MODULE_THRESHOLD outgoing deps is always flagged regardless of purpose). Circular dependencies and hub-inbound scoring are unaffected: a real cycle through an aggregator, or another module's coupling TO this one, is still a genuine structural signal. Optional, self-declared like logic_tier/build_vs_buy -- absence means normal god_module scoring applies. Real gap, win2mac dogfood 2026-08-08: a deployment/launcher module legitimately depending on every other module it deploys had no way to say so."
+      "description": "This module is intentionally an aggregator/hub/launcher/deployment-orchestrator -- depending on many other modules is the design, not a coupling violation. Exempts this module from coupling.py's god_module check (currently the only violation type with no exemption path at all -- a module more than GOD_MODULE_THRESHOLD outgoing deps is always flagged regardless of purpose). Circular dependencies and hub-inbound scoring are unaffected: a real cycle through an aggregator, or another module's coupling TO this one, is still a genuine structural signal. Optional, self-declared like logic_tier/build_vs_buy -- absence means normal god_module scoring applies. Real gap, Project W dogfood 2026-08-08: a deployment/launcher module legitimately depending on every other module it deploys had no way to say so."
     },
     "owns_entities": {
       "type": "array",
