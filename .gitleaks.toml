@@ -1,0 +1,20 @@
+# Extends gitleaks' default rule set -- this file only adds a path
+# allowlist, it does not redefine any detection rules.
+#
+# .pcp/ is gitignored (see .gitignore) and therefore can never reach the
+# remote via `git push` regardless of its content -- scanning it is pure
+# false-positive risk, not real coverage. It legitimately contains lots of
+# high-entropy hex strings by design: symbol_fingerprints.json (per-symbol
+# AST hashes), telemetry.jsonl/decision_log.jsonl/bypass_log.yaml's
+# entry_hash/prev_hash fields (evidence_chain.py's hash-chaining, see
+# CLAUDE.md's Tamper resistance section). Found 2026-08-08 when a routine
+# commit's post-commit `pcp scan` regenerated symbol_fingerprints.json and
+# one new hash happened to trip gitleaks' generic-api-key entropy rule,
+# blocking an unrelated push.
+[extend]
+useDefault = true
+
+[allowlist]
+  paths = [
+    '''\.pcp/.*''',
+  ]

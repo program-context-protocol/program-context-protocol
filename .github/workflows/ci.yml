@@ -21,11 +21,16 @@ jobs:
         # binary itself is free/OSS regardless of account type; only the
         # Action wrapper is paywalled. Installing it directly instead,
         # matching the exact command the local pre-push hook already runs
-        # (.git/hooks/pre-push -- gitleaks detect --source . --no-git -v).
+        # (scripts/hooks/pre-push -- gitleaks detect --source . --no-git
+        # --config .gitleaks.toml -v). The config just allowlists .pcp/
+        # (gitignored, can't reach the remote regardless, but legitimately
+        # full of high-entropy hashes -- symbol_fingerprints.json,
+        # evidence_chain.py's hash-chained logs -- that trip the default
+        # generic-api-key rule; found 2026-08-08).
         run: |
           GL_VERSION=$(curl -sS https://api.github.com/repos/gitleaks/gitleaks/releases/latest | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))")
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VERSION}/gitleaks_${GL_VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
-          ./gitleaks detect --source . --no-git -v
+          ./gitleaks detect --source . --no-git --config .gitleaks.toml -v
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"

@@ -15,7 +15,7 @@ cd "$REPO" || exit 1
 
 if command -v gitleaks >/dev/null 2>&1; then
   echo "Running secret scan (gitleaks)..."
-  gitleaks detect --source . --no-git -v
+  gitleaks detect --source . --no-git --config .gitleaks.toml -v
   if [ $? -ne 0 ]; then
     echo ""
     echo "SECRET SCAN FAILED -- a real credential may be about to go public."
