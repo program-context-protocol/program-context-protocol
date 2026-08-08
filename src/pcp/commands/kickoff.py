@@ -53,11 +53,12 @@ You must output ONLY valid JSON — no prose, no markdown, no code fences.
 Output schema:
 {
   "capabilities_enumerated": ["Every distinct capability/requirement the vision implies, one per discrete thing a user or the business needs -- populate this BEFORE deciding modules, per the DECOMPOSE FIRST instruction above."],
-  "shared_entities_enumerated": ["Every domain entity referenced by more than one module (e.g. 'Task', 'Submission') -- empty list if genuinely none are shared. Each one must appear in exactly one module's owns_entities and every other referencing module's dependencies, per the DECOMPOSE FIRST instruction above."],
+  "shared_entities_enumerated": ["Every domain entity OR event/message (e.g. 'Task', 'Submission', 'TaskGraded event') referenced by more than one module -- empty list if genuinely none are shared. Each one must appear in exactly one module's owns_entities and every other referencing module's dependencies, per the DECOMPOSE FIRST instruction above. This covers BEHAVIOR too, not just field shape: the owning module's criteria should define valid state transitions/lifecycle for an entity that has one (e.g. Task's draft->submitted->graded->reviewed flow) -- another module changing that entity's state without depending on the owner is the same drift as inventing its fields independently."],
   "objective": "# Program Objective\\n\\n## Why This Exists\\n[Explain why]\\n\\n## What Success Looks Like\\n1. [Outcome 1]\\n\\n## Out of Scope\\n- [Out of scope items]",
   "target_state": "# Target State\\n\\n[Ideal end state]",
   "architecture": "# Architecture\\n\\n## Tech Stack\\n| Layer | Choice | Why |\\n|---|---|---|\\n| Backend | Python/FastAPI | ... |\\n\\n## Key Constraints\\n- [Constraint]",
   "decomposition": "# Strategy Decomposition\\n\\n## How the Objective Breaks Down\\n[Explanation]\\n\\n## Module Dependency Order\\n1. [module-a] - reason",
+  "dependency_map": "# Dependency Map\\n\\n## Module Build Order\\n1. [module-a] -- no dependencies\\n2. [module-b] -- depends on module-a\\n\\n## Inter-Module Contracts\\n- [module-b] -> [module-a]: [what module-b actually calls/reads/writes on module-a -- the real interface, not just the dependency's name. Name every shared entity from shared_entities_enumerated that crosses this edge.]",
   "sdlc_phase": {
     "version": "1.0",
     "current_phase": "planning",
@@ -461,6 +462,61 @@ def check_shared_entity_ownership(shared_entities: list[str], module_specs: dict
     return warnings
 
 
+def check_dependency_contract_documented(module_specs: dict, dependency_map_text: str) -> list[str]:
+    """Deterministic, no LLM: for every dependency edge (module A declares
+    `dependencies: [B]`) does dependency_map.md's Inter-Module Contracts
+    actually name BOTH modules together somewhere -- not just B's bare name
+    listed in a build-order line, but the edge itself documented? CTRL-007
+    already checks a declared dependency is BUILT; this checks whether the
+    shape of what's being depended on was ever written down anywhere.
+    A module that merely appears in the same file doesn't establish this
+    specific edge was documented -- both names must co-occur.
+
+    Real gap this closes, 2026-08-08: dependency_map.md was previously only
+    ever written by `pcp import`, never by `pcp kickoff` -- see kickoff()'s
+    dependency_map write and its docstring. Blunt keyword check, same
+    caveat as every other check in this file: a miss is a free second
+    opinion, not proof the contract is actually undocumented."""
+    warnings = []
+    text = (dependency_map_text or "").lower()
+    for mod_name, spec in module_specs.items():
+        for dep in (spec.get("dependencies") or []):
+            dep_key = dep.strip().lower()
+            if not dep_key:
+                continue
+            if mod_name.lower() not in text or dep_key not in text:
+                warnings.append(
+                    f"Module '{mod_name}' depends on '{dep}' but dependency_map.md's Inter-Module "
+                    "Contracts doesn't document this pairing -- the dependency exists, its shape doesn't."
+                )
+    return warnings
+
+
+def check_screen_coverage(module_acceptances: dict) -> list[str]:
+    """Deterministic, no LLM: how many UI-facing criteria have no `screen`
+    declared, surfaced immediately after kickoff/pm generation instead of
+    only much later via a separate `pcp design-audit` run -- same immediate-
+    warning posture capabilities_enumerated/shared_entities_enumerated
+    already have. Added 2026-08-08 alongside wiring `screen` into the
+    generation prompt itself; this is the coverage half of that fix."""
+    from pcp.commands.build import _is_ui_facing_criterion
+    warnings = []
+    for mod_name, acc in module_acceptances.items():
+        criteria = acc.get("criteria") if isinstance(acc, dict) else None
+        if not criteria:
+            continue
+        missing = [
+            c.get("id") for c in criteria
+            if isinstance(c, dict) and _is_ui_facing_criterion(c) and not c.get("screen")
+        ]
+        if missing:
+            warnings.append(
+                f"Module '{mod_name}': {len(missing)} UI-facing criterion(s) missing `screen` "
+                f"-- {', '.join(missing)}"
+            )
+    return warnings
+
+
 _NON_TRIVIAL_KEYWORDS = (
     "auth", "login", "oauth", "payment", "billing", "checkout", "queue", "scheduler",
     "cron", "state machine", "state-machine", "parser", "parsing", "embedding",
@@ -742,6 +798,15 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     _write_file(pcp_dir / "target_state.md", result["target_state"])
     _write_file(pcp_dir / "architecture.md", result["architecture"])
     _write_file(pcp_dir / "strategy" / "decomposition.md", result["decomposition"])
+    # Previously only ever written by `pcp import`, never by kickoff itself --
+    # a fresh (non-import) project's dependency_map.md stayed the raw pcp init
+    # placeholder indefinitely unless a human ran `pcp amend dependency_map`
+    # by hand. Real wave-ordering (build.py's compute_waves) already reads
+    # spec.yaml's dependencies field directly, not this file -- this closes
+    # the missing human-facing "why"/contract documentation, not a build-
+    # mechanics gap. Found 2026-08-08 dogfooding Magellan-DataOps.
+    if result.get("dependency_map"):
+        _write_file(pcp_dir / "strategy" / "dependency_map.md", result["dependency_map"])
 
     sdlc_yaml = yaml.dump(result["sdlc_phase"], default_flow_style=False)
     _write_file(pcp_dir / "SDLC_phase.yaml", sdlc_yaml)
@@ -855,6 +920,23 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     if entity_warnings:
         console.print(f"[yellow]⚠  {len(entity_warnings)} shared-entity ownership issue(s):[/yellow]")
         for w in entity_warnings:
+            console.print(f"   {w}")
+
+    # Does dependency_map.md actually document each declared dependency edge,
+    # or just list module names? See check_dependency_contract_documented's
+    # docstring.
+    dep_map_text = result.get("dependency_map", "")
+    contract_warnings = check_dependency_contract_documented(modules, dep_map_text)
+    if contract_warnings:
+        console.print(f"[yellow]⚠  {len(contract_warnings)} dependency edge(s) not documented in dependency_map.md:[/yellow]")
+        for w in contract_warnings:
+            console.print(f"   {w}")
+
+    # Immediate screen-coverage warning -- see check_screen_coverage's docstring.
+    screen_warnings = check_screen_coverage(acceptances)
+    if screen_warnings:
+        console.print(f"[yellow]⚠  {len(screen_warnings)} module(s) have UI-facing criteria missing `screen`:[/yellow]")
+        for w in screen_warnings:
             console.print(f"   {w}")
 
     # Prior-art evidence cross-check -- see check_prior_art_evidence's

@@ -117,6 +117,46 @@ def test_kickoff_success(temp_project):
         assert sdlc["phases"][0]["exit_criteria"][0]["status"] == "complete"
 
 
+def test_kickoff_writes_dependency_map_when_present(temp_project):
+    """dependency_map.md was previously only ever written by `pcp import`,
+    never by `pcp kickoff` -- a fresh (non-import) project's file stayed the
+    raw pcp init placeholder indefinitely. Confirms kickoff now writes it
+    when the LLM response includes it, and old responses without the key
+    (test_kickoff_success above) don't crash on the .get()."""
+    vision_file = temp_project / "vision.md"
+    vision_file.write_text("Build a simple calculator app with add and subtract modules.")
+
+    mock_kickoff_response = {
+        "objective": "# Program Objective", "target_state": "# Target State",
+        "architecture": "# Architecture", "decomposition": "# Strategy Decomposition",
+        "dependency_map": "# Dependency Map\n\n## Module Build Order\n1. add\n\n## Inter-Module Contracts\n- none",
+        "sdlc_phase": {"version": "1.0", "current_phase": "planning", "phases": [
+            {"name": "planning", "exit_criteria": [{"id": "E001", "description": "d", "check": "manual", "status": "pending"}]},
+            {"name": "alpha", "exit_criteria": [{"id": "E001", "description": "d", "check": "manual", "status": "pending"}]},
+        ]},
+        "modules": [{
+            "name": "add",
+            "spec": {"version": "1.0", "module": "add", "description": "Adds numbers.",
+                     "objective_coverage": ["addition"], "dependencies": [], "constraints": []},
+            "acceptance": {"version": "1.0", "module": "add", "criteria": [
+                {"id": "A001", "description": "Add works.", "check": "manual", "status": "pending"},
+            ]},
+        }],
+        "ci_rules": {"version": "1.0", "rules": []},
+        "architect_persona": "# Architect Persona",
+    }
+    mock_val_response = {"coverage_gaps": [], "contradictions": [], "overlaps": [], "missing_modules": [], "coverage_score": 1.0}
+
+    with patch("pcp.llm.client.call_json") as mock_call_json:
+        mock_call_json.side_effect = [mock_kickoff_response, mock_val_response]
+        result = CliRunner().invoke(cli, ["kickoff", str(vision_file), "--path", str(temp_project)], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    dep_map_path = temp_project / ".pcp" / "strategy" / "dependency_map.md"
+    assert dep_map_path.exists()
+    assert "Module Build Order" in dep_map_path.read_text()
+
+
 def test_kickoff_rejects_oversized_vision_doc(temp_project, monkeypatch):
     monkeypatch.setenv("PCP_KICKOFF_MAX_VISION_CHARS", "100")
     vision_file = temp_project / "vision.md"

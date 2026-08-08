@@ -14,6 +14,7 @@ from pcp.pcp_status import write_pcp_md
 from pcp.commands.kickoff import (
     _normalize_acceptance, _normalize_spec, check_capability_coverage,
     check_capability_criterion_coverage, check_shared_entity_ownership,
+    check_dependency_contract_documented, check_screen_coverage,
     check_module_logic_breakdown_coverage, check_prior_art_evidence,
 )
 from pcp.commands.validate_strategy import (
@@ -435,6 +436,8 @@ def pm(intent: str, project_path: str | None):
     objective = (pcp_dir / "objective.md").read_text() if (pcp_dir / "objective.md").exists() else ""
     decomposition_path = pcp_dir / "strategy" / "decomposition.md"
     decomposition = decomposition_path.read_text() if decomposition_path.exists() else ""
+    dependency_map_path = pcp_dir / "strategy" / "dependency_map.md"
+    dependency_map_text = dependency_map_path.read_text() if dependency_map_path.exists() else ""
     all_specs = {}
     for spec_path in sorted((pcp_dir / "strategy" / "modules").glob("*/spec.yaml")):
         try:
@@ -482,6 +485,22 @@ def pm(intent: str, project_path: str | None):
     if entity_warnings:
         console.print(f"[yellow]⚠  {len(entity_warnings)} shared-entity ownership issue(s):[/yellow]")
         for w in entity_warnings:
+            console.print(f"   {w}")
+
+    # Does dependency_map.md document each declared dependency edge? See
+    # check_dependency_contract_documented's docstring (kickoff.py).
+    contract_warnings = check_dependency_contract_documented(all_specs, dependency_map_text)
+    if contract_warnings:
+        console.print(f"[yellow]⚠  {len(contract_warnings)} dependency edge(s) not documented in dependency_map.md:[/yellow]")
+        for w in contract_warnings:
+            console.print(f"   {w}")
+        console.print('   [dim]Run `pcp amend dependency_map "<what changed>"` to close this.[/dim]')
+
+    # Immediate screen-coverage warning -- see check_screen_coverage's docstring.
+    screen_warnings = check_screen_coverage(all_acceptances)
+    if screen_warnings:
+        console.print(f"[yellow]⚠  {len(screen_warnings)} module(s) have UI-facing criteria missing `screen`:[/yellow]")
+        for w in screen_warnings:
             console.print(f"   {w}")
 
     # Prior-art evidence cross-check -- see check_prior_art_evidence's
