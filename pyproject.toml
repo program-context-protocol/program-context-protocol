@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "program-context-protocol"
-version = "0.13.11"
+version = "0.13.12"
 description = "PCP — prevent LLM hallucination and context drift across dev sessions"
 readme = "README.md"
 keywords = [

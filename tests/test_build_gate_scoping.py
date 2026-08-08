@@ -52,7 +52,7 @@ def test_uncommitted_and_untracked_work_still_visible(tmp_path):
     assert "new_untracked.py" in files
 
 
-# ── stale pre-existing dirty state (win2mac dogfood, 2026-08-08) ──
+# ── stale pre-existing dirty state (Project W dogfood, 2026-08-08) ──
 # A worktree reused from an interrupted prior run keeps its dirty state by
 # design (_sync_worktree_to_base won't touch a dirty tree) -- without
 # exclude_dirty, that leftover state leaks into a DIFFERENT criterion's
