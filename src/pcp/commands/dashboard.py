@@ -283,6 +283,7 @@ a.qa-chip:hover { text-decoration: underline; }
 
 .chain-ok { color: var(--complete); font-weight: 600; }
 .chain-break { color: var(--blocked); font-weight: 700; }
+.chain-info { color: var(--pending); font-weight: 600; }
 
 footer { color: var(--ink-dim); font-size: 0.78rem; border-top: 1px solid var(--border); padding-top: 1rem; margin-top: 2.5rem; }
 footer a { color: var(--accent); }
@@ -599,9 +600,13 @@ def render_html(data: dict) -> str:
 
     ci = data["chain_integrity"]
     ci_lines = []
-    for log_name, breaks in ci.items():
-        if breaks:
-            ci_lines.append(f'<div><span class="chain-break">✗ {escape(log_name)}: {len(breaks)} break(s)</span></div>')
+    for log_name, findings in ci.items():
+        critical = [f for f in findings if f.get("severity") == "critical"]
+        info = [f for f in findings if f.get("severity") == "info"]
+        if critical:
+            ci_lines.append(f'<div><span class="chain-break">✗ {escape(log_name)}: {len(critical)} break(s)</span></div>')
+        elif info:
+            ci_lines.append(f'<div><span class="chain-info">⚠ {escape(log_name)}: {len(info)} unchained legacy/ad-hoc entr{"y" if len(info) == 1 else "ies"}</span></div>')
         else:
             ci_lines.append(f'<div><span class="chain-ok">✓ {escape(log_name)}: intact</span></div>')
 

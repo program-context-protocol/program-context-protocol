@@ -127,3 +127,93 @@ def test_append_only_is_noop_off_macos(tmp_path, monkeypatch):
     p.write_text("x")
     set_append_only(p)  # must not raise
     clear_append_only(p)
+
+
+# ── Unchained legacy/ad-hoc entries -- real win2mac incident, 2026-08-08 ──
+# tier1-pipeline's `pcp build` hard-blocked on decision_log.jsonl's SECOND
+# entry: a build-session agent had hand-appended a record (no prev_hash/
+# entry_hash at all, shape "type"/"module"/"criterion"/"decision" instead of
+# record()'s own fields) bypassing decision_log.record()'s API entirely.
+# That's real signal (an ad-hoc write bypassed the gated logging API) but
+# NOT tamper evidence (nothing there ever claimed a verifiable hash) -- it
+# was wrongly conflated with a genuine broken chain and hard-blocked an
+# unrelated build. These tests pin the fix: info severity, never blocks.
+
+def test_unchained_entry_is_info_not_critical(tmp_path):
+    pcp = tmp_path / ".pcp"
+    pcp.mkdir()
+    decision_log.record(pcp, source="amend", category="architecture", summary="first", evidence="e")
+
+    path = pcp / "decision_log.jsonl"
+    clear_append_only(path)
+    with open(path, "a") as f:
+        f.write(json.dumps({
+            "timestamp": "2026-08-03T00:00:00Z", "type": "build_vs_buy", "module": "x",
+            "criterion": "A012", "decision": "reuse-as-dependency", "target": "libfoo",
+            "rationale": "r", "source": "WI-08 agent report",
+        }) + "\n")
+
+    findings = chain_guard.check_all_chains(pcp)["decision_log.jsonl"]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "info"
+    assert findings[0]["index"] == 1
+
+
+def test_unchained_entry_does_not_block_build(tmp_path):
+    pcp = tmp_path / ".pcp"
+    (pcp / "strategy" / "modules").mkdir(parents=True)
+    decision_log.record(pcp, source="amend", category="architecture", summary="first", evidence="e")
+    path = pcp / "decision_log.jsonl"
+    clear_append_only(path)
+    with open(path, "a") as f:
+        f.write(json.dumps({"timestamp": "2026-08-03T00:00:00Z", "type": "build_vs_buy", "note": "ad-hoc"}) + "\n")
+
+    chain_guard.assert_chain_integrity(pcp)  # must NOT raise -- info only
+
+    result = CliRunner().invoke(cli, ["scan", "--path", str(tmp_path)])
+    assert result.exit_code != 2 or "chain integrity" not in result.output.lower()
+
+
+def test_chain_re_anchors_after_an_unchained_entry(tmp_path):
+    """A real record() call after an unchained entry writes prev_hash=
+    'genesis' again (decision_log._last_entry_hash reads .get("entry_hash"),
+    None on the legacy entry) -- verify_chain must accept that re-anchor
+    rather than expecting it to chain off a hash that was never there."""
+    pcp = tmp_path / ".pcp"
+    pcp.mkdir()
+    path = pcp / "decision_log.jsonl"
+    with open(path, "a") as f:
+        f.write(json.dumps({"timestamp": "2026-08-03T00:00:00Z", "type": "build_vs_buy", "note": "ad-hoc"}) + "\n")
+
+    decision_log.record(pcp, source="build", category="architecture", summary="real one after the gap", evidence="e")
+
+    findings = chain_guard.check_all_chains(pcp)["decision_log.jsonl"]
+    assert all(f["severity"] == "info" for f in findings)
+    critical = [f for f in findings if f["severity"] == "critical"]
+    assert critical == []
+
+
+def test_still_blocks_a_genuinely_tampered_chained_entry_alongside_an_unchained_one(tmp_path):
+    """The fix must not become a blanket loosening -- a real tampered entry
+    elsewhere in the same file still raises."""
+    pcp = tmp_path / ".pcp"
+    (pcp / "strategy" / "modules").mkdir(parents=True)
+    decision_log.record(pcp, source="amend", category="architecture", summary="first", evidence="e")
+    path = pcp / "decision_log.jsonl"
+    clear_append_only(path)
+    with open(path, "a") as f:
+        f.write(json.dumps({"timestamp": "2026-08-03T00:00:00Z", "type": "build_vs_buy", "note": "ad-hoc"}) + "\n")
+    decision_log.record(pcp, source="build", category="architecture", summary="real", evidence="e")
+
+    lines = path.read_text().splitlines()
+    tampered = json.loads(lines[2])
+    tampered["summary"] = "tampered after the fact"
+    lines[2] = json.dumps(tampered)
+    clear_append_only(path)
+    path.write_text("\n".join(lines) + "\n")
+
+    try:
+        chain_guard.assert_chain_integrity(pcp)
+        assert False, "expected ChainIntegrityError for the genuinely tampered entry"
+    except chain_guard.ChainIntegrityError:
+        pass

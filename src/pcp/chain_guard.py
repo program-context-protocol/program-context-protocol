@@ -38,8 +38,12 @@ def check_all_chains(pcp_dir: Path) -> dict[str, list[dict]]:
 
 
 class ChainIntegrityError(Exception):
-    """Raised by assert_chain_integrity when a log's hash chain is broken —
-    a record was edited, reordered, or deleted after the fact."""
+    """Raised by assert_chain_integrity when a log has a CRITICAL finding —
+    a record that claimed a hash and doesn't verify (edited, reordered, or
+    deleted after the fact). An "info"-severity finding (an unchained
+    legacy/ad-hoc entry — see verify_chain's docstring) never raises this;
+    it's surfaced via `pcp provenance` instead, since it isn't tamper
+    evidence, just an unverifiable one."""
 
     def __init__(self, broken: dict[str, list[dict]]):
         self.broken = broken
@@ -54,10 +58,16 @@ class ChainIntegrityError(Exception):
 
 
 def assert_chain_integrity(pcp_dir: Path) -> None:
-    """Raises ChainIntegrityError if any log's hash chain is broken. Call
-    before trusting these logs for new work. Silently returns for a project
-    with no chained history yet (empty logs verify clean by construction)."""
+    """Raises ChainIntegrityError if any log has a critical-severity finding.
+    Call before trusting these logs for new work. Silently returns for a
+    project with no chained history yet, or one whose only findings are
+    info-severity (unchained legacy/ad-hoc entries — real signal, but not
+    tamper evidence, so it doesn't block; see `pcp provenance` for those)."""
     breaks = check_all_chains(pcp_dir)
-    broken = {name: b for name, b in breaks.items() if b}
-    if broken:
-        raise ChainIntegrityError(broken)
+    critical = {
+        name: [b for b in bs if b.get("severity") == "critical"]
+        for name, bs in breaks.items()
+    }
+    critical = {name: b for name, b in critical.items() if b}
+    if critical:
+        raise ChainIntegrityError(critical)

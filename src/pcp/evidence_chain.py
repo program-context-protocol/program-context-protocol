@@ -45,13 +45,40 @@ def chain_entry(prev_hash: str | None, fields: dict) -> dict:
 
 
 def verify_chain(records: list[dict]) -> list[dict]:
-    """Returns a list of break descriptions — empty means the chain is
-    intact. Checks, per record: (1) its own entry_hash matches a fresh
-    recompute of its content, (2) its prev_hash matches the actual previous
-    record's entry_hash (catches reordering/deletion, not just edits)."""
+    """Returns a list of finding descriptions, each tagged `severity`
+    ("critical" or "info") — empty means every record is either verified
+    intact or honestly unchained. Checks, per record: (1) its own entry_hash
+    matches a fresh recompute of its content, (2) its prev_hash matches the
+    actual previous record's entry_hash (catches reordering/deletion, not
+    just edits).
+
+    A record with NEITHER `prev_hash` nor `entry_hash` present is "info", not
+    "critical" — it never claimed to be chained (a legacy entry written
+    before hash-chaining was adopted, or an ad-hoc write that bypassed the
+    record() API entirely), so there is no hash claim to have been broken.
+    Conflating that with a real break was a real bug, found 2026-08-08 on
+    first live contact with `pcp build`'s new hard-fail-on-broken-chain gate
+    (chain_guard.assert_chain_integrity): a win2mac decision_log.jsonl entry
+    hand-appended by a build-session agent (bypassing decision_log.record()
+    entirely — real, dated evidence of the exact ad-hoc-bypass problem
+    CTRL-037 exists to catch) got flagged identically to actual tampering
+    and hard-blocked an unrelated build. The chain naturally re-anchors at
+    "genesis" after an unchained record (matches decision_log.py's own
+    `_last_entry_hash`, which reads `.get("entry_hash")` — None on a legacy
+    entry, so the next real record() call restarts the chain there too)."""
     breaks = []
     prev_hash = None
     for i, r in enumerate(records):
+        has_prev = "prev_hash" in r
+        has_hash = "entry_hash" in r
+        if not has_prev and not has_hash:
+            breaks.append({
+                "index": i, "severity": "info",
+                "issue": "unchained (legacy entry or a write that bypassed record()'s API — never claimed a hash, nothing to verify)",
+            })
+            prev_hash = None
+            continue
+
         claimed_hash = r.get("entry_hash")
         claimed_prev = r.get("prev_hash")
         content = {k: v for k, v in r.items() if k != "entry_hash"}
@@ -60,12 +87,14 @@ def verify_chain(records: list[dict]) -> list[dict]:
 
         if claimed_prev != expected_prev:
             breaks.append({
-                "index": i, "issue": "prev_hash mismatch (reordered or deleted entry)",
+                "index": i, "severity": "critical",
+                "issue": "prev_hash mismatch (reordered or deleted entry)",
                 "expected": expected_prev, "found": claimed_prev,
             })
         if claimed_hash != expected_hash:
             breaks.append({
-                "index": i, "issue": "entry_hash mismatch (content altered after the fact)",
+                "index": i, "severity": "critical",
+                "issue": "entry_hash mismatch (content altered after the fact)",
                 "expected": expected_hash, "found": claimed_hash,
             })
         prev_hash = claimed_hash

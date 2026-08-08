@@ -231,19 +231,33 @@ def _render_markdown(project_root: Path, data: dict, timestamp: str) -> str:
     lines += ["## Chain Integrity", "", "Each evidence log is hash-chained — an entry's hash covers its own "
               "content plus the previous entry's hash, so an edit/reorder/deletion after the fact is "
               "detectable even though the files themselves are plain, editable JSON/YAML.", ""]
-    any_break = False
-    for log_name, breaks in data["chain_integrity"].items():
-        if not breaks:
+    any_critical = False
+    any_info = False
+    for log_name, findings in data["chain_integrity"].items():
+        critical = [f for f in findings if f.get("severity") == "critical"]
+        info = [f for f in findings if f.get("severity") == "info"]
+        if not findings:
             lines.append(f"- `{log_name}`: intact.")
-        else:
-            any_break = True
-            lines.append(f"- `{log_name}`: **{len(breaks)} break(s) detected**")
-            for b in breaks:
+            continue
+        if critical:
+            any_critical = True
+            lines.append(f"- `{log_name}`: **{len(critical)} break(s) detected**")
+            for b in critical:
                 lines.append(f"  - index {b['index']}: {b['issue']}")
-    if any_break:
+        if info:
+            any_info = True
+            lines.append(f"- `{log_name}`: {len(info)} unchained legacy/ad-hoc entr{'y' if len(info) == 1 else 'ies'} (not tamper evidence, but not verifiable either — see indices below)")
+            for b in info:
+                lines.append(f"  - index {b['index']}: {b['issue']}")
+    if any_critical:
         lines.append("")
         lines.append("**A break here means this evidence document cannot be trusted as-is — "
                       "investigate before relying on anything above.**")
+    if any_info:
+        lines.append("")
+        lines.append("An unchained entry usually means a decision/telemetry record was written "
+                      "outside PCP's own record() API — real signal about a gate/write path being "
+                      "bypassed, worth investigating, but distinct from evidence of tampering.")
     lines.append("")
 
     lines += ["## SSDF Crosswalk", "", "| Control | SSDF Practice | Enforcement | Status |", "|---|---|---|---|"]
