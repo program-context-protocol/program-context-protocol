@@ -40,6 +40,7 @@ from pcp.commands.control_audit_cmd import control_audit_cmd
 from pcp.commands.objective_conflicts_cmd import objective_conflicts_cmd
 from pcp.commands.correct_objective import correct_objective
 from pcp.commands.amend import amend
+from pcp.commands.inspiration_art import inspiration_art
 from pcp.commands.run_log_cmd import run_log_cli
 from pcp.commands.narrative_lint import narrative_lint_cmd
 from pcp.commands.build_status import build_status
@@ -95,6 +96,7 @@ cli.add_command(control_audit_cmd)
 cli.add_command(objective_conflicts_cmd)
 cli.add_command(correct_objective)
 cli.add_command(amend)
+cli.add_command(inspiration_art)
 cli.add_command(run_log_cli, name="run-log")
 cli.add_command(narrative_lint_cmd)
 cli.add_command(build_status)

@@ -115,6 +115,12 @@ Output schema:
         "description": "Description of the module including the new features (minimum 10 words).",
         "objective_coverage": ["Explain how this module covers objective.md objectives"],
         "module_logic_breakdown": ["Only if this intent adds real internal complexity -- this module's updated internal components/sub-flows/edge-cases. Omit the key entirely for a small, same-shape addition."],
+        "category_reference": {
+          "category": "OPTIONAL WHOLE FIELD -- only include if a researched category reference (.pcp/strategy/inspiration_art.md, given below if it exists) genuinely covers this module, especially a NEW module created to close a coverage gap. Omit entirely rather than guessing.",
+          "source_evidence": ["Cite the researched section, don't invent new evidence"],
+          "classification": "adopted|adapted_requirement|adapted_system|custom",
+          "rationale": "One sentence"
+        },
         "dependencies": ["dependency-module-name"],
         "constraints": [],
         "build_vs_buy": {
@@ -165,17 +171,27 @@ def _load_project_context(pcp_dir: Path) -> tuple[str, int]:
     a projection nobody is told about would repeat that mistake in reverse."""
     objective = (pcp_dir / "objective.md").read_text() if (pcp_dir / "objective.md").exists() else ""
     decomposition = (pcp_dir / "strategy" / "decomposition.md").read_text() if (pcp_dir / "strategy" / "decomposition.md").exists() else ""
+    inspiration_art_path = pcp_dir / "strategy" / "inspiration_art.md"
 
     parts = [
         f"## Program Objective\n{objective}\n",
         f"## Strategy Decomposition\n{decomposition}\n",
+    ]
+    if inspiration_art_path.exists():
+        parts.append(
+            "## Researched Category Reference Architecture (.pcp/strategy/inspiration_art.md)\n"
+            "Use for a new module's category_reference field, and to check whether this intent "
+            "reveals a capability a researched category names but no existing module covers.\n"
+            f"{inspiration_art_path.read_text()}\n"
+        )
+    parts.append(
         "## Existing Modules Specs\n"
         "Each module's spec.yaml is verbatim. Each acceptance.yaml lists every "
         "existing criterion, projected to the fields relevant here "
         f"({', '.join(_PM_CRITERION_KEEP_FIELDS)}) -- other criteria's "
         "build_vs_buy/design_justification/QA-evidence fields are omitted as "
         "irrelevant to routing this intent, not because they are absent.\n"
-    ]
+    )
 
     dropped = 0
     modules_dir = pcp_dir / "strategy" / "modules"
@@ -419,6 +435,10 @@ def pm(intent: str, project_path: str | None):
         console.print(f"[yellow]⚠  {len(capability_warnings)} enumerated capability(ies) may not be covered by any module:[/yellow]")
         for w in capability_warnings:
             console.print(f"   {w}")
+        console.print(
+            "   [dim]For any of these, `pcp inspiration-art --gap \"<capability>\"` proposes a "
+            "researched category to cover it, instead of leaving the gap silent.[/dim]"
+        )
 
     # Same check, one layer deeper -- any module whose spec now declares
     # module_logic_breakdown gets it cross-checked against its OWN criteria.

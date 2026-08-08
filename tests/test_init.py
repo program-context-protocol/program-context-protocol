@@ -17,11 +17,24 @@ def test_init_scaffolds_expected_files(tmp_path):
         "architect_persona.md", "kb/adr/ADR-001-example.md", "kb/domain/general.md",
         "policies/escalation.rego", "policies/bypass_approval.rego", "policies/coupling_threshold.rego",
         "RECOMMENDED_PERMISSIONS.md", "design_system.md", "logic_tier_guide.md", "md_taxonomy_guide.md",
+        "strategy/inspiration_art.md",
     ]:
         assert (pcp / rel).exists(), f"missing {rel}"
 
     assert (tmp_path / "CLAUDE.md").exists()
     assert (tmp_path / ".gitattributes").exists()
+
+
+def test_init_registers_inspiration_art_as_protected_path(tmp_path):
+    import yaml
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["init", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+
+    ci_rules = yaml.safe_load((tmp_path / ".pcp" / "ci_rules.yaml").read_text())
+    spec_rule = next(r for r in ci_rules["rules"] if r["id"] == "SPEC_001")
+    assert ".pcp/strategy/inspiration_art.md" in spec_rule["scope"]
 
 
 def test_init_permission_recommendations_advisory_not_applied(tmp_path):

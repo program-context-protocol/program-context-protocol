@@ -855,6 +855,8 @@ def test_pm_runs_validate_strategy_and_flags_capability_gap(temp_project):
     # Deterministic capability cross-check fired (keyword overlap miss).
     assert "may not be covered by any module" in result.output
     assert "inventory sync" in result.output
+    # Gap-filling hint routes to inspiration-art instead of leaving the gap silent.
+    assert "pcp inspiration-art --gap" in result.output
     # LLM-judged validate-strategy actually ran, not skipped.
     assert mock_call_json.call_count == 2
     assert "Running validate-strategy" in result.output

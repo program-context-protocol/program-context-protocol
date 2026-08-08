@@ -88,6 +88,7 @@ Language Rule as above applies here too).
 
 **Setup / onboarding**
 - `pcp init` — scaffold `.pcp/`
+- `pcp inspiration-art "<description>" [--gap "<capability>"]` — propose category reference architecture(s) (typical modules + screens), human-approved; run before kickoff, or reactively when `pcp pm` flags an uncovered capability
 - `pcp kickoff <vision.md>` — generate specs from a vision doc
 - `pcp import "<description>"` — brownfield onboarding (graphify clusters → draft specs)
 - `pcp takeover` — end-to-end: preflight + kickoff + build everything pending
@@ -388,7 +389,28 @@ After confirmed: PCP decides all technology internally. Do NOT ask about stack, 
 - Desktop tool → native desktop
 Present the choice to PM in one plain sentence after BRD is written: "I'll build this as a web app you can use in any browser, hosted so anyone with the link can access it." No technical details unless PM asks.
 
-### Step 2 — Generate BRD
+### Step 2 — Inspiration-Art Research
+
+Closes a real gap: a module list generated purely from Step 1's answers has nothing outside the PM's own words to catch an omitted-but-standard capability (an MDM tool with no compliance module, a migration tool with no rollback path). Most real products are many categories to ONE product, not one category to one product — identify every category that genuinely applies to a distinct part of what's being built, not one category forced to cover the whole thing.
+
+1. From the confirmed Step-1 synthesis, name 1-3 candidate product categories (e.g. "this sounds like it's part MDM tool, part fleet-monitoring dashboard").
+2. For each, use REAL WebSearch / Agent(Explore or general-purpose) research — not recall — to find: typical modules/capabilities products in that category have, and typical screens (using ONLY these screen_archetype values: `dashboard, data_entry_form, list_table, detail_view, search_filter, settings, chat, canvas_editor, wizard, auth, other`).
+3. Present findings in product language, one category at a time, and ask a COTS-gap-analysis question per notable category-module — not "does this look right", but the specific divergence:
+
+```
+Tools like [category] typically handle [capability] by [how they do it].
+Is that how you want it, or is yours different — and why?
+```
+
+Ask ONE AT A TIME, same posture as Step 1. Iterate until the PM confirms each category (or says it doesn't apply — drop it, don't force it).
+
+4. Write the confirmed result directly to `.pcp/strategy/inspiration_art.md` (human-present session — same posture Step 4a below already has for `objective.md` itself; this file joins the same protected-path scope, see `.pcp/ci_rules.yaml`'s SPEC_001). One `## <Category Name>` section per confirmed category: source evidence (real citations, never "training-data recall" in this interactive path — that fallback exists only for headless/scripted `pcp inspiration-art` runs), typical modules, typical screens, which modules it covers.
+
+This feeds Step 3's module breakdown, Step 4's per-module `category_reference` field, and Step 4's UI-facing criteria get their `screen_archetypes` grounded in what was actually researched here instead of invented per-screen with no reference point.
+
+Mid-project, not just here: if `pcp pm`'s capability-coverage check later flags an enumerated capability with no covering module, route it back through this same research step for that ONE capability (`pcp inspiration-art --gap "<capability>"` for headless use; do the equivalent live research + confirm here when in an interactive session) — never silently drop it into a module that doesn't really fit.
+
+### Step 3 — Generate BRD
 
 Using confirmed answers, generate a structured BRD as `brd.md` in the project root.
 
@@ -430,11 +452,11 @@ Never use: module, spec, acceptance criteria, coupling, AST, CI, YAML, schema �
 
 Wait for PM approval. Iterate until PM says "yes" / "looks right" / "go".
 
-### Step 3 — Generate `.pcp/` Scaffold
+### Step 4 — Generate `.pcp/` Scaffold
 
 Once BRD and module list are approved:
 
-**3a. Write core files.**
+**4a. Write core files.**
 ```
 .pcp/objective.md       — distilled from BRD problem + use cases
 .pcp/target_state.md    — distilled from BRD "done looks like"
@@ -445,8 +467,9 @@ Once BRD and module list are approved:
 .pcp/strategy/decomposition.md
 .pcp/strategy/dependency_map.md
 ```
+`.pcp/strategy/inspiration_art.md` was already written in Step 2 — nothing to do here, just read it back when populating each module below.
 
-**3b. For each module: generate spec + acceptance.**
+**4b. For each module: generate spec + acceptance.**
 ```
 .pcp/strategy/modules/<module>/spec.yaml
 .pcp/strategy/modules/<module>/acceptance.yaml
@@ -457,6 +480,8 @@ Every module spec must include these non-negotiable criteria regardless of modul
 - One criterion for structured logging (`check: ast_pattern` targeting `logger.` or `logging.` or `log.`)
 - One criterion for error handling (`check: test_passes` on a failure-path test)
 - For modules with external interfaces: one criterion for health/readiness endpoint or contract schema
+
+If Step 2 researched a category genuinely covering this module, set its spec's `category_reference` (category / source_evidence / classification / rationale — see `module_spec.schema.json`). Omit the field entirely rather than guessing one that doesn't fit.
 
 Acceptance criteria must be MEASURABLE. For each criterion, choose the right check type:
 - `check: file_exists` — verifiable by path
@@ -469,16 +494,16 @@ Acceptance criteria must be MEASURABLE. For each criterion, choose the right che
 - `check: manual` — requires PM explicit confirmation
 - `check: test_passes` — verifiable by running named test
 
-Avoid `check: manual` where a programmatic check is possible.
+Avoid `check: manual` where a programmatic check is possible. For a UI-facing criterion, set `screen_archetypes` from Step 2's researched typical screens for this module's category, when one applies — grounded in what was actually researched, not invented per-screen.
 
-**3c. Run `pcp validate-strategy`.**
+**4c. Run `pcp validate-strategy`.**
 ```bash
 pcp validate-strategy
 ```
 
-If coverage < 80%: identify gap, add module or expand spec, re-run. Iterate until ≥ 80%.
+If coverage < 80%: identify gap, add module or expand spec, re-run. Iterate until ≥ 80%. A gap here is also a signal to revisit Step 2 — does a researched category already name this capability?
 
-**3d. Confirm with PM — product language only.**
+**4d. Confirm with PM — product language only.**
 
 ```
 Ready to build.

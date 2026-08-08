@@ -62,6 +62,25 @@
     "install_command": {
       "type": "string",
       "description": "Shell command that installs the direct-match dependency for the whole module. Required when install_only is true; ignored otherwise."
+    },
+    "category_reference": {
+      "type": "object",
+      "required": ["category", "classification", "rationale"],
+      "additionalProperties": false,
+      "description": "Which product-category reference architecture this module traces to, from .pcp/strategy/inspiration_art.md (see pcp inspiration-art). Optional -- advisory-first rollout, same posture every other new check in this repo earns hard_block status through, not started there.",
+      "properties": {
+        "category": { "type": "string" },
+        "source_evidence": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "classification": {
+          "type": "string",
+          "enum": ["adopted", "adapted_requirement", "adapted_system", "custom"],
+          "description": "COTS-gap-analysis classification against the category's reference shape: adopted (matches it as-is), adapted_requirement (we changed our ask to match the reference), adapted_system (we built a deliberate deviation), custom (no reference applies, genuinely ours)."
+        },
+        "rationale": { "type": "string" }
+      }
     }
   },
   "allOf": [

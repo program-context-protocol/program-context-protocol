@@ -31,6 +31,51 @@ def test_all_expected_schema_files_exist_alongside_validator():
         assert path.exists(), f"missing schema file: {path}"
 
 
+def test_module_spec_accepts_valid_category_reference(tmp_path):
+    import yaml as _yaml
+
+    spec = {
+        "module": "device-inventory",
+        "description": "Tracks enrolled devices and their compliance state.",
+        "category_reference": {
+            "category": "MDM/UEM",
+            "source_evidence": ["Gartner UEM capability list"],
+            "classification": "adopted",
+            "rationale": "Standard device inventory shape for this category.",
+        },
+    }
+    path = tmp_path / "spec.yaml"
+    path.write_text(_yaml.dump(spec))
+    assert validate_file(path, "module_spec") == []
+
+
+def test_module_spec_rejects_bad_category_reference_classification(tmp_path):
+    import yaml as _yaml
+
+    spec = {
+        "module": "device-inventory",
+        "description": "Tracks enrolled devices and their compliance state.",
+        "category_reference": {
+            "category": "MDM/UEM",
+            "classification": "not_a_real_value",
+            "rationale": "x",
+        },
+    }
+    path = tmp_path / "spec.yaml"
+    path.write_text(_yaml.dump(spec))
+    errors = validate_file(path, "module_spec")
+    assert any("category_reference" in e for e in errors)
+
+
+def test_module_spec_omitting_category_reference_still_valid(tmp_path):
+    import yaml as _yaml
+
+    spec = {"module": "device-inventory", "description": "Tracks enrolled devices and their compliance state."}
+    path = tmp_path / "spec.yaml"
+    path.write_text(_yaml.dump(spec))
+    assert validate_file(path, "module_spec") == []
+
+
 def test_pyproject_wheel_artifacts_include_schema_json():
     """Closes the other half of the same bug: hatchling does not bundle
     non-.py files under `packages` automatically (confirmed -- the

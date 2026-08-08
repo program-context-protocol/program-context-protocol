@@ -90,6 +90,12 @@ Output schema:
         "description": "Short description of what the module does (at least 10 words).",
         "objective_coverage": ["What part of objective.md is covered"],
         "module_logic_breakdown": ["This module's internal components/sub-flows/edge-cases -- populate this BEFORE writing this module's acceptance criteria, per the DECOMPOSE FIRST instruction, one layer deeper than capabilities_enumerated. Derive criteria FROM this list rather than restating the description."],
+        "category_reference": {
+          "category": "OPTIONAL WHOLE FIELD -- omit category_reference entirely (not just this sub-value) unless a researched category section above genuinely covers this module, never guess one",
+          "source_evidence": ["Cite the researched section, don't invent new evidence"],
+          "classification": "adopted|adapted_requirement|adapted_system|custom",
+          "rationale": "One sentence"
+        },
         "dependencies": [],
         "constraints": [],
         "build_vs_buy": {
@@ -412,6 +418,33 @@ def check_prior_art_evidence(module_specs: dict) -> list[str]:
     return warnings
 
 
+def check_category_reference_evidence(module_specs: dict, inspiration_art_exists: bool) -> list[str]:
+    """Deterministic, no LLM -- same tier and posture as check_prior_art_evidence,
+    which this mirrors deliberately. Closes the gap `pcp inspiration-art` exists
+    for: if a project has actually done category research (inspiration_art.md
+    exists, i.e. a human ran `pcp inspiration-art` or the interactive /pcp
+    session's Inspiration-Art Research step), a module with no category_reference
+    is a module that skipped it, not proof none applied -- same "presence is
+    the honest tell" logic as candidates_considered above.
+
+    Inert (returns []) when inspiration_art.md doesn't exist at all -- this
+    check has nothing to hold a project to until that research actually
+    happened once. Advisory, never blocks."""
+    if not inspiration_art_exists:
+        return []
+    warnings = []
+    for name, spec in module_specs.items():
+        if not spec.get("category_reference"):
+            warnings.append(
+                f"{name}: no category_reference declared, though this project has "
+                "researched category reference architecture (.pcp/strategy/inspiration_art.md "
+                "exists). Either trace this module to a researched category, or mark it "
+                "explicitly custom -- an omission here is exactly the silent-gap failure "
+                "mode inspiration-art exists to catch."
+            )
+    return warnings
+
+
 def check_module_logic_breakdown_coverage(module_specs: dict, module_acceptances: dict) -> list[str]:
     """One layer deeper than check_capability_coverage: does each module's
     own declared module_logic_breakdown (internal components/sub-flows/
@@ -583,12 +616,30 @@ def kickoff(vision_file: str, project_path: str, force: bool):
 
     console.print("[dim]Analyzing vision and generating Strategy decomposition...[/dim]")
 
+    # Optional category-reference grounding (see `pcp inspiration-art`) --
+    # read the same way objective.md/decomposition.md are read elsewhere:
+    # present if a human already researched it, absent is fine, never
+    # required. Feeds capabilities_enumerated/module generation with
+    # something outside the vision doc's own words to check against.
+    inspiration_art_path = pcp_dir / "strategy" / "inspiration_art.md"
+    kickoff_input = vision_content
+    if inspiration_art_path.exists():
+        kickoff_input = (
+            f"{vision_content}\n\n"
+            "## Researched category reference architecture (.pcp/strategy/inspiration_art.md)\n"
+            "Use this as grounding for capabilities_enumerated and each module's "
+            "category_reference field -- a capability named in a researched category "
+            "that's genuinely relevant but missing from the vision doc is exactly the "
+            "gap this file exists to catch.\n\n"
+            f"{inspiration_art_path.read_text()}"
+        )
+
     try:
         # Sonnet is the reviewed default for generation calls (see
         # llm/client.py's model-selection strategy) -- replaces the prior
         # ambiguous "inherited/default" (whatever the CLI's own default
         # happened to be). PCP_MODEL still overrides for a human debugging.
-        result = llm.call_json(SYSTEM_PROMPT, vision_content, model=llm.BUILD_MODEL, pcp_dir=pcp_dir, command="kickoff")
+        result = llm.call_json(SYSTEM_PROMPT, kickoff_input, model=llm.BUILD_MODEL, pcp_dir=pcp_dir, command="kickoff")
     except RuntimeError as e:
         console.print(f"[red]Error calling LLM:[/red] {e}")
         sys.exit(2)
@@ -683,6 +734,10 @@ def kickoff(vision_file: str, project_path: str, force: bool):
         console.print(f"[yellow]⚠  {len(capability_warnings)} enumerated capability(ies) may not be covered by any module:[/yellow]")
         for w in capability_warnings:
             console.print(f"   {w}")
+        console.print(
+            "   [dim]For any of these, `pcp inspiration-art --gap \"<capability>\"` proposes a "
+            "researched category to cover it, instead of leaving the gap silent.[/dim]"
+        )
 
     # Same check, one layer deeper (module_logic_breakdown vs. each
     # module's OWN criteria) -- see check_module_logic_breakdown_coverage.
@@ -700,6 +755,14 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     if priorart_warnings:
         console.print(f"[yellow]⚠  {len(priorart_warnings)} module(s) may be missing prior-art search evidence:[/yellow]")
         for w in priorart_warnings:
+            console.print(f"   {w}")
+
+    # Category-reference cross-check -- see check_category_reference_evidence's
+    # docstring. Inert unless a human already ran `pcp inspiration-art`.
+    category_warnings = check_category_reference_evidence(modules, inspiration_art_path.exists())
+    if category_warnings:
+        console.print(f"[yellow]⚠  {len(category_warnings)} module(s) missing category_reference:[/yellow]")
+        for w in category_warnings:
             console.print(f"   {w}")
 
     # Run validate-strategy automatically
