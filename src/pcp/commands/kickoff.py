@@ -30,6 +30,8 @@ DECOMPOSE FIRST, THEN MAP (GUIDE pattern, arXiv:2502.21068 -- the one academical
 
 DECOMPOSE FIRST applies one layer deeper too: within EACH module, before writing that module's acceptance criteria, populate its `module_logic_breakdown` with the module's own internal components/sub-flows/edge-cases -- however small. Derive the module's criteria FROM this breakdown rather than restating the module description at a high level; a module whose criteria don't visibly trace back to a declared breakdown item is exactly "technically a module but not really a module" -- vision-level features discussed without real internal decomposition.
 
+DECOMPOSE FIRST applies to shared DATA too: populate `shared_entities_enumerated` with every domain entity (Task, Submission, Expert, ...) referenced by MORE THAN ONE module -- populate this BEFORE finalizing module dependencies. For each shared entity, exactly ONE module must declare it in its `owns_entities` list (that module owns the canonical schema/type; its criteria should include actually defining it), and EVERY OTHER module that references the entity must declare a `dependencies` entry naming the owning module -- never leave a shared entity with no owner, and never let a module reference one without depending on its owner. A contract naming an entity with no module owning its shape is a label, not an interface -- exactly the drift the modularity protocol exists to prevent.
+
 Decompose the vision into modules. Each module must cover a distinct set of features/requirements.
 The strategy decomposition must detail how these modules cover the objective.
 Also generate acceptance criteria for each module (e.g. A001, A002) with clear descriptions.
@@ -49,6 +51,7 @@ You must output ONLY valid JSON — no prose, no markdown, no code fences.
 Output schema:
 {
   "capabilities_enumerated": ["Every distinct capability/requirement the vision implies, one per discrete thing a user or the business needs -- populate this BEFORE deciding modules, per the DECOMPOSE FIRST instruction above."],
+  "shared_entities_enumerated": ["Every domain entity referenced by more than one module (e.g. 'Task', 'Submission') -- empty list if genuinely none are shared. Each one must appear in exactly one module's owns_entities and every other referencing module's dependencies, per the DECOMPOSE FIRST instruction above."],
   "objective": "# Program Objective\\n\\n## Why This Exists\\n[Explain why]\\n\\n## What Success Looks Like\\n1. [Outcome 1]\\n\\n## Out of Scope\\n- [Out of scope items]",
   "target_state": "# Target State\\n\\n[Ideal end state]",
   "architecture": "# Architecture\\n\\n## Tech Stack\\n| Layer | Choice | Why |\\n|---|---|---|\\n| Backend | Python/FastAPI | ... |\\n\\n## Key Constraints\\n- [Constraint]",
@@ -90,6 +93,7 @@ Output schema:
         "description": "Short description of what the module does (at least 10 words).",
         "objective_coverage": ["What part of objective.md is covered"],
         "module_logic_breakdown": ["This module's internal components/sub-flows/edge-cases -- populate this BEFORE writing this module's acceptance criteria, per the DECOMPOSE FIRST instruction, one layer deeper than capabilities_enumerated. Derive criteria FROM this list rather than restating the description."],
+        "owns_entities": ["OPTIONAL -- omit unless this module is the canonical owner of one or more entries in shared_entities_enumerated. A shared entity must have exactly one owning module."],
         "category_reference": {
           "category": "OPTIONAL WHOLE FIELD -- omit category_reference entirely (not just this sub-value) unless a researched category section above genuinely covers this module, never guess one",
           "source_evidence": ["Cite the researched section, don't invent new evidence"],
@@ -392,6 +396,66 @@ def check_capability_criterion_coverage(capabilities: list[str], module_acceptan
         if isinstance(c, dict)
     )
     return _keyword_miss_check(capabilities, combined_criteria_text, "Capability", "any criterion's description")
+
+
+def check_shared_entity_ownership(shared_entities: list[str], module_specs: dict) -> list[str]:
+    """Deterministic, no LLM -- checks REAL ENFORCEMENT, not just documentation
+    presence. Two findings: (1) a shared entity (referenced by more than one
+    module) with no module declaring `owns_entities` for it -- nobody is the
+    canonical definer, every module referencing it would invent its own
+    shape. (2) a module whose description/objective_coverage mentions the
+    entity but doesn't declare a `dependencies` entry on the owning module --
+    the entity has an owner, but this module isn't structurally wired to it,
+    so nothing stops it building an independent, divergent version anyway.
+
+    Real gap this closes, 2026-08-08 (Magellan-DataOps dogfood, worse than
+    the page-inventory gap): architecture.md stayed an empty template while
+    entities like Task/Submission/Expert/QualityFlag/AuditEvent got
+    referenced constantly across dependency_map.md's Inter-Module Contracts
+    with no consolidated schema anywhere. A DOC section documenting the
+    entity isn't enough enforcement -- an isolated-worktree build agent
+    won't necessarily read prose closely or import from it. Checking
+    `dependencies` wiring instead reuses machinery PCP already has: wave
+    ordering (build.py) already forces a dependency to build first, and
+    CTRL-007 already blocks a dependent module until its deps are 100%
+    complete -- same mechanism ontology-foundry's ad-hoc `core-data-model`
+    module already benefits from, just never checked for."""
+    owner_of: dict[str, str] = {}
+    for mod_name, spec in module_specs.items():
+        for e in (spec.get("owns_entities") or []):
+            owner_of[e.strip().lower()] = mod_name
+
+    warnings = []
+    for entity in shared_entities:
+        entity_key = entity.strip().lower()
+        owner = next(
+            (mod for owned, mod in owner_of.items() if owned in entity_key or entity_key in owned),
+            None,
+        )
+        if owner is None:
+            warnings.append(
+                f"Shared entity '{entity}' has no module declaring ownership (owns_entities) -- "
+                "risk of divergent shapes across modules that reference it."
+            )
+            continue
+
+        entity_words = set(re.findall(r"[a-zA-Z]{4,}", entity.lower()))
+        if not entity_words:
+            continue
+        for mod_name, spec in module_specs.items():
+            if mod_name == owner:
+                continue
+            text = f"{spec.get('description', '')} {' '.join(spec.get('objective_coverage', []) or [])}".lower()
+            if not any(w in text for w in entity_words):
+                continue
+            deps = [d.strip().lower() for d in (spec.get("dependencies") or [])]
+            if owner.lower() not in deps:
+                warnings.append(
+                    f"Module '{mod_name}' references shared entity '{entity}' (owned by '{owner}') "
+                    f"but does not declare a dependency on '{owner}' -- risk of an independently "
+                    "invented shape at build time."
+                )
+    return warnings
 
 
 _NON_TRIVIAL_KEYWORDS = (
@@ -779,6 +843,15 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     if criterion_capability_warnings:
         console.print(f"[yellow]⚠  {len(criterion_capability_warnings)} enumerated capability(ies) matched a module but no actual criterion implements them:[/yellow]")
         for w in criterion_capability_warnings:
+            console.print(f"   {w}")
+
+    # Cross-module shared-entity ownership -- see check_shared_entity_ownership's
+    # docstring for the real incident this closes (worse than a missing
+    # criterion: a contract naming an entity with no module owning its shape).
+    entity_warnings = check_shared_entity_ownership(result.get("shared_entities_enumerated", []), modules)
+    if entity_warnings:
+        console.print(f"[yellow]⚠  {len(entity_warnings)} shared-entity ownership issue(s):[/yellow]")
+        for w in entity_warnings:
             console.print(f"   {w}")
 
     # Prior-art evidence cross-check -- see check_prior_art_evidence's

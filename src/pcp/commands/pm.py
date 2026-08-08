@@ -13,7 +13,7 @@ from pcp.llm import client as llm
 from pcp.pcp_status import write_pcp_md
 from pcp.commands.kickoff import (
     _normalize_acceptance, _normalize_spec, check_capability_coverage,
-    check_capability_criterion_coverage,
+    check_capability_criterion_coverage, check_shared_entity_ownership,
     check_module_logic_breakdown_coverage, check_prior_art_evidence,
 )
 from pcp.commands.validate_strategy import (
@@ -95,6 +95,8 @@ DECOMPOSE FIRST, THEN MAP (GUIDE pattern, arXiv:2502.21068 -- the one academical
 
 DECOMPOSE FIRST applies one layer deeper too: if this intent adds real internal complexity to a module (not just one more criterion of the same shape), update that module's `spec_changes.module_logic_breakdown` with the new internal components/sub-flows/edge-cases before writing its new criteria -- derive the criteria from the updated breakdown. Skip this field entirely for a small, same-shape addition that doesn't change the module's actual internal decomposition.
 
+DECOMPOSE FIRST applies to shared DATA too: populate `shared_entities_enumerated` with every domain entity this intent introduces or touches that is referenced by MORE THAN ONE module (checking the existing module specs given below, which already show any `owns_entities` declarations) -- empty list if this intent introduces no shared entity. For each one, exactly ONE module owns it (`spec_changes.owns_entities`, its criteria should define the actual schema/type) and every OTHER module referencing it must declare a `dependencies` entry naming the owner. Never introduce a new criterion that references a shared entity without either owning it or depending on its owner.
+
 A real feature intent routinely spans MORE THAN ONE existing or new module (e.g. "add payments" may touch billing, notifications, and auth) -- do not force everything into a single module just because the schema used to only allow one. `modules` is a LIST: include one entry per module this intent actually touches, whether that's one module or several. Analyze which module (or modules) are responsible, and for each, generate the updated or new spec and acceptance criteria for that module only.
 
 Ensure that new acceptance criteria IDs do not conflict with existing ones within their own module (e.g. if a module already has A001, its new ones start at A002).
@@ -104,6 +106,7 @@ You must output ONLY valid JSON — no prose, no markdown, no code fences.
 Output schema:
 {
   "capabilities_enumerated": ["Every distinct capability/requirement this intent implies, one per discrete thing -- populate BEFORE deciding modules."],
+  "shared_entities_enumerated": ["Every domain entity this intent introduces/touches that is referenced by more than one module -- empty list if none. Each must appear in exactly one module's owns_entities and every other referencing module's dependencies."],
   "overall_explanation": "A plain-English summary of what will be built and why, across all modules this intent touches.",
   "modules": [
     {
@@ -116,6 +119,7 @@ Output schema:
         "description": "Description of the module including the new features (minimum 10 words).",
         "objective_coverage": ["Explain how this module covers objective.md objectives"],
         "module_logic_breakdown": ["Only if this intent adds real internal complexity -- this module's updated internal components/sub-flows/edge-cases. Omit the key entirely for a small, same-shape addition."],
+        "owns_entities": ["OPTIONAL -- only if this module is the canonical owner of an entry in shared_entities_enumerated. Omit entirely otherwise -- do not repeat an existing module's ownership unless actually changing it."],
         "category_reference": {
           "category": "OPTIONAL WHOLE FIELD -- only include if a researched category reference (.pcp/strategy/inspiration_art.md, given below if it exists) genuinely covers this module, especially a NEW module created to close a coverage gap. Omit entirely rather than guessing.",
           "source_evidence": ["Cite the researched section, don't invent new evidence"],
@@ -258,6 +262,11 @@ def _write_one_module(pcp_dir: Path, mod_result: dict) -> list[str]:
         # omitted key must mean "unchanged", not "delete the prior breakdown".
         if "module_logic_breakdown" not in spec_changes and existing_spec.get("module_logic_breakdown"):
             spec_changes["module_logic_breakdown"] = existing_spec["module_logic_breakdown"]
+
+        # Same preservation rule for owns_entities -- an omitted key means
+        # "ownership unchanged", not "this module no longer owns the entity".
+        if "owns_entities" not in spec_changes and existing_spec.get("owns_entities"):
+            spec_changes["owns_entities"] = existing_spec["owns_entities"]
 
         coercion_warnings += _normalize_spec(spec_changes, mod_name)
         spec_path.write_text(yaml.dump(spec_changes, default_flow_style=False))
@@ -463,6 +472,14 @@ def pm(intent: str, project_path: str | None):
     if criterion_capability_warnings:
         console.print(f"[yellow]⚠  {len(criterion_capability_warnings)} enumerated capability(ies) matched a module but no actual criterion implements them:[/yellow]")
         for w in criterion_capability_warnings:
+            console.print(f"   {w}")
+
+    # Cross-module shared-entity ownership -- see check_shared_entity_ownership's
+    # docstring (kickoff.py) for the real incident this closes.
+    entity_warnings = check_shared_entity_ownership(result.get("shared_entities_enumerated", []), all_specs)
+    if entity_warnings:
+        console.print(f"[yellow]⚠  {len(entity_warnings)} shared-entity ownership issue(s):[/yellow]")
+        for w in entity_warnings:
             console.print(f"   {w}")
 
     # Prior-art evidence cross-check -- see check_prior_art_evidence's

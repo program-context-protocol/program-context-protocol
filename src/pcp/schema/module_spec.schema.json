@@ -63,6 +63,11 @@
       "type": "string",
       "description": "Shell command that installs the direct-match dependency for the whole module. Required when install_only is true; ignored otherwise."
     },
+    "owns_entities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Domain entities (Task, Submission, Expert, ...) this module is the CANONICAL owner/definer of -- its acceptance criteria should include the actual schema/type/model, other modules import or depend on it rather than each inventing their own shape. Cross-checked by check_shared_entity_ownership (kickoff.py/pm.py): a shared entity with no owning module, or another module referencing it without a `dependencies` entry on the owner, is flagged. Real gap this closes, 2026-08-08: a domain entity referenced across multiple modules' inter-module contracts (dependency_map.md) with no module actually owning a schema for it -- each module's build agent would invent its own shape independently, the exact drift PCP's modularity protocol exists to prevent. Optional, advisory-first like category_reference."
+    },
     "category_reference": {
       "type": "object",
       "required": ["category", "classification", "rationale"],
