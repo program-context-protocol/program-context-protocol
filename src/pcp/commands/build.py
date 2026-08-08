@@ -21,6 +21,7 @@ from pcp.llm import client as llm
 from pcp.llm.client import _claude_bin, _log_usage
 from pcp.pcp_status import write_pcp_md
 from pcp import decision_log
+from pcp import chain_guard
 from pcp import integrity_audit
 from pcp import librarian
 from pcp import narrative_lint
@@ -4257,6 +4258,13 @@ def build(module_name: str | None, project_path: str | None, yes: bool):
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
     except NoPCPDir as e:
         console.print(f"[red]Error:[/red] {e}")
+        sys.exit(2)
+
+    try:
+        chain_guard.assert_chain_integrity(pcp_dir)
+    except chain_guard.ChainIntegrityError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print("[dim]Run `pcp provenance` for the full break detail. Refusing to build on top of a tampered record.[/dim]")
         sys.exit(2)
 
     from datetime import datetime, timezone

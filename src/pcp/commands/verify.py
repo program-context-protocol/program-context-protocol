@@ -32,6 +32,7 @@ from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 from pcp.schema.validator import load_yaml
+from pcp import chain_guard
 
 console = Console()
 
@@ -79,6 +80,13 @@ def verify(module: str, criterion_id: str, reason: str | None, yes: bool, projec
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(2)
     project_root = pcp_dir.parent
+
+    try:
+        chain_guard.assert_chain_integrity(pcp_dir)
+    except chain_guard.ChainIntegrityError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print("[dim]Run `pcp provenance` for the full break detail. Not writing on top of a tampered record.[/dim]")
+        sys.exit(2)
 
     found = _find_criterion(pcp_dir, module, criterion_id)
     if not found:

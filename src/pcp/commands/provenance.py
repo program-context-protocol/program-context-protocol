@@ -23,7 +23,7 @@ from rich.console import Console
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 from pcp import telemetry as telemetry_mod
 from pcp import decision_log as decision_log_mod
-from pcp.evidence_chain import verify_chain
+from pcp import chain_guard
 
 console = Console()
 
@@ -65,11 +65,7 @@ def _load_controls(pcp_dir: Path) -> dict:
 
 
 def _load_bypasses(pcp_dir: Path) -> list[dict]:
-    path = pcp_dir / "bypass_log.yaml"
-    if not path.exists():
-        return []
-    data = yaml.safe_load(path.read_text()) or {}
-    return data.get("bypasses", [])
+    return chain_guard.load_bypasses(pcp_dir)
 
 
 def _git_head(project_root: Path) -> str:
@@ -89,14 +85,7 @@ def _check_chain_integrity(pcp_dir: Path) -> dict:
     the fact — this is the one check in this whole document that isn't just
     reporting what ran, it's reporting whether the report itself can be
     trusted."""
-    telemetry_breaks = verify_chain(telemetry_mod.load(pcp_dir))
-    decision_breaks = verify_chain(decision_log_mod.load(pcp_dir))
-    bypass_breaks = verify_chain(_load_bypasses(pcp_dir))
-    return {
-        "telemetry.jsonl": telemetry_breaks,
-        "decision_log.jsonl": decision_breaks,
-        "bypass_log.yaml": bypass_breaks,
-    }
+    return chain_guard.check_all_chains(pcp_dir)
 
 
 def build_provenance(pcp_dir: Path) -> dict:

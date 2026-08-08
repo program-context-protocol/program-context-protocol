@@ -11,6 +11,7 @@ from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, get_modules_dir, NoPCPDir
 from pcp.schema.validator import validate_file, load_yaml
+from pcp.evidence_chain import set_append_only, clear_append_only
 
 console = Console()
 
@@ -91,8 +92,14 @@ def _log_bypass(pcp_dir: Path, reason: str, rules_checked: list[str],
     }
     existing.append(chain_entry(prev_hash, fields))
 
+    # bypass_log.yaml is one YAML document, not JSONL -- this write is a
+    # read-modify-rewrite, not a pure append, so the append-only flag (set
+    # after every previous write, see evidence_chain.set_append_only) has to
+    # come off first or this write itself would fail with EPERM.
+    clear_append_only(log_path)
     with open(log_path, "w") as f:
         yaml.dump({"bypasses": existing}, f, default_flow_style=False)
+    set_append_only(log_path)
 
 
 def _attributed_modules(project_root: Path, pcp_dir: Path, staged_files: list[str],

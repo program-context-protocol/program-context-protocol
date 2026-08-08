@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pcp.evidence_chain import chain_entry
+from pcp.evidence_chain import chain_entry, set_append_only
 
 
 def record(pcp_dir: Path, **fields) -> None:
@@ -27,6 +27,7 @@ def record(pcp_dir: Path, **fields) -> None:
     entry = chain_entry(_last_entry_hash(path), fields)
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
+    set_append_only(path)
 
 
 def _last_entry_hash(path: Path) -> str | None:

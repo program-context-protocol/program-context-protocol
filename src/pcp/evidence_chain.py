@@ -9,10 +9,26 @@ is now detectable by `verify_chain()` — and recomputing every downstream
 hash to hide a change is a much louder, more deliberate act than quietly
 editing one line, which is the actual threat model plain JSON-lines-append
 had no defense against at all.
+
+`set_append_only`/`clear_append_only` add a real (if partial) second layer,
+2026-08-07: the macOS user-settable `uappnd` file flag, which the kernel
+enforces by rejecting any write that isn't a true append (a plain `open(p,
+"a")`/O_APPEND write still succeeds; a truncate-and-rewrite does not, EPERM).
+This stops a casual/accidental edit (an editor save, a script doing
+`path.write_text(...)`) at the OS level instead of only detecting it after
+the fact. It is still not tamper-PROOF: `uappnd` is user-settable, so
+whoever owns the file can `chflags nouappnd` it and edit freely — no local
+file-flag mechanism defends against a fully deliberate, privileged actor;
+that needs a remote/signed ledger, out of scope here. Best-effort and silent
+everywhere it can't apply (non-macOS, a filesystem without flag support) —
+this must never be the thing that breaks a real evidence write.
 """
 
 import hashlib
 import json
+import platform
+import subprocess
+from pathlib import Path
 
 
 def _canonical_hash(fields: dict) -> str:
@@ -54,3 +70,28 @@ def verify_chain(records: list[dict]) -> list[dict]:
             })
         prev_hash = claimed_hash
     return breaks
+
+
+def set_append_only(path: Path) -> None:
+    """Best-effort: mark `path` append-only (macOS `chflags uappnd`) right
+    after a write that appended to it. No-op off macOS, or if the flag
+    can't be set (filesystem doesn't support it, permissions) — the write
+    that already happened must never be undone by a failure here."""
+    if platform.system() != "Darwin":
+        return
+    try:
+        subprocess.run(["chflags", "uappnd", str(path)], capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+def clear_append_only(path: Path) -> None:
+    """Inverse of set_append_only — needed before a read-modify-rewrite
+    write (bypass_log.yaml is a single YAML document, not JSONL, so its
+    writer can't use a pure O_APPEND write). Same best-effort/no-op posture."""
+    if platform.system() != "Darwin":
+        return
+    try:
+        subprocess.run(["chflags", "nouappnd", str(path)], capture_output=True, timeout=5)
+    except Exception:
+        pass

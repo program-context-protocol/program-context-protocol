@@ -88,9 +88,12 @@ def test_render_html_reflects_chain_integrity_break(tmp_path):
     import json
     from pcp import telemetry
 
+    from pcp.evidence_chain import clear_append_only
+
     pcp_dir = _init_pcp(tmp_path)
     telemetry.record(pcp_dir, cycle="qa", control_id="CTRL-001", result="block", files=["a.py"])
     path = pcp_dir / "telemetry.jsonl"
+    clear_append_only(path)  # record() flags the file append-only; this test's own direct rewrite needs it off
     entry = json.loads(path.read_text().strip())
     entry["result"] = "pass"  # tampered
     path.write_text(json.dumps(entry) + "\n")

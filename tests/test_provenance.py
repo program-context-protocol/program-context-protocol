@@ -112,7 +112,10 @@ def test_chain_integrity_flags_tampered_telemetry(tmp_path):
     pcp_dir.mkdir()
     telemetry.record(pcp_dir, cycle="qa", control_id="CTRL-001", result="block", files=["a.py"])
 
+    from pcp.evidence_chain import clear_append_only
+
     path = pcp_dir / "telemetry.jsonl"
+    clear_append_only(path)  # record() flags the file append-only; this test's own direct rewrite needs it off
     entry = jsonmod.loads(path.read_text().strip())
     entry["result"] = "pass"  # tampered after the fact, hash not recomputed
     path.write_text(jsonmod.dumps(entry) + "\n")

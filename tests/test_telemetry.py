@@ -55,12 +55,13 @@ def test_successive_records_are_hash_chained(tmp_path):
 
 
 def test_hand_edited_record_breaks_the_chain(tmp_path):
-    from pcp.evidence_chain import verify_chain
+    from pcp.evidence_chain import verify_chain, clear_append_only
 
     telemetry.record(tmp_path, cycle="build", module="add")
     telemetry.record(tmp_path, cycle="qa", module="add", result="block")
 
     path = tmp_path / "telemetry.jsonl"
+    clear_append_only(path)  # record() flags the file append-only; this test's own direct rewrite needs it off
     lines = path.read_text().splitlines()
     import json
     tampered = json.loads(lines[1])

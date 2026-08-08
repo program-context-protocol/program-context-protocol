@@ -135,7 +135,7 @@ def enrich(module: str, project_path: str | None):
     try:
         result = llm.call_json(
             RESEARCH_SYSTEM_PROMPT, user_prompt,
-            model=llm.BUILD_MODEL, pcp_dir=pcp_dir, command="enrich-research",
+            pcp_dir=pcp_dir, command="enrich-research",
             harness="agy",
         )
     except RuntimeError as e:

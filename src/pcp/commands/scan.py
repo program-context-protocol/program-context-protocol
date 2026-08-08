@@ -15,6 +15,7 @@ from pcp.commands.diff import run_diff
 from pcp.discovery.scanner import detect_stack, collect_source_files
 from pcp import qa
 from pcp import uat
+from pcp import chain_guard
 
 console = Console()
 
@@ -249,6 +250,13 @@ def scan(project_path: str | None, quiet: bool, with_coverage: bool):
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
     except NoPCPDir as e:
         console.print(f"[red]Error:[/red] {e}")
+        sys.exit(2)
+
+    try:
+        chain_guard.assert_chain_integrity(pcp_dir)
+    except chain_guard.ChainIntegrityError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        console.print("[dim]Run `pcp provenance` for the full break detail.[/dim]")
         sys.exit(2)
 
     project_root = pcp_dir.parent
