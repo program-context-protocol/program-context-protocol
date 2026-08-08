@@ -13,6 +13,7 @@ from pcp.llm import client as llm
 from pcp.pcp_status import write_pcp_md
 from pcp.commands.kickoff import (
     _normalize_acceptance, _normalize_spec, check_capability_coverage,
+    check_capability_criterion_coverage,
     check_module_logic_breakdown_coverage, check_prior_art_evidence,
 )
 from pcp.commands.validate_strategy import (
@@ -452,6 +453,16 @@ def pm(intent: str, project_path: str | None):
     if breakdown_warnings:
         console.print(f"[yellow]⚠  {len(breakdown_warnings)} logic-breakdown item(s) may not be covered by their own module's criteria:[/yellow]")
         for w in breakdown_warnings:
+            console.print(f"   {w}")
+
+    # Sharper coverage signal than the module-level check above -- a
+    # capability can textually match a module's broad objective_coverage
+    # while no actual CRITERION implements it. See check_capability_
+    # criterion_coverage's docstring (kickoff.py) for the real incident this closes.
+    criterion_capability_warnings = check_capability_criterion_coverage(result.get("capabilities_enumerated", []), all_acceptances)
+    if criterion_capability_warnings:
+        console.print(f"[yellow]⚠  {len(criterion_capability_warnings)} enumerated capability(ies) matched a module but no actual criterion implements them:[/yellow]")
+        for w in criterion_capability_warnings:
             console.print(f"   {w}")
 
     # Prior-art evidence cross-check -- see check_prior_art_evidence's

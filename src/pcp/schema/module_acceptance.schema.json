@@ -47,6 +47,10 @@
             "minimum": 0,
             "description": "Number of clicks/taps from the app's primary entry point (login/home) to reach this feature, self-declared like logic_tier/build_vs_buy -- not computed via real routing-graph analysis (that needs per-framework route parsing, a bigger build than this field earns on its own). Audited by pcp design-audit against PCP_NAV_DEPTH_THRESHOLD (default 3, the classic UX heuristic); missing on a UI-facing criterion is itself a finding, same posture as design_justification's absence."
           },
+          "screen": {
+            "type": "string",
+            "description": "The named page/screen this UI-facing criterion's UI belongs to (e.g. 'Multi-turn conversation review', 'Hotkey settings panel'). Multiple criteria sharing the exact same value are the same page -- this IS the page inventory, computed by grouping, not a separate hand-maintained roster (see pcp design-audit's Page Inventory section). Real gap this closes, 2026-08-08 dogfood: without it, UI-facing criteria stayed flat and ungrouped, so a real multi-panel module (~15 UI criteria) had no shared page model, and nothing could tell 'these 4 criteria are one page' from 'these are 4 separate pages'. Optional -- absence just means this criterion isn't grouped into any page yet, itself a finding surfaced by design-audit."
+          },
           "screen_archetypes": {
             "type": "array",
             "items": {

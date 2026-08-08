@@ -157,6 +157,7 @@ def build_design_audit(pcp_dir: Path) -> dict:
                     "nav_depth": nav_depth,
                     "customizable": customizable,
                     "customization_notes": dj.get("customization_notes", ""),
+                    "screen": c.get("screen"),
                 })
             if ui_criteria:
                 modules.append({"module": mod_path.name, "criteria": ui_criteria})
@@ -192,7 +193,37 @@ def build_design_audit(pcp_dir: Path) -> dict:
         "customization": customization_summary,
         "ui_archetype": ui_archetype,
         "non_ui_exposed": non_ui_exposed,
+        "page_inventory": _build_page_inventory(modules),
     }
+
+
+def _build_page_inventory(modules: list[dict]) -> list[dict]:
+    """Groups each module's UI-facing criteria by their declared `screen`
+    field -- the page inventory IS this grouping, computed, not a separate
+    hand-maintained roster. Real gap this closes, 2026-08-08 dogfood: a
+    module with ~15 UI-facing criteria had no shared page model at all, so
+    nothing could distinguish "these 4 criteria are one page" from "these
+    are 4 separate pages" -- design_justification's own checks operate
+    per-criterion and never saw the module as a set of pages."""
+    inventory = []
+    for m in modules:
+        screens: dict[str, list[dict]] = {}
+        ungrouped = []
+        for c in m["criteria"]:
+            screen = c.get("screen")
+            if screen:
+                screens.setdefault(screen, []).append(c)
+            else:
+                ungrouped.append(c)
+        inventory.append({
+            "module": m["module"],
+            "screens": [
+                {"screen": name, "criteria": crits}
+                for name, crits in sorted(screens.items())
+            ],
+            "ungrouped": ungrouped,
+        })
+    return inventory
 
 
 def _render_markdown(data: dict, timestamp: str) -> str:
@@ -306,6 +337,33 @@ def _render_markdown(data: dict, timestamp: str) -> str:
         lines.append(f"`ui_archetype: {data['ui_archetype'] or 'web_app (default)'}` — "
                       "menu-bar convention check inert (desktop_app only).")
     lines.append("")
+
+    lines += ["## Page Inventory", "",
+              "Computed by grouping UI-facing criteria on their declared `screen` field — "
+              "not a separate hand-maintained roster. A criterion with no `screen` declared "
+              "is listed as ungrouped, not silently dropped.", ""]
+    page_inventory = data.get("page_inventory") or []
+    any_pages = any(pi["screens"] for pi in page_inventory)
+    if not any_pages and not any(pi["ungrouped"] for pi in page_inventory):
+        lines.append("_No UI-facing criteria yet._")
+        lines.append("")
+    else:
+        for pi in page_inventory:
+            if not pi["screens"] and not pi["ungrouped"]:
+                continue
+            lines.append(f"**`{pi['module']}`**")
+            lines.append("")
+            lines.append("| Page | Criteria |")
+            lines.append("|---|---|")
+            for s in pi["screens"]:
+                ids = ", ".join(c["id"] for c in s["criteria"])
+                lines.append(f"| {s['screen']} | {ids} |")
+            if pi["ungrouped"]:
+                ids = ", ".join(c["id"] for c in pi["ungrouped"])
+                lines.append(
+                    f"| _(ungrouped — no `screen` declared)_ | {ids} |"
+                )
+            lines.append("")
 
     if not data["modules"]:
         lines.append("_No UI-facing criteria found yet._")

@@ -151,3 +151,61 @@ def test_design_audit_cli_no_pcp_dir_exits(tmp_path):
     runner = CliRunner()
     result = runner.invoke(cli, ["design-audit", "--path", str(tmp_path)])
     assert result.exit_code == 2
+
+
+# ── Page Inventory -- real gap found 2026-08-08 dogfooding Magellan-DataOps ──
+# a module with ~15 UI-facing criteria had no shared page model: nothing
+# distinguished "these 4 criteria are one page" from "these are 4 separate
+# pages" until a human manually reconstructed the grouping by hand.
+
+def test_page_inventory_groups_criteria_by_declared_screen(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_module(pcp_dir, "workbench", [
+        {"id": "A001", "description": "Grading UI shows code diff", "check": "manual", "status": "pending",
+         "screen": "Code grading"},
+        {"id": "A002", "description": "Grading UI shows test results", "check": "manual", "status": "pending",
+         "screen": "Code grading"},
+        {"id": "A003", "description": "Sign-off queue lists pending reviews", "check": "manual", "status": "pending",
+         "screen": "Sign-off queue"},
+    ])
+    data = build_design_audit(pcp_dir)
+    pi = next(p for p in data["page_inventory"] if p["module"] == "workbench")
+    screens = {s["screen"]: [c["id"] for c in s["criteria"]] for s in pi["screens"]}
+    assert screens["Code grading"] == ["A001", "A002"]
+    assert screens["Sign-off queue"] == ["A003"]
+    assert pi["ungrouped"] == []
+
+
+def test_page_inventory_reports_ungrouped_criteria_separately(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_module(pcp_dir, "workbench", [
+        {"id": "A001", "description": "Grading UI shows code diff", "check": "manual", "status": "pending",
+         "screen": "Code grading"},
+        {"id": "A002", "description": "Dashboard shows something else entirely", "check": "manual", "status": "pending"},
+    ])
+    data = build_design_audit(pcp_dir)
+    pi = next(p for p in data["page_inventory"] if p["module"] == "workbench")
+    assert [c["id"] for c in pi["ungrouped"]] == ["A002"]
+    assert len(pi["screens"]) == 1
+
+
+def test_page_inventory_rendered_in_markdown(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    _write_module(pcp_dir, "workbench", [
+        {"id": "A001", "description": "Grading UI shows code diff", "check": "manual", "status": "pending",
+         "screen": "Code grading"},
+    ])
+    content = write_design_audit(pcp_dir).read_text()
+    assert "Page Inventory" in content
+    assert "Code grading" in content
+    assert "A001" in content
+
+
+def test_page_inventory_empty_project_does_not_crash(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    content = write_design_audit(pcp_dir).read_text()
+    assert "Page Inventory" in content

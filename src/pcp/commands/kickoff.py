@@ -371,6 +371,29 @@ def check_capability_coverage(capabilities: list[str], module_specs: dict) -> li
     return _keyword_miss_check(capabilities, combined_coverage, "Capability", "any module's objective_coverage")
 
 
+def check_capability_criterion_coverage(capabilities: list[str], module_acceptances: dict) -> list[str]:
+    """Deterministic, no LLM: does each enumerated capability keyword-overlap
+    with some ACTUAL CRITERION's description, not just a module's broader
+    objective_coverage prose? check_capability_coverage above already checks
+    the coarser signal -- this is the sharper one, closing a real gap found
+    2026-08-08 (Magellan-DataOps dogfood): a capability (e.g. "preference-
+    ranking: A/B compare two AI responses") can textually match a module's
+    paragraph-length objective_coverage while no criterion actually
+    implements it -- design_audit.md's Feature Exposure Ladder can't catch
+    this by construction, it only scores criteria that exist. Same shared
+    primitive (_keyword_miss_check), checked against the union of every
+    criterion's description project-wide rather than module-level coverage
+    text, same blunt-instrument caveat: a miss is a free second opinion
+    worth surfacing, not proof of a real gap."""
+    combined_criteria_text = " ".join(
+        c.get("description", "") or ""
+        for acc in module_acceptances.values()
+        for c in (acc.get("criteria") or [])
+        if isinstance(c, dict)
+    )
+    return _keyword_miss_check(capabilities, combined_criteria_text, "Capability", "any criterion's description")
+
+
 _NON_TRIVIAL_KEYWORDS = (
     "auth", "login", "oauth", "payment", "billing", "checkout", "queue", "scheduler",
     "cron", "state machine", "state-machine", "parser", "parsing", "embedding",
@@ -746,6 +769,16 @@ def kickoff(vision_file: str, project_path: str, force: bool):
     if breakdown_warnings:
         console.print(f"[yellow]⚠  {len(breakdown_warnings)} logic-breakdown item(s) may not be covered by their own module's criteria:[/yellow]")
         for w in breakdown_warnings:
+            console.print(f"   {w}")
+
+    # Sharper coverage signal than the module-level check above -- a
+    # capability can textually match a module's broad objective_coverage
+    # while no actual CRITERION implements it. See check_capability_
+    # criterion_coverage's docstring for the real incident this closes.
+    criterion_capability_warnings = check_capability_criterion_coverage(result.get("capabilities_enumerated", []), acceptances)
+    if criterion_capability_warnings:
+        console.print(f"[yellow]⚠  {len(criterion_capability_warnings)} enumerated capability(ies) matched a module but no actual criterion implements them:[/yellow]")
+        for w in criterion_capability_warnings:
             console.print(f"   {w}")
 
     # Prior-art evidence cross-check -- see check_prior_art_evidence's
