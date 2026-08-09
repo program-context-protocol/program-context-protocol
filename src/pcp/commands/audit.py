@@ -21,6 +21,7 @@ from pcp.test_composition import analyze_test_composition
 from pcp.mutation_confirm import (
     cosmic_ray_available, resolve_definition_file_all, run_targeted_mutation_test,
 )
+from pcp.flaky_detect import flaky_detect_available, run_flaky_detection
 
 console = Console()
 
@@ -258,6 +259,25 @@ def _run_mutation_confirm_check(project_root: Path, test_composition_result: dic
     }
 
 
+DEFAULT_FLAKY_DETECT_RUNS = 3
+
+
+def _run_flaky_detect_check(project_root: Path) -> dict | None:
+    """Opt-in, real cost: reruns the FULL suite PCP_FLAKY_DETECT_RUNS times
+    (default 3) and reports tests that flipped pass/fail across identical
+    code -- see flaky_detect.py's module docstring for the prior-art check
+    and why this is a separate facet from test_composition.py/falsegreen
+    (those are static -- this is the only one that actually re-executes).
+
+    Returns None when this project has no detectable pytest -- same
+    "tool not applicable here" posture as the coverage/mutation-confirm
+    checks, distinct from a real zero-flaky-tests result."""
+    if not flaky_detect_available(project_root):
+        return None
+    runs = int(os.environ.get("PCP_FLAKY_DETECT_RUNS", str(DEFAULT_FLAKY_DETECT_RUNS)))
+    return run_flaky_detection(project_root, runs=runs)
+
+
 def _run_audit(project_root: Path) -> dict:
     for runner in (_run_vulture, _run_knip):
         out = runner(project_root)
@@ -286,7 +306,7 @@ def _append_trend(
     pcp_dir: Path, timestamp: str, result: dict, metrics: dict,
     ast_grep_result: dict | None = None, jscpd_result: dict | None = None,
     coverage_result: dict | None = None, test_composition_result: dict | None = None,
-    falsegreen_result: dict | None = None,
+    falsegreen_result: dict | None = None, flaky_detect_result: dict | None = None,
 ) -> list[dict]:
     """Erosion TREND, not snapshot (SlopCodeBench, arXiv:2603.24755: structural
     erosion is the default trajectory of iterative agentic coding — 77% of
@@ -311,6 +331,8 @@ def _append_trend(
         entry["grep_shaped_ratio"] = test_composition_result.get("grep_shaped_ratio")
     if falsegreen_result is not None:
         entry["falsegreen_findings"] = len(falsegreen_result["findings"])
+    if flaky_detect_result is not None and flaky_detect_result.get("available"):
+        entry["flaky_tests_found"] = len(flaky_detect_result["flaky_tests"])
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
     rows = []
@@ -327,6 +349,7 @@ def _write_audit_md(
     ast_grep_result: dict | None = None, jscpd_result: dict | None = None,
     coverage_result: dict | None = None, test_composition_result: dict | None = None,
     mutation_confirm_result: dict | None = None, falsegreen_result: dict | None = None,
+    flaky_detect_result: dict | None = None,
 ) -> Path:
     tool = result["tool"]
     findings = result["findings"]
@@ -484,6 +507,28 @@ def _write_audit_md(
                     score = f"{r['mutation_score'] * 100:.0f}%"
                 lines.append(f"| `{r['test_name']}` | `{r['target_name']}` | {score} | {verdict} |")
 
+    if flaky_detect_result is None or not flaky_detect_result.get("available"):
+        lines += ["", "## Flaky Tests (proactive)", "",
+                   "_No pytest detected — flaky-test detection skipped._"]
+    else:
+        fd = flaky_detect_result
+        order_note = ("order randomized each run (pytest-randomly detected)" if fd["order_randomized"]
+                      else "same order each run (pytest-randomly not installed — order-dependent "
+                           "flakiness may go undetected; `pip install pytest-randomly` to widen coverage)")
+        lines += ["", "## Flaky Tests (proactive)", "",
+                   f"Reran the full suite {fd['runs']} time(s) against identical code, {order_note}. "
+                   f"{fd['total_unique_tests']} unique test(s) observed.", ""]
+        if fd.get("any_run_timed_out"):
+            lines.append("⚠ At least one run timed out or crashed — results are a lower bound.\n")
+        if fd["flaky_tests"]:
+            lines += ["| Test | Outcomes across runs |", "|---|---|"]
+            for ft in fd["flaky_tests"][:MAX_FINDINGS_SHOWN]:
+                lines.append(f"| `{ft['test_id']}` | {' → '.join(o or 'missing' for o in ft['outcomes'])} |")
+            if len(fd["flaky_tests"]) > MAX_FINDINGS_SHOWN:
+                lines.append(f"| _...and {len(fd['flaky_tests']) - MAX_FINDINGS_SHOWN} more_ | |")
+        else:
+            lines.append("_No test flipped pass/fail across runs._")
+
     if trend and len(trend) >= 2:
         lines += ["", "## Erosion Trend (last runs)", "",
                   "| When | Findings | Source lines | Files |", "|---|---|---|---|"]
@@ -516,7 +561,13 @@ def _write_audit_md(
                    "ONLY the specific flagged function(s) and checking whether the test really catches "
                    "nothing (cosmic-ray, real cost, capped at PCP_MUTATION_CONFIRM_MAX per run, default 5). "
                    "Requires cosmic-ray installed (`pip install cosmic-ray`); skipped gracefully if absent.")
-def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutation_confirm: bool):
+@click.option("--flaky-detect", "with_flaky_detect", is_flag=True,
+              help="Proactively find flaky tests by rerunning the FULL suite PCP_FLAKY_DETECT_RUNS times "
+                   "(default 3) against identical code and diffing per-test outcomes. Real cost -- N full "
+                   "suite runs. Order-randomized if pytest-randomly is installed (recommended: "
+                   "`pip install pytest-randomly`, catches the most common flaky-test root cause).")
+def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutation_confirm: bool,
+          with_flaky_detect: bool):
     """Advisory dead-code / bloat scan. Writes .pcp/audit.md. Never blocks."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
@@ -534,15 +585,16 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutat
     mutation_confirm_result = (
         _run_mutation_confirm_check(project_root, test_composition_result) if with_mutation_confirm else None
     )
+    flaky_detect_result = _run_flaky_detect_check(project_root) if with_flaky_detect else None
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     metrics = _source_metrics(project_root)
     trend = _append_trend(
         pcp_dir, timestamp, result, metrics, ast_grep_result, jscpd_result, coverage_result,
-        test_composition_result, falsegreen_result,
+        test_composition_result, falsegreen_result, flaky_detect_result,
     )
     out_path = _write_audit_md(
         pcp_dir, result, timestamp, trend, ast_grep_result, jscpd_result, coverage_result,
-        test_composition_result, mutation_confirm_result, falsegreen_result,
+        test_composition_result, mutation_confirm_result, falsegreen_result, flaky_detect_result,
     )
 
     if quiet:
@@ -608,6 +660,19 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutat
             console.print(
                 f"[{color}]{confirmed}/{mc['confirmed_this_run']} confirmed grep-shaped[/{color}] "
                 f"(mutation-tested, {mc['candidates_found']} candidate(s) found)"
+            )
+
+    if with_flaky_detect:
+        if flaky_detect_result is None or not flaky_detect_result.get("available"):
+            console.print("[dim]No pytest detected — flaky-detect skipped.[/dim]")
+        else:
+            fd = flaky_detect_result
+            count = len(fd["flaky_tests"])
+            color = "red" if count else "green"
+            order_tag = "randomized" if fd["order_randomized"] else "same order"
+            console.print(
+                f"[{color}]{count} flaky test(s) found[/{color}] "
+                f"({fd['runs']} run(s), {order_tag}, {fd['total_unique_tests']} test(s) observed)"
             )
 
     sys.exit(0)
