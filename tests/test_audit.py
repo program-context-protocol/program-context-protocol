@@ -8,6 +8,7 @@ from pcp.cli import cli
 from pcp.commands.audit import (
     _run_vulture, _run_knip, _run_audit,
     _run_ast_grep_swallowed_exceptions, _run_jscpd, _run_coverage_check,
+    _run_test_composition_check,
 )
 
 HAS_AST_GREP = shutil.which("ast-grep") is not None
@@ -215,3 +216,72 @@ def test_audit_cli_coverage_flag_warns_below_threshold(tmp_path):
     assert "below" in result.output.lower()
     audit_md = (pcp_dir / "audit.md").read_text()
     assert "Below advisory threshold" in audit_md
+
+
+# ── test composition: source-grep vs. real-execution ratio ──
+# Real finding (2026-08-08): 255 tests, 100% passing, 97% source-text grep.
+# Pure stdlib, no external tool -- unlike vulture/jscpd/etc this ALWAYS runs.
+
+def test_composition_above_threshold_flagged(tmp_path):
+    (tmp_path / "test_x.py").write_text(
+        'def test_a():\n    content = open("f.py").read()\n    assert "Foo" in content\n'
+    )
+    result = _run_test_composition_check(tmp_path)
+    assert result["above_threshold"] is True
+    assert result["threshold"] == 50
+    assert result["grep_shaped"] == 1
+
+
+def test_composition_below_threshold_not_flagged(tmp_path):
+    (tmp_path / "test_x.py").write_text(
+        'def test_a():\n    from thing import f\n    assert f() == 1\n'
+    )
+    result = _run_test_composition_check(tmp_path)
+    assert result["above_threshold"] is False
+
+
+def test_composition_no_test_files_never_flagged(tmp_path):
+    result = _run_test_composition_check(tmp_path)
+    assert result["above_threshold"] is False
+    assert result["total_test_functions"] == 0
+
+
+def test_composition_threshold_env_override(tmp_path, monkeypatch):
+    # 2 grep-shaped + 1 real-execution = 66.7% ratio -- above the default
+    # 50% threshold (flagged), below a raised 90% threshold (not flagged).
+    # Demonstrates the override actually changes the verdict, not just the
+    # recorded number.
+    (tmp_path / "test_grep.py").write_text(
+        'def test_a():\n    content = open("f.py").read()\n    assert "Foo" in content\n'
+        'def test_b():\n    content = open("g.py").read()\n    assert "Bar" in content\n'
+    )
+    (tmp_path / "test_real.py").write_text(
+        'def test_c():\n    from thing import f\n    assert f() == 1\n'
+    )
+    default = _run_test_composition_check(tmp_path)
+    assert default["threshold"] == 50
+    assert default["above_threshold"] is True
+
+    monkeypatch.setenv("PCP_GREP_SHAPED_ADVISORY_THRESHOLD", "90")
+    raised = _run_test_composition_check(tmp_path)
+    assert raised["threshold"] == 90
+    assert raised["above_threshold"] is False
+
+
+def test_audit_cli_runs_test_composition_without_any_external_tool(tmp_path):
+    """Unlike vulture/knip/jscpd/ast-grep, this check needs no external tool
+    detection -- must still run and report even when shutil.which is fully
+    mocked out, matching every other tool-dependent check being absent."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (tmp_path / "test_grepped.py").write_text(
+        'def test_a():\n    content = open("f.py").read()\n    assert "Foo" in content\n'
+    )
+    with patch("shutil.which", return_value=None):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["audit", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "source-grep tests" in result.output
+    audit_md = (pcp_dir / "audit.md").read_text()
+    assert "Test Composition" in audit_md
+    assert "source-grep" in audit_md

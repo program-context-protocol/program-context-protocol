@@ -3469,6 +3469,17 @@ def _run_adversarial_review(
     carrying a project's actual differentiators" (the framing this feature
     was requested under), not every criterion in a build.
 
+    Maker/checker independence (2026-08-08): pinned to ESCALATION_MODEL
+    explicitly -- this call previously had NO --model flag at all, a silent
+    default this codebase's own doctrine forbids ("every LLM call site
+    passes an explicit model") and a real risk of the checker landing on
+    the same model tier the primary build agent used, undermining the
+    whole point of an independent review. Fixed model, not "whatever Maker
+    didn't use" -- simpler, and Maker's own model can vary per attempt
+    (escalates to ESCALATION_MODEL itself on attempt 3), so a fixed
+    checker tier is the only way to make this guarantee without threading
+    Maker's actual model choice through as another parameter.
+
     Known limitation: relies on the prompt instruction, not a verified
     read-only permission mode, to keep the reviewing agent from editing
     files -- not independently confirmed safe against a reviewer that
@@ -3495,6 +3506,7 @@ def _run_adversarial_review(
         "--output-format", "json",
         "--max-budget-usd", _adversarial_review_max_budget_usd(),
         "--session-id", session_id,
+        "--model", llm.ESCALATION_MODEL,
     ]
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -5083,11 +5095,14 @@ def build(module_name: str | None, project_path: str | None, yes: bool, capture_
         # Advisory dead-code/bloat sweep + audit-evidence refresh — once per
         # wave, after all this wave's modules are merged into main.
         try:
-            from pcp.commands.audit import _run_audit, _write_audit_md
+            from pcp.commands.audit import _run_audit, _write_audit_md, _run_test_composition_check
             from datetime import datetime, timezone
             audit_result = _run_audit(project_root)
             audit_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            _write_audit_md(pcp_dir, audit_result, audit_ts)
+            # Pure AST, no LLM/tool dependency -- cheap enough to run every
+            # wave, unlike the coverage check (real cost, opt-in only).
+            test_composition_result = _run_test_composition_check(project_root)
+            _write_audit_md(pcp_dir, audit_result, audit_ts, test_composition_result=test_composition_result)
             if audit_result["tool"]:
                 console.print(
                     f"[dim]Audit: {len(audit_result['findings'])} dead-code finding(s) "

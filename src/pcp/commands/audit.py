@@ -17,6 +17,7 @@ import click
 from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
+from pcp.test_composition import analyze_test_composition
 
 console = Console()
 
@@ -150,6 +151,30 @@ def _run_coverage_check(project_root: Path) -> dict:
     return result
 
 
+DEFAULT_GREP_SHAPED_ADVISORY_THRESHOLD = 50
+
+
+def _run_test_composition_check(project_root: Path) -> dict:
+    """Real finding (2026-08-08): a project's test suite -- 255 tests, 100%
+    passing -- was 97% `assert "Name" in file_contents` (source-text grep),
+    3% real execution against a compiled binary. All 255 were honest,
+    passing tests; that number alone said nothing about which tier of
+    verification they represented. Pure stdlib AST, no external tool, no
+    LLM -- always runs, unlike vulture/jscpd/etc which need a tool detected.
+
+    Advisory threshold mirrors _run_coverage_check's own pattern:
+    PCP_GREP_SHAPED_ADVISORY_THRESHOLD (default 50%) -- flagged, never
+    blocking, same report-first posture every new check in this repo earns
+    hard-block status through only after a measured false-positive rate."""
+    result = analyze_test_composition(project_root)
+    threshold = int(os.environ.get("PCP_GREP_SHAPED_ADVISORY_THRESHOLD", str(DEFAULT_GREP_SHAPED_ADVISORY_THRESHOLD)))
+    result["threshold"] = threshold
+    result["above_threshold"] = (
+        result["total_test_functions"] > 0 and result["grep_shaped_ratio"] * 100 > threshold
+    )
+    return result
+
+
 def _run_audit(project_root: Path) -> dict:
     for runner in (_run_vulture, _run_knip):
         out = runner(project_root)
@@ -177,7 +202,7 @@ def _source_metrics(project_root: Path) -> dict:
 def _append_trend(
     pcp_dir: Path, timestamp: str, result: dict, metrics: dict,
     ast_grep_result: dict | None = None, jscpd_result: dict | None = None,
-    coverage_result: dict | None = None,
+    coverage_result: dict | None = None, test_composition_result: dict | None = None,
 ) -> list[dict]:
     """Erosion TREND, not snapshot (SlopCodeBench, arXiv:2603.24755: structural
     erosion is the default trajectory of iterative agentic coding — 77% of
@@ -198,6 +223,8 @@ def _append_trend(
         entry["duplication_pct"] = jscpd_result.get("duplication_pct")
     if coverage_result is not None:
         entry["coverage_percent"] = coverage_result.get("percent")
+    if test_composition_result is not None:
+        entry["grep_shaped_ratio"] = test_composition_result.get("grep_shaped_ratio")
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
     rows = []
@@ -212,7 +239,7 @@ def _append_trend(
 def _write_audit_md(
     pcp_dir: Path, result: dict, timestamp: str, trend: list[dict] | None = None,
     ast_grep_result: dict | None = None, jscpd_result: dict | None = None,
-    coverage_result: dict | None = None,
+    coverage_result: dict | None = None, test_composition_result: dict | None = None,
 ) -> Path:
     tool = result["tool"]
     findings = result["findings"]
@@ -289,6 +316,37 @@ def _write_audit_md(
         if coverage_result.get("below_threshold"):
             lines.append(f"\n⚠ Below advisory threshold ({threshold}%). Tracked, not blocking.")
 
+    if test_composition_result is not None:
+        tc = test_composition_result
+        lines += ["", "## Test Composition (source-grep vs. real-execution)", "",
+                   f"_{tc['scope_note']}_", ""]
+        if tc["total_test_functions"] == 0:
+            lines.append("_No Python test_*.py / *_test.py files found._")
+        else:
+            pct = tc["grep_shaped_ratio"] * 100
+            lines += [
+                f"{tc['total_test_functions']} test function(s): "
+                f"**{tc['grep_shaped']} source-grep** ({pct:.0f}%), "
+                f"{tc['real_execution']} real-execution, {tc['other']} unclassified.",
+                "",
+                "Source-grep = `assert \"Name\" in file_contents` — confirms a name exists in a "
+                "file, not that calling it produces correct behavior. A passing test suite can be "
+                "100% honest and still tell you almost nothing about runtime correctness if this "
+                "ratio is high.",
+            ]
+            if tc.get("above_threshold"):
+                lines.append(f"\n⚠ Above advisory threshold ({tc['threshold']}%). Tracked, not blocking.")
+            grep_files = sorted(
+                (f for f in tc["files"] if f["grep_shaped"] > 0),
+                key=lambda f: f["grep_shaped"], reverse=True,
+            )
+            if grep_files:
+                lines += ["", "### Highest source-grep concentration"]
+                for f in grep_files[:MAX_FINDINGS_SHOWN]:
+                    lines.append(f"- `{f['path']}`: {f['grep_shaped']} source-grep test(s)")
+                if len(grep_files) > MAX_FINDINGS_SHOWN:
+                    lines.append(f"- _...and {len(grep_files) - MAX_FINDINGS_SHOWN} more file(s)_")
+
     if trend and len(trend) >= 2:
         lines += ["", "## Erosion Trend (last runs)", "",
                   "| When | Findings | Source lines | Files |", "|---|---|---|---|"]
@@ -329,10 +387,11 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool):
     ast_grep_result = _run_ast_grep_swallowed_exceptions(project_root)
     jscpd_result = _run_jscpd(project_root)
     coverage_result = _run_coverage_check(project_root) if with_coverage else None
+    test_composition_result = _run_test_composition_check(project_root)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     metrics = _source_metrics(project_root)
-    trend = _append_trend(pcp_dir, timestamp, result, metrics, ast_grep_result, jscpd_result, coverage_result)
-    out_path = _write_audit_md(pcp_dir, result, timestamp, trend, ast_grep_result, jscpd_result, coverage_result)
+    trend = _append_trend(pcp_dir, timestamp, result, metrics, ast_grep_result, jscpd_result, coverage_result, test_composition_result)
+    out_path = _write_audit_md(pcp_dir, result, timestamp, trend, ast_grep_result, jscpd_result, coverage_result, test_composition_result)
 
     if quiet:
         sys.exit(0)
@@ -367,5 +426,17 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool):
             color = "red" if coverage_result.get("below_threshold") else "green"
             suffix = f" — below {coverage_result['threshold']}% advisory threshold" if coverage_result.get("below_threshold") else ""
             console.print(f"[{color}]{pct:.0f}% coverage[/{color}] ([dim]{coverage_result['tool']}[/dim]){suffix}")
+
+    if test_composition_result["total_test_functions"] == 0:
+        console.print("[dim]No Python test_*.py / *_test.py files found — test-composition check skipped.[/dim]")
+    else:
+        tc = test_composition_result
+        pct = tc["grep_shaped_ratio"] * 100
+        color = "red" if tc.get("above_threshold") else ("yellow" if pct > 0 else "green")
+        suffix = f" — above {tc['threshold']}% advisory threshold" if tc.get("above_threshold") else ""
+        console.print(
+            f"[{color}]{pct:.0f}% source-grep tests[/{color}] "
+            f"({tc['grep_shaped']}/{tc['total_test_functions']}, {tc['real_execution']} real-execution){suffix}"
+        )
 
     sys.exit(0)

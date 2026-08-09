@@ -10,6 +10,7 @@ from pcp.commands.build import (
     _run_adversarial_review, _build_adversarial_review_prompt, _BuildBudget, BudgetExceeded,
 )
 from pcp import telemetry
+from pcp.llm import client as llm
 
 
 def _envelope(result_obj, session_id="rev-1", cost=0.42):
@@ -79,6 +80,32 @@ def test_real_implementation_produces_no_findings(tmp_path):
     assert len(records) == 1
     assert records[0]["result"] == "pass"
     assert budget.run_cost_total == 0.42
+
+
+# ── maker/checker model independence (2026-08-08) ──
+# The checker must never silently land on the same model tier the primary
+# build agent used -- previously no --model flag was passed at all, an
+# unpinned default that could coincidentally collide with Maker's own model.
+
+def test_checker_is_pinned_to_an_explicit_model_not_a_silent_default(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    budget = _BuildBudget(10)
+    captured_cmd = []
+
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            self.returncode = 0
+        def communicate(self, input=None, timeout=None):
+            return _envelope({"is_real": True, "confidence": 0.9, "red_flags": [], "reasoning": "ok"}), ""
+
+    with patch("pcp.commands.build.subprocess.Popen", side_effect=_FakePopen):
+        _run_adversarial_review(pcp_dir, tmp_path, _mod(), _crit(), "diff content", budget)
+
+    assert "--model" in captured_cmd
+    model_idx = captured_cmd.index("--model")
+    assert captured_cmd[model_idx + 1] == llm.ESCALATION_MODEL
 
 
 def test_fake_implementation_produces_a_blocking_finding(tmp_path):
