@@ -18,6 +18,9 @@ from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 from pcp.test_composition import analyze_test_composition
+from pcp.mutation_confirm import (
+    cosmic_ray_available, resolve_definition_file_all, run_targeted_mutation_test,
+)
 
 console = Console()
 
@@ -175,6 +178,55 @@ def _run_test_composition_check(project_root: Path) -> dict:
     return result
 
 
+DEFAULT_MUTATION_CONFIRM_MAX = 5
+
+
+def _run_mutation_confirm_check(project_root: Path, test_composition_result: dict) -> dict | None:
+    """Opt-in, real-cost empirical follow-up to the free static grep-shaped
+    flag above -- see mutation_confirm.py's module docstring for why this
+    is scoped to individual flagged functions, not a whole-module sweep.
+
+    Returns None when cosmic-ray isn't installed, same "tool not detected,
+    skip gracefully" posture as vulture/knip/ast-grep/jscpd -- distinct from
+    _run_test_composition_check, which has no external-tool dependency and
+    always runs.
+
+    Capped at PCP_MUTATION_CONFIRM_MAX (default 5) candidates per run --
+    each one is a real subprocess chain (init/baseline/exec/dump), genuine
+    wall-clock cost, same posture as the coverage check's own real cost.
+    Candidates are every (test, target-name) pair test_composition.py
+    flagged, in file order -- no attempt to rank by "importance" here,
+    since that would need judgment this deterministic pass doesn't have."""
+    if not cosmic_ray_available():
+        return None
+
+    max_confirm = int(os.environ.get("PCP_MUTATION_CONFIRM_MAX", str(DEFAULT_MUTATION_CONFIRM_MAX)))
+    candidates = []
+    for file_result in test_composition_result.get("files", []):
+        test_file = Path(file_result["path"])
+        for g in file_result.get("grep_shaped_functions", []):
+            for target in g.get("targets", []):
+                candidates.append({"test_name": g["test_name"], "target_name": target, "test_file": test_file})
+
+    confirmations = []
+    skipped_no_definition = 0
+    for c in candidates[:max_confirm]:
+        matches = resolve_definition_file_all(project_root, c["target_name"])
+        if len(matches) != 1:
+            skipped_no_definition += 1
+            continue
+        outcome = run_targeted_mutation_test(project_root, c["target_name"], matches[0], c["test_file"])
+        confirmations.append({**c, **outcome, "definition_file": str(matches[0].relative_to(project_root))})
+
+    return {
+        "candidates_found": len(candidates),
+        "confirmed_this_run": len(confirmations),
+        "skipped_ambiguous_or_missing_definition": skipped_no_definition,
+        "skipped_over_cap": max(0, len(candidates) - max_confirm),
+        "results": confirmations,
+    }
+
+
 def _run_audit(project_root: Path) -> dict:
     for runner in (_run_vulture, _run_knip):
         out = runner(project_root)
@@ -240,6 +292,7 @@ def _write_audit_md(
     pcp_dir: Path, result: dict, timestamp: str, trend: list[dict] | None = None,
     ast_grep_result: dict | None = None, jscpd_result: dict | None = None,
     coverage_result: dict | None = None, test_composition_result: dict | None = None,
+    mutation_confirm_result: dict | None = None,
 ) -> Path:
     tool = result["tool"]
     findings = result["findings"]
@@ -347,6 +400,38 @@ def _write_audit_md(
                 if len(grep_files) > MAX_FINDINGS_SHOWN:
                     lines.append(f"- _...and {len(grep_files) - MAX_FINDINGS_SHOWN} more file(s)_")
 
+    if mutation_confirm_result is None:
+        lines += ["", "## Mutation Confirmation (empirical follow-up)", "",
+                   "_cosmic-ray not detected — `pip install cosmic-ray` to enable "
+                   "(real cost, opt-in via `--mutation-confirm`)._"]
+    else:
+        mc = mutation_confirm_result
+        lines += ["", "## Mutation Confirmation (empirical follow-up)", "",
+                   "Targeted, not a whole-module sweep: mutates only the specific function(s) "
+                   "a grep-shaped test claims to check, confirms empirically whether it really "
+                   "catches nothing.", ""]
+        lines.append(
+            f"{mc['candidates_found']} candidate(s) found, {mc['confirmed_this_run']} confirmed this run, "
+            f"{mc['skipped_over_cap']} left for a future run (cap), "
+            f"{mc['skipped_ambiguous_or_missing_definition']} skipped (ambiguous or no resolvable definition)."
+        )
+        if mc["results"]:
+            lines += ["", "| Test | Target | Mutation score | Verdict |", "|---|---|---|---|"]
+            for r in mc["results"]:
+                if not r.get("available") or "error" in r:
+                    verdict = f"error: {r.get('error', 'cosmic-ray unavailable')[:80]}"
+                    score = "—"
+                elif r["mutation_score"] is None:
+                    verdict = "no mutants — unjudgeable"
+                    score = "—"
+                elif r["confirms_grep_shaped"]:
+                    verdict = "⚠ CONFIRMED grep-shaped (0% caught)"
+                    score = "0%"
+                else:
+                    verdict = "real assertions — caught real mutations"
+                    score = f"{r['mutation_score'] * 100:.0f}%"
+                lines.append(f"| `{r['test_name']}` | `{r['target_name']}` | {score} | {verdict} |")
+
     if trend and len(trend) >= 2:
         lines += ["", "## Erosion Trend (last runs)", "",
                   "| When | Findings | Source lines | Files |", "|---|---|---|---|"]
@@ -374,7 +459,12 @@ def _write_audit_md(
               help="Also run the test suite under coverage and warn if below "
                    "PCP_COVERAGE_ADVISORY_THRESHOLD (default 50). Opt-in: runs the "
                    "full suite instrumented, real cost -- same posture as `pcp scan --coverage`.")
-def audit(project_path: str | None, quiet: bool, with_coverage: bool):
+@click.option("--mutation-confirm", "with_mutation_confirm", is_flag=True,
+              help="Empirically confirm the highest-priority grep-shaped test findings by mutating "
+                   "ONLY the specific flagged function(s) and checking whether the test really catches "
+                   "nothing (cosmic-ray, real cost, capped at PCP_MUTATION_CONFIRM_MAX per run, default 5). "
+                   "Requires cosmic-ray installed (`pip install cosmic-ray`); skipped gracefully if absent.")
+def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutation_confirm: bool):
     """Advisory dead-code / bloat scan. Writes .pcp/audit.md. Never blocks."""
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
@@ -388,10 +478,16 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool):
     jscpd_result = _run_jscpd(project_root)
     coverage_result = _run_coverage_check(project_root) if with_coverage else None
     test_composition_result = _run_test_composition_check(project_root)
+    mutation_confirm_result = (
+        _run_mutation_confirm_check(project_root, test_composition_result) if with_mutation_confirm else None
+    )
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     metrics = _source_metrics(project_root)
     trend = _append_trend(pcp_dir, timestamp, result, metrics, ast_grep_result, jscpd_result, coverage_result, test_composition_result)
-    out_path = _write_audit_md(pcp_dir, result, timestamp, trend, ast_grep_result, jscpd_result, coverage_result, test_composition_result)
+    out_path = _write_audit_md(
+        pcp_dir, result, timestamp, trend, ast_grep_result, jscpd_result, coverage_result,
+        test_composition_result, mutation_confirm_result,
+    )
 
     if quiet:
         sys.exit(0)
@@ -438,5 +534,17 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool):
             f"[{color}]{pct:.0f}% source-grep tests[/{color}] "
             f"({tc['grep_shaped']}/{tc['total_test_functions']}, {tc['real_execution']} real-execution){suffix}"
         )
+
+    if with_mutation_confirm:
+        if mutation_confirm_result is None:
+            console.print("[dim]cosmic-ray not detected — mutation-confirm skipped (`pip install cosmic-ray`).[/dim]")
+        else:
+            mc = mutation_confirm_result
+            confirmed = sum(1 for r in mc["results"] if r.get("confirms_grep_shaped"))
+            color = "red" if confirmed else "green"
+            console.print(
+                f"[{color}]{confirmed}/{mc['confirmed_this_run']} confirmed grep-shaped[/{color}] "
+                f"(mutation-tested, {mc['candidates_found']} candidate(s) found)"
+            )
 
     sys.exit(0)

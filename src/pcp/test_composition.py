@@ -100,6 +100,33 @@ def classify_test_function(func: ast.FunctionDef) -> str:
     return "other"
 
 
+def extract_grep_targets(func: ast.FunctionDef) -> list[str]:
+    """The string literal(s) a grep-shaped test's 'in' checks are actually
+    looking for -- e.g. `assert "compute_score" in content` -> "compute_score".
+    Only meaningful when classify_test_function already returned
+    'grep_shaped'; called separately (not fused into classification) so a
+    caller can classify cheaply first and only extract targets for the
+    functions worth it.
+
+    This is the identity that turns a cheap static flag into a targeted
+    empirical check (see mutation_confirm.py): resolve each target string
+    to whatever function/class it names, mutate ONLY that definition, and
+    confirm the flagged test really does score near-zero against it --
+    instead of mutation-testing a whole module speculatively."""
+    targets = []
+    for a in ast.walk(func):
+        if not isinstance(a, ast.Assert):
+            continue
+        if not isinstance(a.test, ast.Compare):
+            continue
+        if not any(isinstance(op, (ast.In, ast.NotIn)) for op in a.test.ops):
+            continue
+        left = a.test.left
+        if isinstance(left, ast.Constant) and isinstance(left.value, str):
+            targets.append(left.value)
+    return targets
+
+
 def analyze_test_file(path: Path) -> dict:
     """Per-file breakdown. Fails open (empty result) on a syntax error --
     a test file that doesn't even parse is a different, louder problem
@@ -116,7 +143,10 @@ def analyze_test_file(path: Path) -> dict:
             verdict = classify_test_function(node)
             counts[verdict] += 1
             if verdict == "grep_shaped":
-                grep_shaped_functions.append(node.name)
+                grep_shaped_functions.append({
+                    "test_name": node.name,
+                    "targets": extract_grep_targets(node),
+                })
     return {"path": str(path), **counts, "grep_shaped_functions": grep_shaped_functions}
 
 

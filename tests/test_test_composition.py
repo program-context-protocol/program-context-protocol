@@ -121,7 +121,8 @@ def test_analyze_test_file_counts_and_lists_grep_shaped(tmp_path):
     assert result["real_execution"] == 1
     assert result["grep_shaped"] == 2
     assert result["other"] == 1
-    assert set(result["grep_shaped_functions"]) == {"test_grep_one", "test_grep_two"}
+    by_name = {g["test_name"]: g["targets"] for g in result["grep_shaped_functions"]}
+    assert by_name == {"test_grep_one": ["foo"], "test_grep_two": ["bar"]}
 
 
 def test_analyze_test_file_fails_open_on_syntax_error(tmp_path):

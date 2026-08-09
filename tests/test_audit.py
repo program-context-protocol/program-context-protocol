@@ -285,3 +285,53 @@ def test_audit_cli_runs_test_composition_without_any_external_tool(tmp_path):
     audit_md = (pcp_dir / "audit.md").read_text()
     assert "Test Composition" in audit_md
     assert "source-grep" in audit_md
+
+
+def test_mutation_confirm_flag_off_by_default(tmp_path):
+    """Real cost -- must never fire unless explicitly requested."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("shutil.which", return_value=None):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["audit", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "mutation" not in result.output.lower()
+
+
+def test_mutation_confirm_flag_skips_gracefully_without_cosmic_ray(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("shutil.which", return_value=None):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["audit", "--path", str(tmp_path), "--mutation-confirm"])
+    assert result.exit_code == 0
+    assert "cosmic-ray not detected" in result.output
+    audit_md = (pcp_dir / "audit.md").read_text()
+    assert "Mutation Confirmation" in audit_md
+    assert "not detected" in audit_md
+
+
+def test_mutation_confirm_flag_reports_confirmed_findings(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (tmp_path / "thing.py").write_text("def compute_score(a, b):\n    return a + b\n")
+    (tmp_path / "test_grep.py").write_text(
+        'def test_a():\n    content = open("thing.py").read()\n    assert "compute_score" in content\n'
+    )
+
+    def fake_which(name):
+        return "/usr/bin/cosmic-ray" if name == "cosmic-ray" else None
+
+    fake_result = {
+        "available": True, "target_name": "compute_score", "killed": 0, "survived": 3,
+        "other_outcomes": 0, "mutation_score": 0.0, "confirms_grep_shaped": True,
+    }
+    with patch("shutil.which", side_effect=fake_which), \
+         patch("pcp.commands.audit.run_targeted_mutation_test", return_value=fake_result):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["audit", "--path", str(tmp_path), "--mutation-confirm"])
+    assert result.exit_code == 0
+    assert "1/1 confirmed grep-shaped" in result.output
+    audit_md = (pcp_dir / "audit.md").read_text()
+    assert "CONFIRMED grep-shaped" in audit_md
+    assert "compute_score" in audit_md
