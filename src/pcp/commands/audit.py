@@ -97,6 +97,37 @@ def _run_jscpd(project_root: Path) -> dict | None:
     return {"tool": "jscpd", "duplication_pct": pct, "findings": findings}
 
 
+def _run_falsegreen(project_root: Path) -> dict | None:
+    """Prior-art integration (2026-08-08): real, broader test smell coverage
+    than this project's own hand-built test_composition.py -- falsegreen
+    (MIT, zero-dependency AST scanner, github.com/vinicq/falsegreen) covers
+    47 false-green codes: always-true assertions, self-comparison, assertions
+    inside a conditional that may never execute, assertions swallowed by
+    try/except, unreachable assertions in dead code, no assertions at all.
+    Complementary, not a replacement -- test_composition.py's grep-shaped
+    check (assert "Name" in file_contents) isn't one of falsegreen's named
+    codes, so both stay wired in rather than one subsuming the other.
+
+    Cheap enough to run unconditionally like ast-grep/jscpd above (a
+    zero-dependency static AST pass, no test execution) -- unlike the
+    coverage/mutation-confirm checks, which are real-cost and opt-in."""
+    if not shutil.which("falsegreen"):
+        return None
+    result = subprocess.run(
+        ["falsegreen", "--format", "json", "."],
+        capture_output=True, text=True, cwd=project_root,
+    )
+    try:
+        records = json.loads(result.stdout) if result.stdout.strip() else []
+    except json.JSONDecodeError:
+        return {"tool": "falsegreen", "findings": []}
+    findings = [
+        f"{r.get('file', '?')}:{r.get('line', '?')}: [{r.get('code', '?')}] {r.get('title', '')}"
+        for r in records
+    ]
+    return {"tool": "falsegreen", "findings": findings}
+
+
 def _detect_python_src(project_root: Path) -> Path | None:
     for candidate in ("src", "."):
         p = project_root / candidate
@@ -255,6 +286,7 @@ def _append_trend(
     pcp_dir: Path, timestamp: str, result: dict, metrics: dict,
     ast_grep_result: dict | None = None, jscpd_result: dict | None = None,
     coverage_result: dict | None = None, test_composition_result: dict | None = None,
+    falsegreen_result: dict | None = None,
 ) -> list[dict]:
     """Erosion TREND, not snapshot (SlopCodeBench, arXiv:2603.24755: structural
     erosion is the default trajectory of iterative agentic coding — 77% of
@@ -277,6 +309,8 @@ def _append_trend(
         entry["coverage_percent"] = coverage_result.get("percent")
     if test_composition_result is not None:
         entry["grep_shaped_ratio"] = test_composition_result.get("grep_shaped_ratio")
+    if falsegreen_result is not None:
+        entry["falsegreen_findings"] = len(falsegreen_result["findings"])
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
     rows = []
@@ -292,7 +326,7 @@ def _write_audit_md(
     pcp_dir: Path, result: dict, timestamp: str, trend: list[dict] | None = None,
     ast_grep_result: dict | None = None, jscpd_result: dict | None = None,
     coverage_result: dict | None = None, test_composition_result: dict | None = None,
-    mutation_confirm_result: dict | None = None,
+    mutation_confirm_result: dict | None = None, falsegreen_result: dict | None = None,
 ) -> Path:
     tool = result["tool"]
     findings = result["findings"]
@@ -337,6 +371,24 @@ def _write_audit_md(
                 lines.append(f"- {f}")
             if len(ag_findings) > MAX_FINDINGS_SHOWN:
                 lines.append(f"- _...and {len(ag_findings) - MAX_FINDINGS_SHOWN} more_")
+        else:
+            lines.append("_No findings._")
+
+    if falsegreen_result is None:
+        lines += ["", "## False-Green Tests (falsegreen)", "",
+                   "_falsegreen not detected — `pip install falsegreen` to enable. "
+                   "Broader test-smell coverage than this project's own Test Composition "
+                   "check below (always-true/self-comparison/swallowed/unreachable assertions, "
+                   "47 codes) -- complementary, not overlapping._"]
+    else:
+        fg_findings = falsegreen_result["findings"]
+        lines += ["", "## False-Green Tests (falsegreen)", "",
+                   f"Findings: {len(fg_findings)}", ""]
+        if fg_findings:
+            for f in fg_findings[:MAX_FINDINGS_SHOWN]:
+                lines.append(f"- {f}")
+            if len(fg_findings) > MAX_FINDINGS_SHOWN:
+                lines.append(f"- _...and {len(fg_findings) - MAX_FINDINGS_SHOWN} more (see full tool output)_")
         else:
             lines.append("_No findings._")
 
@@ -476,6 +528,7 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutat
     result = _run_audit(project_root)
     ast_grep_result = _run_ast_grep_swallowed_exceptions(project_root)
     jscpd_result = _run_jscpd(project_root)
+    falsegreen_result = _run_falsegreen(project_root)
     coverage_result = _run_coverage_check(project_root) if with_coverage else None
     test_composition_result = _run_test_composition_check(project_root)
     mutation_confirm_result = (
@@ -483,10 +536,13 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutat
     )
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     metrics = _source_metrics(project_root)
-    trend = _append_trend(pcp_dir, timestamp, result, metrics, ast_grep_result, jscpd_result, coverage_result, test_composition_result)
+    trend = _append_trend(
+        pcp_dir, timestamp, result, metrics, ast_grep_result, jscpd_result, coverage_result,
+        test_composition_result, falsegreen_result,
+    )
     out_path = _write_audit_md(
         pcp_dir, result, timestamp, trend, ast_grep_result, jscpd_result, coverage_result,
-        test_composition_result, mutation_confirm_result,
+        test_composition_result, mutation_confirm_result, falsegreen_result,
     )
 
     if quiet:
@@ -505,6 +561,13 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutat
         count = len(ast_grep_result["findings"])
         color = "green" if count == 0 else "yellow"
         console.print(f"[{color}]{count} swallowed-exception finding(s)[/{color}] ([dim]ast-grep[/dim])")
+
+    if falsegreen_result is None:
+        console.print("[dim]falsegreen not detected — false-green test scan skipped (`pip install falsegreen`).[/dim]")
+    else:
+        count = len(falsegreen_result["findings"])
+        color = "green" if count == 0 else "yellow"
+        console.print(f"[{color}]{count} false-green test finding(s)[/{color}] ([dim]falsegreen[/dim])")
 
     if jscpd_result is None:
         console.print("[dim]jscpd not detected — duplication scan skipped.[/dim]")

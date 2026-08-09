@@ -8,11 +8,12 @@ from pcp.cli import cli
 from pcp.commands.audit import (
     _run_vulture, _run_knip, _run_audit,
     _run_ast_grep_swallowed_exceptions, _run_jscpd, _run_coverage_check,
-    _run_test_composition_check,
+    _run_test_composition_check, _run_falsegreen,
 )
 
 HAS_AST_GREP = shutil.which("ast-grep") is not None
 HAS_JSCPD = shutil.which("jscpd") is not None
+HAS_FALSEGREEN = shutil.which("falsegreen") is not None
 
 
 def test_run_vulture_absent_returns_none(tmp_path):
@@ -114,6 +115,43 @@ def test_ast_grep_does_not_flag_real_handling(tmp_path):
         "        logger.exception('failed')\n"
     )
     result = _run_ast_grep_swallowed_exceptions(tmp_path)
+    assert result["findings"] == []
+
+
+# ── falsegreen: prior-art false-green test scanner (2026-08-08) ──
+# Complementary to test_composition.py's grep-shaped check -- covers a
+# broader taxonomy (always-true, self-comparison, swallowed/unreachable
+# assertions) that grep-shaped detection doesn't touch.
+
+def test_falsegreen_absent_returns_none(tmp_path):
+    with patch("shutil.which", return_value=None):
+        assert _run_falsegreen(tmp_path) is None
+
+
+@pytest.mark.skipif(not HAS_FALSEGREEN, reason="falsegreen not installed")
+def test_falsegreen_finds_real_false_green_patterns(tmp_path):
+    (tmp_path / "test_bad.py").write_text(
+        "def test_always_true():\n"
+        "    assert True\n"
+        "\n"
+        "def test_self_compare():\n"
+        "    x = 5\n"
+        "    assert x == x\n"
+    )
+    result = _run_falsegreen(tmp_path)
+    assert result["tool"] == "falsegreen"
+    assert len(result["findings"]) >= 2
+    assert any("C5" in f for f in result["findings"])
+    assert any("C7" in f for f in result["findings"])
+
+
+@pytest.mark.skipif(not HAS_FALSEGREEN, reason="falsegreen not installed")
+def test_falsegreen_does_not_flag_a_real_test(tmp_path):
+    (tmp_path / "test_good.py").write_text(
+        "def test_arithmetic():\n"
+        "    assert 2 + 2 == 4\n"
+    )
+    result = _run_falsegreen(tmp_path)
     assert result["findings"] == []
 
 
