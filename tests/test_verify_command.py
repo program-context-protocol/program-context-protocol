@@ -7,6 +7,7 @@ deterministic check where one exists, require --reason where it doesn't, log
 to decision_log.jsonl either way.
 """
 import subprocess
+import textwrap
 
 import yaml
 from click.testing import CliRunner
@@ -124,3 +125,129 @@ def test_declining_the_confirm_writes_nothing(tmp_path):
              CliRunner().invoke(cli, ["verify", "billing", "A001", "--reason", "x", "--path", str(root)],
                                 input="n\n")
     assert _status(root)["status"] == "pending"
+
+
+# ── test_passes gate: real fake-test detection (2026-08-08) ──
+# `test_passes` previously had ZERO deterministic re-check -- these prove the
+# fix actually stops a criterion built on structurally fake tests from
+# reaching `complete`, using the SAME classifiers test_composition.py
+# already reports in `pcp audit`. Real pytest subprocess, no mocking.
+
+def _project_with_test_file(tmp_path, test_file_body, target="tests/test_thing.py"):
+    root = _project(tmp_path, check="test_passes", target=target)
+    file_part = target.split("::", 1)[0]
+    test_path = root / file_part
+    test_path.parent.mkdir(parents=True, exist_ok=True)
+    test_path.write_text(test_file_body)
+    return root
+
+
+def test_test_passes_refuses_a_grep_shaped_target(tmp_path):
+    root = _project_with_test_file(tmp_path, textwrap.dedent("""
+        def test_thing():
+            content = open(__file__).read()
+            assert "def test_thing" in content
+    """), target="tests/test_thing.py::test_thing")
+    result = CliRunner().invoke(cli, ["verify", "billing", "A001", "--yes", "--path", str(root)])
+    assert result.exit_code == 1
+    assert "FAKE-SHAPED" in result.output
+    assert "source-grep-shaped" in result.output
+    assert _status(root)["status"] == "pending"
+
+
+def test_test_passes_refuses_an_assertion_free_target(tmp_path):
+    root = _project_with_test_file(tmp_path, textwrap.dedent("""
+        def test_thing():
+            x = 1
+            y = x + 1
+    """), target="tests/test_thing.py::test_thing")
+    result = CliRunner().invoke(cli, ["verify", "billing", "A001", "--yes", "--path", str(root)])
+    assert result.exit_code == 1
+    assert "zero assertions" in result.output
+    assert _status(root)["status"] == "pending"
+
+
+def test_test_passes_refuses_a_self_mocked_target(tmp_path):
+    root = _project_with_test_file(tmp_path, textwrap.dedent("""
+        from unittest.mock import patch
+
+        def compute_score(a, b):
+            return a + b
+
+        def test_thing():
+            with patch("test_thing.compute_score") as mock_compute:
+                mock_compute.return_value = 42
+                assert compute_score(1, 2) == 42
+    """), target="tests/test_thing.py::test_thing")
+    result = CliRunner().invoke(cli, ["verify", "billing", "A001", "--yes", "--path", str(root)])
+    assert result.exit_code == 1
+    assert "self-mocked" in result.output
+    assert _status(root)["status"] == "pending"
+
+
+def test_test_passes_accepts_a_real_execution_target(tmp_path):
+    root = _project_with_test_file(tmp_path, textwrap.dedent("""
+        def compute_score(a, b):
+            return a + b
+
+        def test_thing():
+            assert compute_score(1, 2) == 3
+    """), target="tests/test_thing.py::test_thing")
+    result = CliRunner().invoke(cli, ["verify", "billing", "A001", "--yes", "--path", str(root)])
+    assert result.exit_code == 0
+    c = _status(root)
+    assert c["status"] == "complete"
+    assert c["verified_by"] == "pcp_verify:test_passes"
+
+
+def test_test_passes_genuine_test_failure_is_refused_and_not_overridable(tmp_path):
+    root = _project_with_test_file(tmp_path, textwrap.dedent("""
+        def test_thing():
+            assert 1 == 2
+    """), target="tests/test_thing.py::test_thing")
+    result = CliRunner().invoke(cli, [
+        "verify", "billing", "A001", "--yes", "--path", str(root),
+        "--allow-weak-test", "should not matter",
+    ])
+    assert result.exit_code == 1
+    assert "FAILS" in result.output
+    assert "FAKE-SHAPED" not in result.output
+    assert _status(root)["status"] == "pending"
+
+
+def test_test_passes_fake_refusal_overridden_with_allow_weak_test(tmp_path):
+    root = _project_with_test_file(tmp_path, textwrap.dedent("""
+        def test_thing():
+            x = 1
+    """), target="tests/test_thing.py::test_thing")
+    result = CliRunner().invoke(cli, [
+        "verify", "billing", "A001", "--yes", "--path", str(root),
+        "--allow-weak-test", "accepted as a placeholder, tracked in TICKET-99",
+    ])
+    assert result.exit_code == 0
+    c = _status(root)
+    assert c["status"] == "complete"
+    assert "weak-override" in c["verified_by"]
+
+    import json
+    lines = (root / ".pcp" / "decision_log.jsonl").read_text().splitlines()
+    rec = json.loads(lines[-1])
+    assert rec["category"] == "weak-test-override"
+    assert "TICKET-99" in rec["evidence"]
+
+
+def test_test_passes_without_target_falls_back_to_manual_path(tmp_path):
+    """No `target` declared -- unchanged pre-existing behavior, backward
+    compatible with every project that predates this gate."""
+    root = _project(tmp_path, check="test_passes", target=None)
+    result = CliRunner().invoke(cli, ["verify", "billing", "A001", "--yes", "--path", str(root)])
+    assert result.exit_code == 2
+    assert "--reason is required" in result.output
+
+
+def test_test_passes_missing_target_file_refuses_without_fake_shape_message(tmp_path):
+    root = _project(tmp_path, check="test_passes", target="tests/test_missing.py::test_x")
+    result = CliRunner().invoke(cli, ["verify", "billing", "A001", "--yes", "--path", str(root)])
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
+    assert "FAKE-SHAPED" not in result.output

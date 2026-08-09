@@ -120,6 +120,89 @@ def has_any_assertion(func: ast.FunctionDef) -> bool:
     return False
 
 
+def _patch_call_target_name(call: ast.Call) -> str | None:
+    """`patch("module.path.compute_score")` / `mock.patch(...)` /
+    `patch.object(thing, "compute_score")` -> "compute_score" (the last
+    dotted segment, or the literal name for patch.object's second arg).
+    None if this isn't a patch call at all."""
+    func = call.func
+    is_patch = (
+        (isinstance(func, ast.Name) and func.id == "patch")
+        or (isinstance(func, ast.Attribute) and func.attr == "patch")
+    )
+    is_patch_object = isinstance(func, ast.Attribute) and func.attr == "object" and (
+        (isinstance(func.value, ast.Name) and func.value.id == "patch")
+        or (isinstance(func.value, ast.Attribute) and func.value.attr == "patch")
+    )
+    if is_patch_object and len(call.args) >= 2:
+        arg = call.args[1]
+        return arg.value if isinstance(arg, ast.Constant) and isinstance(arg.value, str) else None
+    if is_patch and call.args:
+        arg = call.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value.rsplit(".", 1)[-1]
+    return None
+
+
+def _patched_target_names(func: ast.FunctionDef) -> set[str]:
+    """Every symbol name this test patches -- via `with patch(...) as x:`
+    or the `@patch(...)` decorator -- collected regardless of what the
+    bound variable is called, since the fake pattern below cares about
+    what got REPLACED, not what it was renamed to locally."""
+    names = set()
+    for n in ast.walk(func):
+        if isinstance(n, (ast.With, ast.AsyncWith)):
+            for item in n.items:
+                if isinstance(item.context_expr, ast.Call):
+                    target = _patch_call_target_name(item.context_expr)
+                    if target:
+                        names.add(target)
+    for deco in getattr(func, "decorator_list", []):
+        if isinstance(deco, ast.Call):
+            target = _patch_call_target_name(deco)
+            if target:
+                names.add(target)
+    return names
+
+
+def calls_only_its_own_patched_target(func: ast.FunctionDef) -> bool:
+    """The mock-hides-the-fake pattern: a test patches symbol X, then its
+    only 'real execution' signal is calling X itself -- which, patched,
+    just returns whatever the test configured. It isn't testing X; it's
+    testing that Mock returns what it was told to return. Distinct from
+    (and must NOT flag) the legitimate case of patching a DEPENDENCY while
+    calling a different, real orchestrating function -- this only fires
+    when every non-safe call in the function resolves to a name the same
+    function itself patched.
+
+    Real gap found 2026-08-08 auditing PCP's own facet-3 work: `classify_test_function`
+    marks a test 'real_execution' the moment it calls anything off the
+    safe-list, including a call to a name the test just patched -- a test
+    can be 100% fake (asserting a Mock returns its own configured value)
+    and still read as the strongest possible verdict. Rung-1, deterministic,
+    same file/tier as everything else here -- no prior-art search needed,
+    this is a structural AST correlation (does call-target intersect
+    patch-target), not a new detection category."""
+    patched = _patched_target_names(func)
+    if not patched:
+        return False
+    real_calls = set()
+    for c in ast.walk(func):
+        if not isinstance(c, ast.Call):
+            continue
+        if _is_subprocess_call(c):
+            return False  # a genuine subprocess call is real regardless of what else is patched
+        name = _call_name(c)
+        if (
+            name is not None and name not in _SAFE_CALL_NAMES
+            and name not in ("patch", "object") and not name.startswith("assert")
+        ):
+            real_calls.add(name)
+    if not real_calls:
+        return False
+    return real_calls.issubset(patched)
+
+
 def classify_test_function(func: ast.FunctionDef) -> str:
     """'real_execution' | 'grep_shaped' | 'other'.
 
@@ -189,11 +272,13 @@ def analyze_test_file(path: Path) -> dict:
         return {
             "path": str(path), "real_execution": 0, "grep_shaped": 0, "other": 0,
             "grep_shaped_functions": [], "assertion_free": 0, "assertion_free_functions": [],
+            "self_mocked": 0, "self_mocked_functions": [],
         }
 
     counts = {"real_execution": 0, "grep_shaped": 0, "other": 0}
     grep_shaped_functions = []
     assertion_free_functions = []
+    self_mocked_functions = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             verdict = classify_test_function(node)
@@ -205,10 +290,14 @@ def analyze_test_file(path: Path) -> dict:
                 })
             if not has_any_assertion(node):
                 assertion_free_functions.append(node.name)
+            if calls_only_its_own_patched_target(node):
+                self_mocked_functions.append(node.name)
     return {
         "path": str(path), **counts, "grep_shaped_functions": grep_shaped_functions,
         "assertion_free": len(assertion_free_functions),
         "assertion_free_functions": assertion_free_functions,
+        "self_mocked": len(self_mocked_functions),
+        "self_mocked_functions": self_mocked_functions,
     }
 
 
@@ -235,6 +324,7 @@ def analyze_test_composition(project_root: Path) -> dict:
     total_other = sum(f["other"] for f in per_file)
     total = total_real + total_grep + total_other
     total_assertion_free = sum(f["assertion_free"] for f in per_file)
+    total_self_mocked = sum(f["self_mocked"] for f in per_file)
 
     return {
         "total_test_functions": total,
@@ -244,6 +334,8 @@ def analyze_test_composition(project_root: Path) -> dict:
         "grep_shaped_ratio": round(total_grep / total, 4) if total else 0.0,
         "assertion_free": total_assertion_free,
         "assertion_free_ratio": round(total_assertion_free / total, 4) if total else 0.0,
+        "self_mocked": total_self_mocked,
+        "self_mocked_ratio": round(total_self_mocked / total, 4) if total else 0.0,
         "files": per_file,
         "scope_note": "Python only (stdlib ast) -- other languages' test files are not analyzed.",
     }

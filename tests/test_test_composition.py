@@ -9,6 +9,7 @@ import textwrap
 
 from pcp.test_composition import (
     classify_test_function, analyze_test_file, analyze_test_composition, has_any_assertion,
+    calls_only_its_own_patched_target,
 )
 
 
@@ -132,6 +133,7 @@ def test_analyze_test_file_fails_open_on_syntax_error(tmp_path):
     assert result == {
         "path": str(f), "real_execution": 0, "grep_shaped": 0, "other": 0,
         "grep_shaped_functions": [], "assertion_free": 0, "assertion_free_functions": [],
+        "self_mocked": 0, "self_mocked_functions": [],
     }
 
 
@@ -270,3 +272,113 @@ def test_analyze_test_composition_empty_project_is_zero_not_error(tmp_path):
     result = analyze_test_composition(tmp_path)
     assert result["total_test_functions"] == 0
     assert result["grep_shaped_ratio"] == 0.0
+
+
+# ── mock-hides-the-fake detection (2026-08-08) ──
+
+def test_flags_a_test_that_only_calls_its_own_patched_target():
+    """The exact fake pattern: patch compute_score, then call compute_score
+    (which is now the Mock) and assert it returns what was just configured.
+    Proves nothing about real compute_score."""
+    func = _func("""
+        def test_compute_score():
+            from unittest.mock import patch
+            with patch("mymodule.compute_score") as mock_compute:
+                mock_compute.return_value = 42
+                result = mymodule.compute_score(1, 2)
+                assert result == 42
+    """)
+    assert calls_only_its_own_patched_target(func) is True
+
+
+def test_does_not_flag_patching_a_dependency_while_calling_real_code():
+    """Legitimate: patches a DIFFERENT symbol (the dependency) while
+    calling the real orchestrating function under test."""
+    func = _func("""
+        def test_orchestrator():
+            from unittest.mock import patch
+            with patch("mymodule.slow_external_call") as mock_ext:
+                mock_ext.return_value = "fake-response"
+                result = mymodule.orchestrate(1, 2)
+                assert result == "processed:fake-response"
+    """)
+    assert calls_only_its_own_patched_target(func) is False
+
+
+def test_does_not_flag_a_test_with_no_patching_at_all():
+    func = _func("""
+        def test_plain():
+            result = compute_score(1, 2)
+            assert result == 3
+    """)
+    assert calls_only_its_own_patched_target(func) is False
+
+
+def test_does_not_flag_when_a_real_subprocess_call_is_also_present():
+    func = _func("""
+        def test_mixed():
+            from unittest.mock import patch
+            with patch("mymodule.compute_score") as mock_compute:
+                mock_compute.return_value = 42
+                mymodule.compute_score(1, 2)
+                import subprocess
+                subprocess.run(["./real_binary"])
+    """)
+    assert calls_only_its_own_patched_target(func) is False
+
+
+def test_mock_assertion_calls_alongside_fake_target_still_flagged():
+    """A mock introspection call (assert_called_once_with) sitting next to
+    the fake target call must not dilute the detection -- the core claim
+    (compute_score returns 42) is still entirely mocked."""
+    func = _func("""
+        def test_compute_score():
+            from unittest.mock import patch
+            with patch("mymodule.compute_score") as mock_compute:
+                mock_compute.return_value = 42
+                result = mymodule.compute_score(1, 2)
+                assert result == 42
+                mock_compute.assert_called_once_with(1, 2)
+    """)
+    assert calls_only_its_own_patched_target(func) is True
+
+
+def test_patch_object_form_also_detected():
+    func = _func("""
+        def test_compute_score():
+            from unittest.mock import patch
+            with patch.object(mymodule, "compute_score") as mock_compute:
+                mock_compute.return_value = 42
+                result = mymodule.compute_score(1, 2)
+                assert result == 42
+    """)
+    assert calls_only_its_own_patched_target(func) is True
+
+
+def test_decorator_style_patch_also_detected():
+    func = _func("""
+        @patch("mymodule.compute_score")
+        def test_compute_score(mock_compute):
+            mock_compute.return_value = 42
+            result = mymodule.compute_score(1, 2)
+            assert result == 42
+    """)
+    assert calls_only_its_own_patched_target(func) is True
+
+
+def test_analyze_test_file_reports_self_mocked_functions(tmp_path):
+    f = tmp_path / "test_fake_mock.py"
+    f.write_text(textwrap.dedent("""
+        from unittest.mock import patch
+
+        def test_fake():
+            with patch("mymodule.compute_score") as mock_compute:
+                mock_compute.return_value = 42
+                assert mymodule.compute_score(1, 2) == 42
+
+        def test_real():
+            assert compute_score(1, 2) == 3
+    """))
+    result = analyze_test_file(f)
+    assert result["self_mocked"] == 1
+    assert result["self_mocked_functions"] == ["test_fake"]

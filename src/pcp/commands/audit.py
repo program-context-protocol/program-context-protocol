@@ -330,6 +330,7 @@ def _append_trend(
     if test_composition_result is not None:
         entry["grep_shaped_ratio"] = test_composition_result.get("grep_shaped_ratio")
         entry["assertion_free"] = test_composition_result.get("assertion_free")
+        entry["self_mocked"] = test_composition_result.get("self_mocked")
     if falsegreen_result is not None:
         entry["falsegreen_findings"] = len(falsegreen_result["findings"])
     if flaky_detect_result is not None and flaky_detect_result.get("available"):
@@ -492,6 +493,23 @@ def _write_audit_md(
                     lines.append(f"- `{f['path']}`: {f['assertion_free']} — {names}")
                 if len(af_files) > MAX_FINDINGS_SHOWN:
                     lines.append(f"- _...and {len(af_files) - MAX_FINDINGS_SHOWN} more file(s)_")
+            if tc.get("self_mocked", 0) > 0:
+                smpct = tc["self_mocked_ratio"] * 100
+                lines += [
+                    "", f"⚠ **{tc['self_mocked']} self-mocked** ({smpct:.0f}%) — patches the exact symbol "
+                    "it then calls and asserts against. Proves the Mock returns what it was configured "
+                    "to return, not that the real code works.",
+                ]
+                sm_files = sorted(
+                    (f for f in tc["files"] if f.get("self_mocked", 0) > 0),
+                    key=lambda f: f["self_mocked"], reverse=True,
+                )
+                lines += ["", "### Self-mocked tests"]
+                for f in sm_files[:MAX_FINDINGS_SHOWN]:
+                    names = ", ".join(f"`{n}`" for n in f["self_mocked_functions"][:5])
+                    lines.append(f"- `{f['path']}`: {f['self_mocked']} — {names}")
+                if len(sm_files) > MAX_FINDINGS_SHOWN:
+                    lines.append(f"- _...and {len(sm_files) - MAX_FINDINGS_SHOWN} more file(s)_")
 
     if mutation_confirm_result is None:
         lines += ["", "## Mutation Confirmation (empirical follow-up)", "",
@@ -669,6 +687,8 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutat
         )
         if tc.get("assertion_free", 0) > 0:
             console.print(f"[red]{tc['assertion_free']} assertion-free test(s)[/red] — checks nothing at all")
+        if tc.get("self_mocked", 0) > 0:
+            console.print(f"[red]{tc['self_mocked']} self-mocked test(s)[/red] — asserts against its own patched target")
 
     if with_mutation_confirm:
         if mutation_confirm_result is None:
