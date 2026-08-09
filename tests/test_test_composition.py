@@ -8,7 +8,7 @@ import ast
 import textwrap
 
 from pcp.test_composition import (
-    classify_test_function, analyze_test_file, analyze_test_composition,
+    classify_test_function, analyze_test_file, analyze_test_composition, has_any_assertion,
 )
 
 
@@ -129,7 +129,105 @@ def test_analyze_test_file_fails_open_on_syntax_error(tmp_path):
     f = tmp_path / "test_broken.py"
     f.write_text("def test_x(:\n    this is not valid python\n")
     result = analyze_test_file(f)
-    assert result == {"path": str(f), "real_execution": 0, "grep_shaped": 0, "other": 0, "grep_shaped_functions": []}
+    assert result == {
+        "path": str(f), "real_execution": 0, "grep_shaped": 0, "other": 0,
+        "grep_shaped_functions": [], "assertion_free": 0, "assertion_free_functions": [],
+    }
+
+
+# ── facet 3: assertion-free detection (2026-08-08) ──
+
+def test_has_any_assertion_true_for_plain_assert():
+    func = _func("""
+        def test_x():
+            assert 1 == 1
+    """)
+    assert has_any_assertion(func) is True
+
+
+def test_has_any_assertion_false_for_truly_empty_test():
+    func = _func("""
+        def test_setup_only():
+            x = compute_something()
+            y = x + 1
+    """)
+    assert has_any_assertion(func) is False
+
+
+def test_has_any_assertion_true_for_pytest_raises_context():
+    func = _func("""
+        def test_raises():
+            import pytest
+            with pytest.raises(ValueError):
+                do_thing()
+    """)
+    assert has_any_assertion(func) is True
+
+
+def test_has_any_assertion_true_for_unittest_style_self_assert():
+    func = _func("""
+        class T:
+            def test_x(self):
+                self.assertEqual(1, 1)
+    """)
+    # extract the method node, not the class
+    method = func.body[0]
+    assert has_any_assertion(method) is True
+
+
+def test_has_any_assertion_true_for_mock_assertion_method():
+    """Mock/MagicMock's own assert_called_once()/assert_not_called() etc. are
+    real assertions, called on an arbitrary variable name, not `self` --
+    real false positive found running this against PCP's own suite
+    (test_cross_vendor_off_by_default_never_called used mock_agy.assert_not_called()
+    with no plain `assert`, was wrongly flagged before this fix)."""
+    func = _func("""
+        def test_x():
+            mock_thing = MagicMock()
+            do_call(mock_thing)
+            mock_thing.assert_called_once()
+    """)
+    assert has_any_assertion(func) is True
+
+
+def test_has_any_assertion_false_for_unrelated_self_call():
+    func = _func("""
+        class T:
+            def test_x(self):
+                self.setup_thing()
+    """)
+    method = func.body[0]
+    assert has_any_assertion(method) is False
+
+
+def test_analyze_test_file_reports_assertion_free_functions(tmp_path):
+    f = tmp_path / "test_example2.py"
+    f.write_text(textwrap.dedent("""
+        def test_empty():
+            x = 1
+
+        def test_real():
+            assert 1 == 1
+    """))
+    result = analyze_test_file(f)
+    assert result["assertion_free"] == 1
+    assert result["assertion_free_functions"] == ["test_empty"]
+
+
+def test_analyze_test_composition_totals_assertion_free(tmp_path):
+    (tmp_path / "test_a.py").write_text(textwrap.dedent("""
+        def test_empty_one():
+            pass
+
+        def test_empty_two():
+            pass
+
+        def test_real():
+            assert 1 == 1
+    """))
+    result = analyze_test_composition(tmp_path)
+    assert result["assertion_free"] == 2
+    assert result["assertion_free_ratio"] == round(2 / 3, 4)
 
 
 def test_analyze_test_composition_matches_the_real_ratio_shape(tmp_path):

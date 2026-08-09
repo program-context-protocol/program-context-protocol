@@ -329,6 +329,7 @@ def _append_trend(
         entry["coverage_percent"] = coverage_result.get("percent")
     if test_composition_result is not None:
         entry["grep_shaped_ratio"] = test_composition_result.get("grep_shaped_ratio")
+        entry["assertion_free"] = test_composition_result.get("assertion_free")
     if falsegreen_result is not None:
         entry["falsegreen_findings"] = len(falsegreen_result["findings"])
     if flaky_detect_result is not None and flaky_detect_result.get("available"):
@@ -474,6 +475,23 @@ def _write_audit_md(
                     lines.append(f"- `{f['path']}`: {f['grep_shaped']} source-grep test(s)")
                 if len(grep_files) > MAX_FINDINGS_SHOWN:
                     lines.append(f"- _...and {len(grep_files) - MAX_FINDINGS_SHOWN} more file(s)_")
+            if tc.get("assertion_free", 0) > 0:
+                afpct = tc["assertion_free_ratio"] * 100
+                lines += [
+                    "", f"⚠ **{tc['assertion_free']} assertion-free** ({afpct:.0f}%) — no `assert`, "
+                    "`pytest.raises`/`warns`, or `self.assertX` anywhere in the function body. "
+                    "Worse than source-grep: this checks NOTHING, not even a name's existence.",
+                ]
+                af_files = sorted(
+                    (f for f in tc["files"] if f.get("assertion_free", 0) > 0),
+                    key=lambda f: f["assertion_free"], reverse=True,
+                )
+                lines += ["", "### Assertion-free tests"]
+                for f in af_files[:MAX_FINDINGS_SHOWN]:
+                    names = ", ".join(f"`{n}`" for n in f["assertion_free_functions"][:5])
+                    lines.append(f"- `{f['path']}`: {f['assertion_free']} — {names}")
+                if len(af_files) > MAX_FINDINGS_SHOWN:
+                    lines.append(f"- _...and {len(af_files) - MAX_FINDINGS_SHOWN} more file(s)_")
 
     if mutation_confirm_result is None:
         lines += ["", "## Mutation Confirmation (empirical follow-up)", "",
@@ -649,6 +667,8 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutat
             f"[{color}]{pct:.0f}% source-grep tests[/{color}] "
             f"({tc['grep_shaped']}/{tc['total_test_functions']}, {tc['real_execution']} real-execution){suffix}"
         )
+        if tc.get("assertion_free", 0) > 0:
+            console.print(f"[red]{tc['assertion_free']} assertion-free test(s)[/red] — checks nothing at all")
 
     if with_mutation_confirm:
         if mutation_confirm_result is None:

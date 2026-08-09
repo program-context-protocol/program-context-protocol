@@ -68,6 +68,58 @@ def _is_subprocess_call(call: ast.Call) -> bool:
     )
 
 
+_PYTEST_ASSERTION_CONTEXT_MANAGERS = ("raises", "warns", "deprecated_call")
+
+
+def _is_pytest_assertion_context(node: ast.AST) -> bool:
+    """`with pytest.raises(...):` / `pytest.warns(...)` / `pytest.deprecated_call()`
+    -- these ARE the assertion (a block that doesn't raise/warn fails the
+    `with`), just spelled as a context manager instead of `assert`."""
+    items = getattr(node, "items", None)
+    if items is None:
+        return False
+    for item in items:
+        call = item.context_expr
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr in _PYTEST_ASSERTION_CONTEXT_MANAGERS
+        ):
+            return True
+    return False
+
+
+def has_any_assertion(func: ast.FunctionDef) -> bool:
+    """Facet 3 of the testing prior-art sweep (2026-08-08) -- a test with
+    ZERO assertions of any kind (no `assert`, no `pytest.raises`/`warns`,
+    no `self.assertX`) proves nothing at all, a distinct and arguably worse
+    problem than grep-shaped (which at least checks something, however
+    weak). classify_test_function's 'other' bucket already conflated this
+    with 'has an assert but no recognized signal' -- this is the narrower,
+    honest check for the empty case specifically.
+
+    Prior-art check (2026-08-08): PyNose (JetBrains Research) is a PyCharm
+    IDE plugin, not a standalone CLI -- not embeddable in this codebase's
+    detect-and-shell-out pattern. pytest-smell (PyPI, MIT, a dissertation
+    research tool) was spiked directly: on a fixture with one genuinely
+    zero-assertion test and one real-assertion test, it missed the
+    zero-assertion test entirely and flagged the real-assertion test with a
+    nonsensical 'Assertion Roullete' (multiple-asserts smell) on a function
+    with exactly one assert -- unreliable, disqualified. Decision:
+    build-fresh. This is a rung-1 AST presence check (no assert anywhere =
+    True/False), the same tier and same file this session's own
+    test_composition.py check already occupies -- not a new dependency,
+    not a new module."""
+    for n in ast.walk(func):
+        if isinstance(n, ast.Assert):
+            return True
+        if isinstance(n, (ast.With, ast.AsyncWith)) and _is_pytest_assertion_context(n):
+            return True
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr.startswith("assert"):
+            return True  # self.assertEqual(...) (unittest) or mock_x.assert_called_once() (Mock/MagicMock)
+    return False
+
+
 def classify_test_function(func: ast.FunctionDef) -> str:
     """'real_execution' | 'grep_shaped' | 'other'.
 
@@ -134,10 +186,14 @@ def analyze_test_file(path: Path) -> dict:
     try:
         tree = ast.parse(path.read_text(errors="replace"))
     except (SyntaxError, OSError):
-        return {"path": str(path), "real_execution": 0, "grep_shaped": 0, "other": 0, "grep_shaped_functions": []}
+        return {
+            "path": str(path), "real_execution": 0, "grep_shaped": 0, "other": 0,
+            "grep_shaped_functions": [], "assertion_free": 0, "assertion_free_functions": [],
+        }
 
     counts = {"real_execution": 0, "grep_shaped": 0, "other": 0}
     grep_shaped_functions = []
+    assertion_free_functions = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             verdict = classify_test_function(node)
@@ -147,7 +203,13 @@ def analyze_test_file(path: Path) -> dict:
                     "test_name": node.name,
                     "targets": extract_grep_targets(node),
                 })
-    return {"path": str(path), **counts, "grep_shaped_functions": grep_shaped_functions}
+            if not has_any_assertion(node):
+                assertion_free_functions.append(node.name)
+    return {
+        "path": str(path), **counts, "grep_shaped_functions": grep_shaped_functions,
+        "assertion_free": len(assertion_free_functions),
+        "assertion_free_functions": assertion_free_functions,
+    }
 
 
 _SKIP_DIR_SEGMENTS = ("__pycache__", ".venv", "venv", "node_modules", ".pcp", ".git")
@@ -172,6 +234,7 @@ def analyze_test_composition(project_root: Path) -> dict:
     total_grep = sum(f["grep_shaped"] for f in per_file)
     total_other = sum(f["other"] for f in per_file)
     total = total_real + total_grep + total_other
+    total_assertion_free = sum(f["assertion_free"] for f in per_file)
 
     return {
         "total_test_functions": total,
@@ -179,6 +242,8 @@ def analyze_test_composition(project_root: Path) -> dict:
         "grep_shaped": total_grep,
         "other": total_other,
         "grep_shaped_ratio": round(total_grep / total, 4) if total else 0.0,
+        "assertion_free": total_assertion_free,
+        "assertion_free_ratio": round(total_assertion_free / total, 4) if total else 0.0,
         "files": per_file,
         "scope_note": "Python only (stdlib ast) -- other languages' test files are not analyzed.",
     }
