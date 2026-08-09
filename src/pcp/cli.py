@@ -48,6 +48,8 @@ from pcp.commands.build_status import build_status
 from pcp.commands.verify import verify
 from pcp.commands.build_plan import build_plan_cmd
 from pcp.commands.diff_reduce import diff_reduce
+from pcp.commands.traceability import traceability
+from pcp.commands.assumptions_cmd import assumptions_cmd
 
 
 @click.group()
@@ -106,3 +108,5 @@ cli.add_command(verify)
 cli.add_command(build_plan_cmd, name="build-plan")
 cli.add_command(self_update)
 cli.add_command(diff_reduce)
+cli.add_command(traceability)
+cli.add_command(assumptions_cmd, name="assumptions")

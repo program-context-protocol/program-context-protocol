@@ -23,7 +23,9 @@ from pcp.commands.kickoff import (
     check_capability_criterion_coverage, check_shared_entity_ownership,
     check_dependency_contract_documented, check_screen_coverage,
     check_module_logic_breakdown_coverage, check_prior_art_evidence,
+    check_assumptions_enumerated,
 )
+from pcp import assumptions as assumptions_store
 from pcp.commands.validate_strategy import (
     _build_user_prompt as build_val_prompt,
     SYSTEM_PROMPT as VAL_SYSTEM_PROMPT,
@@ -107,6 +109,8 @@ DECOMPOSE FIRST applies to shared DATA too: populate `shared_entities_enumerated
 
 DECOMPOSE FIRST applies to UI pages too: for a NEW criterion whose description implies a screen/page/view/dashboard/form, declare `screen` naming that page (e.g. "Code grading", "Sign-off queue") -- check the existing module's other criteria (given below) for an existing screen name to reuse before inventing a new one; two criteria for the same page must use the IDENTICAL screen value. Also set `screen` on an EXISTING criterion id if the intent is explicitly grouping/relabeling pages rather than adding new functionality. Omit `screen` entirely for a backend-only criterion.
 
+DECLARE ASSUMPTIONS: populate `assumptions_enumerated` with every material assumption THIS INTENT depends on being true (not the whole program's assumptions -- just what this change introduces or relies on) -- an external API's behavior, a data volume/scale figure, a user's technical level, a business rule not independently verified. One statement per assumption, specific enough to be falsifiable. Empty list if this intent genuinely introduces no new assumption (common for a small, same-shape addition).
+
 A real feature intent routinely spans MORE THAN ONE existing or new module (e.g. "add payments" may touch billing, notifications, and auth) -- do not force everything into a single module just because the schema used to only allow one. `modules` is a LIST: include one entry per module this intent actually touches, whether that's one module or several. Analyze which module (or modules) are responsible, and for each, generate the updated or new spec and acceptance criteria for that module only.
 
 Set `spec_changes` to null (omit the key or use JSON null) for a module entry whenever this intent needs NO module-level change -- e.g. a pure acceptance-criteria status change, a wording tweak to one criterion, adding a criterion that doesn't alter the module's description/dependencies/constraints. Emitting a non-null `spec_changes` causes that module's ENTIRE spec.yaml to be rewritten from your output -- do this only when a real module-level field is actually changing, never just because the module is being touched at all. When in doubt, prefer null.
@@ -118,6 +122,7 @@ You must output ONLY valid JSON — no prose, no markdown, no code fences.
 Output schema:
 {
   "capabilities_enumerated": ["Every distinct capability/requirement this intent implies, one per discrete thing -- populate BEFORE deciding modules."],
+  "assumptions_enumerated": ["Every material assumption THIS INTENT depends on being true, one statement per assumption -- see DECLARE ASSUMPTIONS instruction above. Empty list if none."],
   "shared_entities_enumerated": ["Every domain entity this intent introduces/touches that is referenced by more than one module -- empty list if none. Each must appear in exactly one module's owns_entities and every other referencing module's dependencies."],
   "overall_explanation": "A plain-English summary of what will be built and why, across all modules this intent touches.",
   "modules": [
@@ -602,6 +607,17 @@ def pm(intent: str, project_path: str | None):
             "   [dim]For any of these, `pcp inspiration-art --gap \"<capability>\"` proposes a "
             "researched category to cover it, instead of leaving the gap silent.[/dim]"
         )
+
+    # Assumptions log -- see pcp/assumptions.py's docstring / kickoff.py's own
+    # call site for the real gap this closes. pm's assumptions_enumerated is
+    # scoped to what THIS intent introduces, merged into the same durable
+    # program-wide store kickoff seeds.
+    assumption_statements = result.get("assumptions_enumerated", []) or []
+    added_assumptions = assumptions_store.merge_new(pcp_dir, assumption_statements, source="pm")
+    if added_assumptions:
+        console.print(f"[dim]Assumptions log: +{len(added_assumptions)} item(s) -> .pcp/assumptions.yaml[/dim]")
+    for w in check_assumptions_enumerated(result.get("capabilities_enumerated", []), assumption_statements):
+        console.print(f"[yellow]⚠  {w}[/yellow]")
 
     # Same check, one layer deeper -- any module whose spec now declares
     # module_logic_breakdown gets it cross-checked against its OWN criteria.

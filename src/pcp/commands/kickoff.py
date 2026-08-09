@@ -34,6 +34,8 @@ DECOMPOSE FIRST applies to shared DATA too: populate `shared_entities_enumerated
 
 DECOMPOSE FIRST applies to UI pages too: for a criterion whose description implies a screen/page/view/dashboard/form (not a backend-only criterion), declare `screen` naming that page (e.g. "Code grading", "Sign-off queue") -- decide this BEFORE writing the criterion, from the module's own breakdown, not after. Two or more criteria for the SAME page must use the IDENTICAL screen value so they group together; do not invent a new page name per criterion when several genuinely belong on one screen. Omit `screen` entirely for a criterion with no real UI surface.
 
+DECLARE ASSUMPTIONS: populate `assumptions_enumerated` with every material assumption this strategy actually depends on being true -- an external API's behavior, a data volume/scale figure, a user's technical level, a third-party service's availability, a business rule that isn't independently verified in the vision doc. One statement per assumption, specific enough to be falsifiable (e.g. "Users have a stable internet connection during grading", not "networking works"). This is IEEE/ISO 29148's SRS "Assumptions" section made a real, tracked field instead of scattered prose nobody re-reads -- the same failure mode as an un-updated objective.md: an assumption nobody wrote down can't be caught when it turns out false. Empty list only if the vision genuinely states everything as fact with nothing assumed (rare) -- if `capabilities_enumerated` is non-empty, `assumptions_enumerated` being empty is itself worth a second look.
+
 Decompose the vision into modules. Each module must cover a distinct set of features/requirements.
 The strategy decomposition must detail how these modules cover the objective.
 Also generate acceptance criteria for each module (e.g. A001, A002) with clear descriptions.
@@ -53,6 +55,7 @@ You must output ONLY valid JSON — no prose, no markdown, no code fences.
 Output schema:
 {
   "capabilities_enumerated": ["Every distinct capability/requirement the vision implies, one per discrete thing a user or the business needs -- populate this BEFORE deciding modules, per the DECOMPOSE FIRST instruction above."],
+  "assumptions_enumerated": ["Every material assumption this strategy depends on being true, one statement per assumption -- see the DECLARE ASSUMPTIONS instruction above."],
   "shared_entities_enumerated": ["Every domain entity OR event/message (e.g. 'Task', 'Submission', 'TaskGraded event') referenced by more than one module -- empty list if genuinely none are shared. Each one must appear in exactly one module's owns_entities and every other referencing module's dependencies, per the DECOMPOSE FIRST instruction above. This covers BEHAVIOR too, not just field shape: the owning module's criteria should define valid state transitions/lifecycle for an entity that has one (e.g. Task's draft->submitted->graded->reviewed flow) -- another module changing that entity's state without depending on the owner is the same drift as inventing its fields independently."],
   "objective": "# Program Objective\\n\\n## Why This Exists\\n[Explain why]\\n\\n## What Success Looks Like\\n1. [Outcome 1]\\n\\n## Out of Scope\\n- [Out of scope items]",
   "target_state": "# Target State\\n\\n[Ideal end state]",
@@ -400,6 +403,24 @@ def check_capability_criterion_coverage(capabilities: list[str], module_acceptan
         if isinstance(c, dict)
     )
     return _keyword_miss_check(capabilities, combined_criteria_text, "Capability", "any criterion's description")
+
+
+def check_assumptions_enumerated(capabilities: list[str], assumption_statements: list[str]) -> list[str]:
+    """Deterministic, no LLM -- same tier as check_capability_coverage. A real
+    vision/intent that enumerates real capabilities but declares ZERO
+    assumptions is the unusual case, not the common one: every non-trivial
+    strategy relies on SOMETHING unverified (an external API's behavior, a
+    data volume, a user's technical level). Presence-based nudge, not a
+    keyword check -- there's no coverage TEXT to keyword-match assumptions
+    against, just a "did generation skip this field entirely" signal, same
+    posture as check_screen_coverage's immediate-warning style."""
+    if capabilities and not assumption_statements:
+        return [
+            "assumptions_enumerated is empty despite capabilities_enumerated listing "
+            f"{len(capabilities)} capability(ies) -- review whether this strategy genuinely "
+            "makes no unstated assumptions, or generation skipped the field."
+        ]
+    return []
 
 
 def check_shared_entity_ownership(shared_entities: list[str], module_specs: dict) -> list[str]:
@@ -893,6 +914,20 @@ def kickoff(vision_file: str, project_path: str, force: bool):
             "   [dim]For any of these, `pcp inspiration-art --gap \"<capability>\"` proposes a "
             "researched category to cover it, instead of leaving the gap silent.[/dim]"
         )
+
+    # Assumptions log -- see pcp/assumptions.py's docstring for the real gap
+    # this closes (IEEE 29148's SRS "Assumptions" section, made a real
+    # tracked field). Persisted separately from the ephemeral capabilities_
+    # enumerated list: assumptions get revisited/confirmed/invalidated over
+    # the program's life via `pcp assumptions`, so they need a durable store,
+    # not just a one-shot cross-check.
+    from pcp import assumptions as assumptions_store
+    assumption_statements = result.get("assumptions_enumerated", []) or []
+    added_assumptions = assumptions_store.merge_new(pcp_dir, assumption_statements, source="kickoff")
+    if added_assumptions:
+        console.print(f"[dim]Assumptions log: +{len(added_assumptions)} item(s) -> .pcp/assumptions.yaml[/dim]")
+    for w in check_assumptions_enumerated(result.get("capabilities_enumerated", []), assumption_statements):
+        console.print(f"[yellow]⚠  {w}[/yellow]")
 
     # Same check, one layer deeper (module_logic_breakdown vs. each
     # module's OWN criteria) -- see check_module_logic_breakdown_coverage.

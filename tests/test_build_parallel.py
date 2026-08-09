@@ -804,6 +804,8 @@ def test_no_unregistered_pcp_runtime_writer():
         "deploy_log.yaml", "narrative_lint.md", "audit.md", "provenance.md",
         "architecture_justification.md", "design_audit.md", "control_audit.md",
         "build_report.md", "dashboard.html", "pcp.md",
+        "assumptions.yaml", "assumptions.md",  # pcp kickoff/pm/assumptions -- not build-time
+        "traceability.md",                     # pcp traceability -- not build-time
     }
     registered = {p.removeprefix(".pcp/") for p in _PCP_OPERATIONAL_PATHS}
     registered_dirs = {d.removeprefix(".pcp/").rstrip("/") for d in _PCP_OPERATIONAL_DIRS}
