@@ -181,16 +181,30 @@ territory — `pcp doctor` and `pcp --help` are the live source of truth.
 
 ## Install
 
-Requires `git` and the `claude` CLI on `PATH`.
+Requires `git` and the `claude` CLI on `PATH`. `opa` (Open Policy Agent) is
+optional — without it, OPA-backed checks (escalation routing, bypass-reason
+rejection, coupling-threshold bands) fall back to conservative hardcoded
+defaults instead of failing.
 
 ```
 pip install program-context-protocol
 pcp init
 ```
 
-Run `pcp doctor` to check your environment. See `GETTING_STARTED.md` for
-prerequisites, what gets tracked in git vs. not, the `--yes`/unattended trust
-boundary, and where to look when something fails.
+Run `pcp doctor` to check your environment — it reports exactly which
+required/optional tools it found. `pcp init`'s own `.gitignore` scaffold
+tracks `.pcp/`'s governance files (`objective.md`, specs, `ci_rules.yaml`)
+in git deliberately — they're the spec-as-truth this tool is built around —
+and ignores only the run-time operational writes (`telemetry.jsonl`,
+`decision_log.jsonl`, evidence/transcripts), the same way you'd ignore a
+log file. (This repo's own `.pcp/` is a deliberate exception: it dogfoods
+itself, and gitignores that state entirely as internal-only — don't expect
+your own project's `.pcp/` to behave that way.)
+
+`pcp build --yes` / `pcp deploy --yes` skip the interactive confirm gating
+a `shell=True` install/deploy step sourced from `.pcp/integrations.yaml` or
+a build candidate's own install command — not a sandbox, no allowlist. Only
+use `--yes` where you already trust that config.
 
 To develop PCP itself instead (clone + editable install):
 
@@ -199,6 +213,12 @@ git clone https://github.com/program-context-protocol/program-context-protocol
 cd program-context-protocol
 pip install -e .
 ```
+
+When something fails: `pcp doctor --check` first, then `.pcp/build_report.md`
+(per-criterion evidence after a run), `pcp build-status` (live view of one in
+progress), `pcp escalations` (anything flagged for a human — `ack` ≠
+resolved), or `pcp telemetry`/`pcp provenance` for the full per-control audit
+trail.
 
 ## Status
 
