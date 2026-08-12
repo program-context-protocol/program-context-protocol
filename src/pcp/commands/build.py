@@ -603,7 +603,7 @@ def _load_merge_regenerated_globs(pcp_dir: Path) -> list[str]:
 
     `pcp init` now scaffolds this with a short default pattern list (common
     test-runner scratch outputs) rather than leaving it purely reactive --
-    Win2Mac 2026-08-08 hit the identical Project W shape independently
+    Project W 2026-08-08 hit the identical Project W shape independently
     (report.json) weeks after Project W's own fix landed, because nothing
     primed a fresh project with the well-known patterns; a human still owns
     and edits the file freely from there. `_resolve_regenerated_conflicts`
@@ -682,7 +682,7 @@ def _resolve_regenerated_conflicts(project_root: Path, pcp_dir: Path | None) -> 
     Closes a gap `_discard_regenerated_files_before_merge` can't:  that
     helper only clears uncommitted dirt BEFORE the merge starts, so a
     regenerated file the agent actually committed on its own branch still
-    reaches a real merge conflict. Real incident, Win2Mac 2026-08-08:
+    reaches a real merge conflict. Real incident, Project W 2026-08-08:
     report.json (pytest scratch output) got committed on 3 separate
     criterion branches, hitting add/add or content conflicts every time --
     the pre-merge discard never saw it because it was never dirty at merge

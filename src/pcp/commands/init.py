@@ -933,7 +933,7 @@ MERGE_REGENERATED_GLOBS_TEMPLATE = """\
 # resolution. Only ever touches a path matching a pattern below; real agent
 # work is never at risk.
 #
-# Seeded with common test-runner/build scratch outputs (Win2Mac dogfood
+# Seeded with common test-runner/build scratch outputs (Project W dogfood
 # 2026-08-08 — report.json, pytest scratch output, repeatedly collided across
 # parallel criterion branches, both as uncommitted dirt AND as a real
 # committed conflict). Add project-specific patterns below; delete a default
