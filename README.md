@@ -188,8 +188,11 @@ pip install program-context-protocol
 pcp init
 ```
 
-Run `pcp doctor` to check your environment. To develop PCP itself instead
-(clone + editable install):
+Run `pcp doctor` to check your environment. See `GETTING_STARTED.md` for
+prerequisites, what gets tracked in git vs. not, the `--yes`/unattended trust
+boundary, and where to look when something fails.
+
+To develop PCP itself instead (clone + editable install):
 
 ```
 git clone https://github.com/program-context-protocol/program-context-protocol
