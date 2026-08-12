@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "program-context-protocol"
-version = "0.13.20"
+version = "0.14.0"
 description = "PCP — prevent LLM hallucination and context drift across dev sessions"
 readme = "README.md"
 keywords = [
@@ -40,7 +40,7 @@ visual = ["playwright>=1.40"]
 otel = ["opentelemetry-api>=1.24", "opentelemetry-sdk>=1.24", "opentelemetry-exporter-otlp-proto-http>=1.24"]
 # C-language coverage for test_composition_c.py's fake-test detection
 # (backlog #1, 2026-08-09 -- test_composition.py's own scope_note admits
-# Python-only, proven a real gap by the win2mac/WRE C-adapter dogfood
+# Python-only, proven a real gap by the Project W/WRE C-adapter dogfood
 # session). Real prior art, not a hand-rolled C parser -- tree-sitter is a
 # proven multi-language incremental parser, one dependency covers C now and
 # other languages later without re-architecting per language.

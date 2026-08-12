@@ -338,7 +338,7 @@ def oracle_traceability_risk(func: ast.FunctionDef, source_literals: "Counter") 
     """The literal(s) this test asserts as correct that ALSO appear as a
     hardcoded literal inside the implementation it's importing from.
 
-    Real incident this closes (2026-08-09, win2mac/avrt dogfood): a Mach
+    Real incident this closes (2026-08-09, Project W/avrt dogfood): a Mach
     thread-scheduling call was stripped down to a hardcoded no-op fallback
     value, and the test asserting the function "worked" simply compared the
     result against that same hardcoded literal -- passing honestly, proving

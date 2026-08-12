@@ -1,7 +1,7 @@
 """Auto-triggered cross-model adversarial review for native/IPC-bridging
 criteria (CTRL-042, 2026-08-09).
 
-Real gap this closes, named directly in the win2mac/pisco-sour-wre
+Real gap this closes, named directly in the Project W/pisco-sour-wre
 dogfood session (see memory `project_pcp_learnings_from_win2mac_debug_2026_08_09`):
 a self-testing build agent verifies its own code against its own test
 harness using its own deployment/execution assumptions. If that assumption

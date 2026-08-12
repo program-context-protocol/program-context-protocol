@@ -1,5 +1,5 @@
 """C-language test-suite composition audit (2026-08-09, backlog #1 --
-fake-test detection was Python-only). Real incident this closes: win2mac's
+fake-test detection was Python-only). Real incident this closes: Project W's
 avrt adapter had a Mach call stripped to a hardcoded fallback literal, and
 its test asserted against that exact same literal -- written in C, invisible
 to test_composition.py's Python-ast-only pass."""

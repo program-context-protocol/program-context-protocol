@@ -213,7 +213,7 @@ def _run_test_composition_check(project_root: Path) -> dict:
 
 def _run_c_test_composition_check(project_root: Path) -> dict:
     """C counterpart to `_run_test_composition_check` (backlog #1, 2026-08-09
-    -- fake-test detection was Python-only, proven by the win2mac/WRE
+    -- fake-test detection was Python-only, proven by the Project W/WRE
     dogfood session). Always runs (never skipped for lack of a project
     finding), returns `available: False` gracefully when the optional
     `tree-sitter`/`tree-sitter-c` extra isn't installed -- same posture as

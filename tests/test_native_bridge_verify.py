@@ -1,6 +1,6 @@
 """CTRL-042 (2026-08-09) -- auto-triggered cross-model adversarial review for
 logic_tier:1 criteria touching a native/IPC boundary. Closes the gap named
-directly in the win2mac dogfood session: a self-testing build agent's own
+directly in the Project W dogfood session: a self-testing build agent's own
 deployment/execution assumptions can be silently wrong in a way nothing
 inside its own loop can reveal (schannel's real incident). See
 native_bridge_verify.py's module docstring for the full case."""
