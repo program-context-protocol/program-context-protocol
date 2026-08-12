@@ -18,6 +18,7 @@ except ImportError:  # Windows -- no-op lock, same best-effort posture as
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir, get_modules_dir
 from pcp.llm import client as llm
 from pcp.pcp_status import write_pcp_md
+from pcp import protected_writes
 from pcp.commands.kickoff import (
     _normalize_acceptance, _normalize_spec, check_capability_coverage,
     check_capability_criterion_coverage, check_shared_entity_ownership,
@@ -392,7 +393,9 @@ def _write_one_module_locked(mod_dir: Path, mod_name: str, mod_result: dict, kno
             spec_changes["category_reference"] = existing_spec["category_reference"]
 
         coercion_warnings += _normalize_spec(spec_changes, mod_name)
-        spec_path.write_text(yaml.dump(spec_changes, default_flow_style=False))
+        spec_text = yaml.dump(spec_changes, default_flow_style=False)
+        spec_path.write_text(spec_text)
+        protected_writes.record_approved_write(protected_writes.pcp_dir_of(spec_path), spec_path, spec_text)
 
     # Save/Merge acceptance.yaml
     existing_criteria = []
@@ -455,7 +458,9 @@ def _write_one_module_locked(mod_dir: Path, mod_name: str, mod_result: dict, kno
     # upgrades any pre-existing criterion (e.g. from an old 1.0-era module)
     # that's missing logic_tier/build_vs_buy the first time pm touches it.
     coercion_warnings += _normalize_acceptance(merged_acceptance, mod_name)
-    acc_path.write_text(yaml.dump(merged_acceptance, default_flow_style=False))
+    acc_text = yaml.dump(merged_acceptance, default_flow_style=False)
+    acc_path.write_text(acc_text)
+    protected_writes.record_approved_write(protected_writes.pcp_dir_of(acc_path), acc_path, acc_text)
 
     return coercion_warnings
 

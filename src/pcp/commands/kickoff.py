@@ -10,6 +10,7 @@ import yaml
 from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir, get_modules_dir
+from pcp import protected_writes
 from pcp.schema.validator import validate_file
 from pcp.llm import client as llm
 from pcp.commands.init import ADR_EXAMPLE, DOMAIN_KB_TEMPLATE
@@ -162,6 +163,9 @@ Output schema:
 def _write_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+    # Stamps this exact content as approved so check.py's protected_path
+    # rule recognizes it as human-authorized -- see protected_writes.py.
+    protected_writes.record_approved_write(protected_writes.pcp_dir_of(path), path, content)
 
 
 def _max_vision_chars() -> int:

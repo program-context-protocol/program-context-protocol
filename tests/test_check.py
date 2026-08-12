@@ -223,12 +223,65 @@ def test_protected_path_rule_inert_outside_agent_session(tmp_path, monkeypatch):
     assert violations == []
 
 
-def test_protected_path_rule_blocks_inside_agent_session(monkeypatch):
+def test_protected_path_rule_blocks_inside_agent_session(monkeypatch, tmp_path):
     monkeypatch.setenv("PCP_AGENT_SESSION", "1")
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    obj_path = pcp_dir / "objective.md"
+    obj_path.write_text("original content\n")
+    obj_path.write_text("agent edited this directly, never went through a gated command\n")
     rule = {"id": "R003", "scope": [".pcp/objective.md", ".pcp/strategy/**"]}
-    violations = run_protected_path_rule(rule, [".pcp/objective.md"])
+    violations = run_protected_path_rule(rule, [".pcp/objective.md"], tmp_path, pcp_dir)
     assert len(violations) == 1
     assert "protected spec file" in violations[0]
+
+
+def test_protected_path_rule_allows_approved_write_inside_agent_session(monkeypatch, tmp_path):
+    """An agent-session write that WAS stamped by a sanctioned command (e.g.
+    pcp amend called with --yes from inside pcp build) is allowed through --
+    the block targets unapproved direct edits, not the gated commands
+    themselves."""
+    monkeypatch.setenv("PCP_AGENT_SESSION", "1")
+    from pcp import protected_writes
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    obj_path = pcp_dir / "objective.md"
+    obj_path.write_text("original content\n")
+    new_content = "sanctioned rewrite via pcp amend\n"
+    obj_path.write_text(new_content)
+    protected_writes.record_approved_write(pcp_dir, obj_path, new_content)
+    rule = {"id": "R003", "scope": [".pcp/objective.md", ".pcp/strategy/**"]}
+    violations = run_protected_path_rule(rule, [".pcp/objective.md"], tmp_path, pcp_dir)
+    assert violations == []
+
+
+def test_protected_path_rule_blocks_outside_agent_session_after_grandfather(monkeypatch, tmp_path):
+    # Explicit, not ambient: build.py's own real build() sets this env var
+    # directly (not via monkeypatch) for the CLI process's lifetime, which
+    # can leak across tests sharing one pytest process if a build test runs
+    # first. This test's whole point is the outside-agent-session path, so
+    # it must not depend on nothing else having touched this var.
+    monkeypatch.delenv("PCP_AGENT_SESSION", raising=False)
+    """Outside a pcp-build agent session, a path with no prior approval
+    record gets a one-time grandfather pass so an EXISTING project upgrading
+    to this mechanism doesn't have its very next ordinary commit blocked by
+    history that predates it -- but the following unapproved edit to the
+    same path still blocks. Closes a real gap: the rule previously only
+    fired inside pcp build's own agent session, so any other agent (or a
+    human editing directly) could rewrite a protected file with zero
+    warning -- confirmed by an independent cold-clone review, 2026-08-12."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    obj_path = pcp_dir / "objective.md"
+    obj_path.write_text("original content\n")
+    rule = {"id": "R003", "scope": [".pcp/objective.md", ".pcp/strategy/**"]}
+    # First check ever for this path -- no record exists yet, grandfathered.
+    violations = run_protected_path_rule(rule, [".pcp/objective.md"], tmp_path, pcp_dir)
+    assert violations == []
+    # A second, different unapproved edit right after -- now must block.
+    obj_path.write_text("unapproved direct edit\n")
+    violations = run_protected_path_rule(rule, [".pcp/objective.md"], tmp_path, pcp_dir)
+    assert len(violations) == 1
 
 
 # ── is_syntax_only_yaml_fix — deterministic carve-out for pure parse-error fixes ──

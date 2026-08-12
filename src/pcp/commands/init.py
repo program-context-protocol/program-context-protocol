@@ -7,6 +7,8 @@ from pathlib import Path
 import click
 from rich.console import Console
 
+from pcp import protected_writes
+
 console = Console()
 
 
@@ -913,6 +915,7 @@ venv/
 .pcp/notify_heartbeat.yaml
 .pcp/escalations.yaml
 .pcp/prune_log.yaml
+.pcp/approved_write_hashes.json
 .pcp/brd.md
 .pcp/brd_items.yaml
 .pcp/evidence/
@@ -1565,6 +1568,10 @@ def _write(path: Path, content: str, force: bool) -> bool:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+    # Stamps the freshly-scaffolded content as approved, so a brand-new
+    # project's very first commit doesn't hard-block on its own protected
+    # files -- see protected_writes.py.
+    protected_writes.record_approved_write(protected_writes.pcp_dir_of(path), path, content)
     return True
 
 

@@ -12,6 +12,7 @@ from rich.console import Console
 from pcp.pcp_dir import find_pcp_dir, get_modules_dir, NoPCPDir
 from pcp.schema.validator import validate_file, load_yaml
 from pcp.evidence_chain import set_append_only, clear_append_only
+from pcp import protected_writes
 
 console = Console()
 
@@ -244,35 +245,66 @@ def is_syntax_only_yaml_fix(old_text: str | None, new_text: str) -> bool:
     return _dequote(old_text) == _dequote(new_text)
 
 
-def run_protected_path_rule(rule: dict, staged_files: list[str], project_root: Path | None = None) -> list[str]:
-    """Violations for a check:protected_path ci_rule. Only enforced inside a
-    pcp-build agent session (PCP_AGENT_SESSION=1 in the environment, set by
-    build.py before spawning the coding agent) — a human's own interactive
-    commit (pcp pm, direct editing) never sets this and is never blocked.
+def run_protected_path_rule(
+    rule: dict, staged_files: list[str], project_root: Path | None = None, pcp_dir: Path | None = None,
+) -> list[str]:
+    """Violations for a check:protected_path ci_rule.
+
+    Originally only enforced inside a pcp-build agent session
+    (PCP_AGENT_SESSION=1) -- a human's own interactive commit was never
+    blocked by code, only by CLAUDE.md's doctrine wording (fixed 2026-07-25,
+    see spec_write.py's module docstring). That left a real gap: any OTHER
+    agent, or a human editing directly instead of through the gated
+    commands, could rewrite a protected file with zero warning -- confirmed
+    by an independent cold-clone review, 2026-08-12, which edited
+    objective.md directly and committed with no block at all.
+
+    Now hard-blocks by default: a staged protected-path file is allowed
+    through only if its exact content was stamped as approved by a
+    sanctioned write (pcp init's scaffold, or the propose/diff/approve path
+    behind pcp correct-objective/amend/kickoff/pm -- see protected_writes.py),
+    or if `[pcp-bypass: <rule id>: reason]` is on the commit (handled by the
+    caller, not here). Inside a pcp-build agent session, no first-run
+    leniency is given -- that path was always supposed to go through the
+    same gated commands as everything else, so an unstamped edit there is a
+    violation even on a project seeing this rule for the very first time.
+    Outside an agent session, a path with no prior record at all is
+    grandfathered (auto-approved) once, so an EXISTING project upgrading to
+    this check doesn't have its next ordinary commit blocked by history that
+    predates this mechanism.
 
     Carve-out, added 2026-07-08 after a real recurrence in Project O:
     a protected file that's currently invalid YAML (blocking validate-strategy/
-    architect-review project-wide) and an agent's fix touches ONLY quoting/
+    architect-review project-wide) and a fix that touches ONLY quoting/
     escaping is allowed through -- verified by is_syntax_only_yaml_fix(),
-    not by trusting the agent's own claim that "it's just a syntax fix"."""
-    if os.environ.get("PCP_AGENT_SESSION") != "1":
-        return []
+    not by trusting the committer's own claim that "it's just a syntax fix"."""
     scope = rule.get("scope", [])
+    agent_session = os.environ.get("PCP_AGENT_SESSION") == "1"
     violations = []
     for rel_path in staged_files:
         if not _match_scope(rel_path, scope):
             continue
-        if project_root is not None:
-            new_path = project_root / rel_path
-            if new_path.exists():
-                old_text = _git_show_head(project_root, rel_path)
-                new_text = new_path.read_text(errors="replace")
-                if is_syntax_only_yaml_fix(old_text, new_text):
-                    continue
+        if project_root is None:
+            continue
+        new_path = project_root / rel_path
+        if not new_path.exists():
+            continue
+        old_text = _git_show_head(project_root, rel_path)
+        new_text = new_path.read_text(errors="replace")
+        if is_syntax_only_yaml_fix(old_text, new_text):
+            continue
+        if pcp_dir is not None:
+            if agent_session:
+                approved = protected_writes.is_approved_exact(pcp_dir, new_path, new_text)
+            else:
+                approved, _grandfathered = protected_writes.check_approved(pcp_dir, new_path, new_text)
+            if approved:
+                continue
         violations.append(
-            f"{rel_path}: protected spec file modified by an agent session "
-            "(human-approved: use `pcp correct-objective` / `pcp pm` / "
-            "`pcp amend` — diff shown, human approves, then written)"
+            f"{rel_path}: protected spec file modified without an approved write "
+            "(use `pcp correct-objective` / `pcp pm` / `pcp amend` / `pcp kickoff` "
+            "— diff shown, human approves, then written — or add "
+            "`\\[pcp-bypass: <rule id>: reason]` for an immediate override)"
         )
     return violations
 
@@ -518,10 +550,10 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
         else:
             advisory_violations.append(entry)
 
-    # protected_path rules are diff-scoped, like ast_pattern — only fire inside
-    # a pcp-build agent session (see run_protected_path_rule's env-var check).
+    # protected_path rules are diff-scoped, like ast_pattern — see
+    # run_protected_path_rule's docstring for the approval-hash mechanism.
     for rule in protected_rules:
-        violations = run_protected_path_rule(rule, staged, project_root)
+        violations = run_protected_path_rule(rule, staged, project_root, pcp_dir)
         if staged_only and baseline_keys:
             violations = [v for v in violations if v not in baseline_keys]
         if not violations:
@@ -581,7 +613,7 @@ def check(project_path: str | None, commit_msg_file: str | None, file_list: str 
             if r.get("message"):
                 console.print(f"    [dim]Fix: {r['message']}[/dim]")
         console.print(
-            "\n[dim]To bypass: add [pcp-bypass: reason] to your commit message.[/dim]"
+            "\n[dim]To bypass: add \\[pcp-bypass: reason] to your commit message.[/dim]"
         )
         sys.exit(1)
 

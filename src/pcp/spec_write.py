@@ -42,7 +42,7 @@ import click
 import yaml
 from rich.console import Console
 
-from pcp import decision_log
+from pcp import decision_log, protected_writes
 from pcp.llm import client as llm
 from pcp.schema import validator
 
@@ -248,6 +248,7 @@ def propose_and_write(
             weakenings += [f"{t.name}: {w}" for w in detect_weakening(old_texts[t.key], new_texts[t.key])]
         t.path.parent.mkdir(parents=True, exist_ok=True)
         t.path.write_text(new_texts[t.key])
+        protected_writes.record_approved_write(pcp_dir, t.path, new_texts[t.key])
     console.print(f"[green]✓[/green] {', '.join(changed)} rewritten.")
 
     evidence = result.get("summary", "")
