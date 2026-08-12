@@ -11,10 +11,13 @@ HAS_OPA = shutil.which("opa") is not None
 
 
 def _scaffold_escalation_policy(pcp_dir):
+    # Sourced from the shipped template, not a local `.pcp/policies/` on
+    # disk -- that dir is gitignored/maintainer-local, so a fresh clone has
+    # none. Real incident, cold-clone review 2026-08-12.
+    from pcp.commands.init import POLICY_ESCALATION_TEMPLATE
     policies_dir = pcp_dir / "policies"
     policies_dir.mkdir(parents=True, exist_ok=True)
-    real = Path(".pcp") / "policies" / "escalation.rego"
-    (policies_dir / "escalation.rego").write_text(real.read_text())
+    (policies_dir / "escalation.rego").write_text(POLICY_ESCALATION_TEMPLATE)
 
 
 def test_record_escalation_noop_without_policy(tmp_path):

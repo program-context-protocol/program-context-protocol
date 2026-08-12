@@ -56,6 +56,20 @@ jobs:
           git config --global user.email "ci@localhost"
           git config --global user.name "CI"
 
+      # Without this, every OPA-backed test (test_policy.py,
+      # test_check.py's bypass-approval tests, test_build_escalation.py) is
+      # silently skipped via @pytest.mark.skipif(not HAS_OPA, ...) -- meaning
+      # the Decision Logic Layer had never actually been exercised by CI, on
+      # any commit, ever (found via an independent cold-clone review,
+      # 2026-08-12; those tests also had a separate bug, now fixed, where
+      # they read policy fixtures from a local gitignored .pcp/ that only
+      # ever existed on the maintainer's own machine).
+      - name: Install opa
+        run: |
+          sudo curl -sSfL -o /usr/local/bin/opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64_static
+          sudo chmod +x /usr/local/bin/opa
+          opa version
+
       - name: Install package
         run: pip install -e . pytest pytest-mock
 

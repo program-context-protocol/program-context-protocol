@@ -5,16 +5,33 @@ from unittest.mock import patch
 import pytest
 
 from pcp import policy
+from pcp.commands.init import (
+    POLICY_ESCALATION_TEMPLATE,
+    POLICY_BYPASS_TEMPLATE,
+    POLICY_COUPLING_TEMPLATE,
+    POLICY_DEPLOY_TEMPLATE,
+)
 
 HAS_OPA = shutil.which("opa") is not None
-REAL_POLICIES_DIR = policy.get_policies_dir(Path(".pcp"))
+
+# Sourced from the same templates `pcp init` actually ships, not a local
+# `.pcp/policies/` on disk -- that dir is gitignored (project-specific
+# dogfood state, never distributed), so a fresh clone has none and these
+# tests silently broke/degraded for anyone who wasn't the maintainer's own
+# machine. Real incident, cold-clone review 2026-08-12.
+_SHIPPED_POLICIES = {
+    "escalation.rego": POLICY_ESCALATION_TEMPLATE,
+    "bypass_approval.rego": POLICY_BYPASS_TEMPLATE,
+    "coupling_threshold.rego": POLICY_COUPLING_TEMPLATE,
+    "deploy_policy.rego": POLICY_DEPLOY_TEMPLATE,
+}
 
 
 def _copy_real_policies(pcp_dir):
     policies_dir = policy.get_policies_dir(pcp_dir)
     policies_dir.mkdir(parents=True)
-    for rego in REAL_POLICIES_DIR.glob("*.rego"):
-        (policies_dir / rego.name).write_text(rego.read_text())
+    for name, content in _SHIPPED_POLICIES.items():
+        (policies_dir / name).write_text(content)
 
 
 def test_opa_unavailable_returns_false_flag(tmp_path):

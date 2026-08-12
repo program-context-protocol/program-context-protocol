@@ -545,10 +545,13 @@ HAS_OPA = shutil.which("opa") is not None
 
 
 def _write_bypass_policy(pcp_dir):
+    # Sourced from the shipped template, not a local `.pcp/policies/` on
+    # disk -- that dir is gitignored/maintainer-local, so a fresh clone has
+    # none. Real incident, cold-clone review 2026-08-12.
+    from pcp.commands.init import POLICY_BYPASS_TEMPLATE
     policies_dir = pcp_dir / "policies"
     policies_dir.mkdir(parents=True, exist_ok=True)
-    real = Path(".pcp") / "policies" / "bypass_approval.rego"
-    (policies_dir / "bypass_approval.rego").write_text(real.read_text())
+    (policies_dir / "bypass_approval.rego").write_text(POLICY_BYPASS_TEMPLATE)
 
 
 @pytest.mark.skipif(not HAS_OPA, reason="opa binary not installed")
