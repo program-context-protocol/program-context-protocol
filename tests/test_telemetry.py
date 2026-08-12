@@ -107,3 +107,79 @@ def test_aggregate_handles_missing_module_field():
     records = [{"cycle": "build", "criterion_id": "X001"}]
     result = telemetry.aggregate(records)
     assert result["by_module"]["?"]["attempts"] == 1
+
+
+# ── issues-found-after-first-green (2026-08-09, backlog #3) ──
+
+def test_issues_after_first_green_flags_criterion_with_post_pass_issue():
+    records = [
+        {"timestamp": "2026-08-01T00:00:00Z", "module": "avrt", "criterion_id": "A001",
+         "cycle": "qa", "result": "pass", "check": "test_passes"},
+        {"timestamp": "2026-08-02T00:00:00Z", "module": "avrt", "criterion_id": "A001",
+         "cycle": "qa", "result": "block", "check": "architect-review"},
+        {"timestamp": "2026-08-03T00:00:00Z", "module": "avrt", "criterion_id": "A001",
+         "cycle": "qa", "result": "block", "check": "pressure-test"},
+    ]
+    result = telemetry.issues_after_first_green(records)
+    assert result["criteria_with_a_pass"] == 1
+    assert result["criteria_with_post_green_issues"] == 1
+    flagged = result["flagged"][0]
+    assert flagged["module"] == "avrt"
+    assert flagged["criterion_id"] == "A001"
+    assert flagged["issues_found_after"] == 2
+    assert flagged["issue_checks"] == ["architect-review", "pressure-test"]
+
+
+def test_issues_after_first_green_clean_criterion_not_flagged():
+    records = [
+        {"timestamp": "2026-08-01T00:00:00Z", "module": "add", "criterion_id": "A001",
+         "cycle": "qa", "result": "pass"},
+    ]
+    result = telemetry.issues_after_first_green(records)
+    assert result["criteria_with_a_pass"] == 1
+    assert result["criteria_with_post_green_issues"] == 0
+    assert result["flagged"] == []
+
+
+def test_issues_after_first_green_never_passed_is_not_applicable():
+    records = [
+        {"timestamp": "2026-08-01T00:00:00Z", "module": "add", "criterion_id": "A001",
+         "cycle": "qa", "result": "block"},
+        {"timestamp": "2026-08-02T00:00:00Z", "module": "add", "criterion_id": "A001",
+         "cycle": "qa", "result": "block"},
+    ]
+    result = telemetry.issues_after_first_green(records)
+    assert result["criteria_with_a_pass"] == 0
+    assert result["flagged"] == []
+
+
+def test_issues_after_first_green_issues_before_first_pass_dont_count():
+    """A failed attempt BEFORE the criterion first went green is normal
+    iteration, not a post-green regression -- must not be counted."""
+    records = [
+        {"timestamp": "2026-08-01T00:00:00Z", "module": "add", "criterion_id": "A001",
+         "cycle": "build", "result": "error"},
+        {"timestamp": "2026-08-02T00:00:00Z", "module": "add", "criterion_id": "A001",
+         "cycle": "qa", "result": "pass"},
+    ]
+    result = telemetry.issues_after_first_green(records)
+    assert result["criteria_with_post_green_issues"] == 0
+
+
+def test_issues_after_first_green_ignores_records_without_criterion_id():
+    records = [{"timestamp": "2026-08-01T00:00:00Z", "module": "add", "result": "pass"}]
+    result = telemetry.issues_after_first_green(records)
+    assert result["criteria_with_a_pass"] == 0
+
+
+def test_issues_after_first_green_sorted_worst_first():
+    records = [
+        {"timestamp": "2026-08-01T00:00:00Z", "module": "a", "criterion_id": "A1", "result": "pass"},
+        {"timestamp": "2026-08-02T00:00:00Z", "module": "a", "criterion_id": "A1", "result": "block"},
+        {"timestamp": "2026-08-01T00:00:00Z", "module": "b", "criterion_id": "B1", "result": "pass"},
+        {"timestamp": "2026-08-02T00:00:00Z", "module": "b", "criterion_id": "B1", "result": "block"},
+        {"timestamp": "2026-08-03T00:00:00Z", "module": "b", "criterion_id": "B1", "result": "error"},
+        {"timestamp": "2026-08-04T00:00:00Z", "module": "b", "criterion_id": "B1", "result": "block"},
+    ]
+    result = telemetry.issues_after_first_green(records)
+    assert [f["criterion_id"] for f in result["flagged"]] == ["B1", "A1"]

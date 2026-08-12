@@ -6,11 +6,26 @@ marked complete. See build.py's _run_adversarial_review docstring."""
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from pcp.commands.build import (
     _run_adversarial_review, _build_adversarial_review_prompt, _BuildBudget, BudgetExceeded,
 )
 from pcp import telemetry
 from pcp.llm import client as llm
+
+
+@pytest.fixture(autouse=True)
+def _fake_review_worktree(tmp_path):
+    """Worktree isolation (2026-08-09 retrofit) is real git plumbing --
+    these tests use a bare tmp_path, not a git repo, so the real
+    `_setup_review_worktree` would fail. Stand in with tmp_path itself
+    (worktree mechanics are covered by their own dedicated tests) so every
+    existing test here keeps exercising what it actually tests: the
+    reviewer subprocess/parsing logic, not git worktree creation."""
+    with patch("pcp.commands.build._setup_review_worktree", return_value=tmp_path), \
+         patch("pcp.commands.build._cleanup_review_worktree"):
+        yield
 
 
 def _envelope(result_obj, session_id="rev-1", cost=0.42):

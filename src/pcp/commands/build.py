@@ -37,6 +37,7 @@ from pcp import spend
 from pcp import uat
 from pcp.install_approvals import log_install_approval
 from pcp.capture import find_transcript_for_session, run_capture
+from pcp import native_bridge_verify
 
 console = Console()
 
@@ -518,6 +519,46 @@ def _seed_testmon_cache(project_root: Path, wt_path: Path) -> None:
         shutil.copy2(src, dst)
     except OSError:
         pass
+
+
+def _setup_review_worktree(project_root: Path) -> Path | None:
+    """Fresh, DISPOSABLE worktree for a review-only agent session (CTRL-041,
+    CTRL-043) -- deliberately NOT `_setup_worktree`, which is for build work
+    meant to eventually merge (named `feat/{module_name}` branch, reused
+    across runs via its own exists-check). A review session never commits,
+    never merges, and must never be handed a branch that persists or that a
+    later real build could collide with.
+
+    Detached HEAD, unique temp path per call (no module-name reuse) --
+    matters because a reviewing agent given real tool access (accept-edits
+    mode, or worse, --dangerously-skip-permissions for CTRL-043) can, if it
+    ignores its own instructions, edit or delete files. On the real
+    project_root that is a real incident; on a disposable worktree deleted
+    immediately after, it is nothing -- this is the actual safety mechanism,
+    not the prompt instruction alone (which both CTRL-041 and CTRL-043
+    already state is not independently verified to hold).
+
+    Returns None on any git failure (fails open -- caller must skip the
+    review rather than fall back to the unsafe project_root cwd; a review
+    that doesn't run is a missed check, a review pointed at the real repo
+    by a broken fallback is a real incident)."""
+    import tempfile
+    wt_path = Path(tempfile.mkdtemp(prefix="pcp-review-")) / "wt"
+    result = subprocess.run(
+        ["git", "worktree", "add", "--detach", str(wt_path), "HEAD"],
+        cwd=project_root, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return wt_path
+
+
+def _cleanup_review_worktree(project_root: Path, wt_path: Path) -> None:
+    """Unconditional -- called from a `finally` at every call site, same as
+    `_cleanup_worktree`'s posture, so a review that errors, times out, or
+    disputes the criterion never leaks a worktree."""
+    subprocess.run(["git", "worktree", "remove", str(wt_path), "--force"], cwd=project_root, capture_output=True)
+    shutil.rmtree(wt_path.parent, ignore_errors=True)
 
 
 def _setup_worktree(project_root: Path, module_name: str) -> Path:
@@ -3480,10 +3521,19 @@ def _run_adversarial_review(
     checker tier is the only way to make this guarantee without threading
     Maker's actual model choice through as another parameter.
 
-    Known limitation: relies on the prompt instruction, not a verified
-    read-only permission mode, to keep the reviewing agent from editing
-    files -- not independently confirmed safe against a reviewer that
-    ignores the instruction. Documented, not silently assumed solid."""
+    Worktree-isolated (2026-08-09 retrofit, prompted by CTRL-043's design
+    review): previously ran with cwd=project_root, the REAL checkout --
+    this function's own docstring already documented "relies on the prompt
+    instruction, not a verified read-only permission mode" as a known,
+    accepted limitation, but accepting that a reviewer COULD edit files is
+    very different when "files" means the real project vs. a disposable
+    worktree deleted immediately after. See `_setup_review_worktree`'s
+    docstring for why this is a dedicated helper, not `_setup_worktree`
+    (that one is for build work meant to merge). Safe by construction:
+    `_auto_commit_criterion` runs unconditionally right before
+    `_build_one_criterion` returns, so by the time this function is called
+    the criterion's changes are already committed to project_root's HEAD --
+    a fresh detached worktree from that HEAD sees them correctly."""
     if not c.get("adversarial_review"):
         return []
     if not diff.strip():
@@ -3497,80 +3547,362 @@ def _run_adversarial_review(
         console.print(f"[yellow]Adversarial review skipped for {mod['name']}/{c['id']}: session circuit breaker.[/yellow]")
         return []
 
-    console.print(f"[dim]Adversarial review ({mod['name']}/{c['id']}): spawning an independent reviewer...[/dim]")
-    prompt = _build_adversarial_review_prompt(mod["name"], c, diff)
-    session_id = str(uuid.uuid4())
-    cmd = [
-        _claude_bin(), "-p",
-        "--permission-mode", "acceptEdits",
-        "--output-format", "json",
-        "--max-budget-usd", _adversarial_review_max_budget_usd(),
-        "--session-id", session_id,
-        "--model", llm.ESCALATION_MODEL,
-    ]
-    proc = subprocess.Popen(
-        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, cwd=project_root, start_new_session=True,
-    )
+    review_wt = _setup_review_worktree(project_root)
+    if review_wt is None:
+        _qa_record(
+            pcp_dir, ctx, "adversarial-review", ["could not create an isolated review worktree"],
+            control_id="CTRL-041", result="error",
+        )
+        return []
+
     try:
-        stdout, stderr = proc.communicate(input=prompt, timeout=_adversarial_review_timeout_sec())
-    except subprocess.TimeoutExpired:
+        console.print(f"[dim]Adversarial review ({mod['name']}/{c['id']}): spawning an independent reviewer...[/dim]")
+        prompt = _build_adversarial_review_prompt(mod["name"], c, diff)
+        session_id = str(uuid.uuid4())
+        cmd = [
+            _claude_bin(), "-p",
+            "--permission-mode", "acceptEdits",
+            "--output-format", "json",
+            "--max-budget-usd", _adversarial_review_max_budget_usd(),
+            "--session-id", session_id,
+            "--model", llm.ESCALATION_MODEL,
+        ]
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=review_wt, start_new_session=True,
+        )
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.communicate()
-        # Infra failure, not a real finding -- fails OPEN, same posture as
-        # _gate_infrastructure_failure elsewhere in this file. A criterion
-        # must not be blocked forever because the reviewer's own process hung.
-        _qa_record(
-            pcp_dir, ctx, "adversarial-review", [f"timed out after {_adversarial_review_timeout_sec()}s"],
-            control_id="CTRL-041", result="error",
-        )
-        return []
-
-    if proc.returncode != 0:
-        _qa_record(
-            pcp_dir, ctx, "adversarial-review", [f"reviewer process exited {proc.returncode}: {stderr[-500:]}"],
-            control_id="CTRL-041", result="error",
-        )
-        return []
-
-    try:
-        envelope = json.loads(stdout)
-        if envelope.get("is_error"):
+            stdout, stderr = proc.communicate(input=prompt, timeout=_adversarial_review_timeout_sec())
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()
+            # Infra failure, not a real finding -- fails OPEN, same posture as
+            # _gate_infrastructure_failure elsewhere in this file. A criterion
+            # must not be blocked forever because the reviewer's own process hung.
             _qa_record(
-                pcp_dir, ctx, "adversarial-review", [envelope.get("result", "")[:500]],
+                pcp_dir, ctx, "adversarial-review", [f"timed out after {_adversarial_review_timeout_sec()}s"],
                 control_id="CTRL-041", result="error",
             )
             return []
-        with _STATE_LOCK:
-            _log_usage(
-                pcp_dir, "adversarial-review", None, envelope.get("session_id"),
-                envelope.get("usage", {}), envelope.get("total_cost_usd"),
+
+        if proc.returncode != 0:
+            _qa_record(
+                pcp_dir, ctx, "adversarial-review", [f"reviewer process exited {proc.returncode}: {stderr[-500:]}"],
+                control_id="CTRL-041", result="error",
             )
-        budget.add_cost(envelope.get("total_cost_usd"))
-        verdict = json.loads(envelope.get("result", "{}"))
-    except (json.JSONDecodeError, TypeError, KeyError) as e:
+            return []
+
+        try:
+            envelope = json.loads(stdout)
+            if envelope.get("is_error"):
+                _qa_record(
+                    pcp_dir, ctx, "adversarial-review", [envelope.get("result", "")[:500]],
+                    control_id="CTRL-041", result="error",
+                )
+                return []
+            with _STATE_LOCK:
+                _log_usage(
+                    pcp_dir, "adversarial-review", None, envelope.get("session_id"),
+                    envelope.get("usage", {}), envelope.get("total_cost_usd"),
+                )
+            budget.add_cost(envelope.get("total_cost_usd"))
+            verdict = json.loads(envelope.get("result", "{}"))
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            _qa_record(
+                pcp_dir, ctx, "adversarial-review", [f"could not parse reviewer verdict: {e}"],
+                control_id="CTRL-041", result="error",
+            )
+            return []
+
+        findings: list[str] = []
+        if verdict.get("is_real") is False:
+            red_flags = verdict.get("red_flags") or []
+            reasoning = verdict.get("reasoning", "")
+            findings.append(
+                f"Adversarial review (CTRL-041): the independent reviewer could NOT confirm "
+                f"{mod['name']}/{c['id']} is genuinely implemented "
+                f"(confidence={verdict.get('confidence', '?')}). Reasoning: {reasoning} "
+                f"Red flags: {'; '.join(red_flags) if red_flags else '(none listed)'}"
+            )
+
+        _qa_record(pcp_dir, ctx, "adversarial-review", findings, control_id="CTRL-041")
+        return findings
+    finally:
+        _cleanup_review_worktree(project_root, review_wt)
+
+
+def _run_native_bridge_cross_model_check(
+    pcp_dir: Path, project_root: Path, mod: dict, c: dict, diff: str,
+) -> list[str]:
+    """CTRL-042 (2026-08-09) -- see native_bridge_verify.py's module
+    docstring for the full incident this closes. Deliberately SEPARATE from
+    CTRL-041 (_run_adversarial_review) rather than folded into it: CTRL-041
+    is opt-in, Claude-only (ESCALATION_MODEL), and tool-using; this is
+    auto-triggered (no opt-in field needed), cross-vendor (agy), and
+    text-only. Different trigger, different blind spot covered, additive
+    findings -- not a replacement for CTRL-041.
+
+    Auto-trigger, not opt-in: `logic_tier: 1` + a native-bridging pattern in
+    the criterion's own `target` file is exactly the shape where a build
+    agent's self-verification loop is most likely to be silently wrong in a
+    way nothing inside that loop can reveal (see docstring). No field on
+    the criterion needs to ask for this -- the pattern itself is the ask.
+
+    Advisory, report-first, same posture as every other new wave/criterion
+    check in this codebase earning stricter status only after a measured
+    false-positive rate -- but still returned to the caller as findings
+    (not silently logged-only), same as CTRL-041, since blocking on it is
+    the caller's decision, not this function's."""
+    target = c.get("target")
+    if not target:
+        return []
+    target_path = Path(project_root) / target
+    try:
+        target_content = target_path.read_text(errors="replace")
+    except OSError:
+        return []
+
+    if not native_bridge_verify.should_auto_verify(c, target_content):
+        return []
+    if not diff.strip():
+        return []
+
+    ctx = {"module": mod["name"], "submodule": None, "criterion_id": c["id"], "attempt": 0, "files": [target]}
+    red_flags = native_bridge_verify.run_cross_model_review(pcp_dir, mod["name"], c, diff)
+
+    findings: list[str] = []
+    if red_flags:
+        findings.append(
+            f"Native-bridge cross-model review (CTRL-042): an independent, cross-vendor reviewer "
+            f"raised concerns about {mod['name']}/{c['id']}'s native/IPC-boundary code. "
+            f"Red flags: {'; '.join(red_flags)}"
+        )
+
+    _qa_record(pcp_dir, ctx, "native-bridge-cross-model-review", findings, control_id="CTRL-042")
+    return findings
+
+
+def _native_bridge_agentic_timeout_sec() -> int:
+    return int(os.environ.get("PCP_NATIVE_BRIDGE_AGENTIC_TIMEOUT_SEC", "1200"))
+
+
+def _build_native_bridge_agentic_prompt(mod_name: str, c: dict, diff: str, target: str) -> str:
+    return f"""You are an independent, adversarial verifier from a DIFFERENT AI vendor than the \
+system that built this. Your only job is to find reasons this does NOT actually work -- not to \
+confirm it does. Default to suspicion.
+
+This criterion touches a native/IPC/ABI boundary (raw sockets, dlopen, a cross-ABI call, or \
+similar) -- exactly the class of bug that looks correct on the page but fails only when \
+actually executed (a timing race, a wrong deployment path, a wire-format mismatch between two \
+separately-built binaries). Reading the diff is not enough -- you have real Bash/Read/Grep tool \
+access in this repo. USE IT.
+
+## Criterion under review ({mod_name}/{c.get('id', '?')})
+{c.get('description', '')}
+
+Target file: {target}
+
+## Investigate for real
+1. Read the actual target file and anything it calls into (a matching daemon, a shared IPC
+   header, a build script) -- native-bridge bugs are often a mismatch BETWEEN two files, not
+   a mistake visible in one.
+2. If you can build and run the relevant piece (check for a Makefile, build script, or test
+   harness already in the repo), do it. Try to actually exercise the code path this criterion
+   claims works, not just read it.
+3. Specifically consider: does a single read()/recv() call assume it gets a complete message in
+   one shot? Does the deployment/build step actually put the artifact where the runtime will
+   look for it? Would two back-to-back calls without any delay behave differently than what a
+   quick manual test might show?
+
+## Diff under review
+```diff
+{diff[:14000]}
+```
+
+## Output
+You MUST NOT edit, write, or delete any file in this repository -- you are producing a review
+verdict only. Output ONLY valid JSON (no prose, no markdown, no code fences):
+{{
+  "is_real": true or false,
+  "confidence": 0.0 to 1.0,
+  "red_flags": ["specific, evidence-based finding -- cite what you actually checked"],
+  "reasoning": "what you actually did to investigate and why, 2-4 sentences"
+}}
+"""
+
+
+def _run_native_bridge_agentic_review(
+    pcp_dir: Path, project_root: Path, mod: dict, c: dict, diff: str, budget: "_BuildBudget",
+) -> list[str]:
+    """CTRL-043 (2026-08-09) -- cross-vendor, EXECUTION-capable upgrade to
+    CTRL-042's text-only review, for the same trigger (logic_tier:1 +
+    native-bridge pattern, auto-triggered, no opt-in field). Spawns a real
+    agy agentic session (real Bash/Read tool access via --add-dir) instead
+    of a single text prompt -- closes the gap CTRL-042's own docstring
+    names as out of scope (races, deployment mismatches only surface by
+    actually running the code). Confirmed for real (2026-08-09 smoke test,
+    not assumed): agy --mode accept-edits --add-dir genuinely reads real
+    files byte-for-byte; real shell execution (compiling and running a C
+    program, observing real stdout) requires --dangerously-skip-permissions
+    specifically -- accept-edits alone auto-approves file edits but still
+    blocks shell commands outright in headless mode.
+
+    Worktree-isolated from the start (not a retrofit like CTRL-041) --
+    this is the actual safety mechanism, not the prompt instruction alone.
+    --dangerously-skip-permissions auto-approves EVERY tool call with zero
+    prompting; the only reason that's acceptable here is that "every tool
+    call" can only ever touch a disposable worktree deleted immediately
+    after (_setup_review_worktree), never project_root. Without that
+    isolation this would be a materially worse risk than CTRL-041's already
+    -accepted "relies on the prompt instruction" limitation -- broader
+    auto-approval scope, on the real checkout. A scoped command-allowlist
+    (agy's own permissions.allow) was investigated as a narrower
+    alternative to the blanket flag but not confirmed working within
+    reasonable effort (undocumented settings.json schema, a guessed format
+    produced a hang rather than a clean deny) -- not silently assumed to
+    exist, this is the fallback that was actually verified.
+
+    Real cost, real agentic session -- same budget.take_session() circuit
+    breaker as CTRL-041, but WITHOUT a pre-emptive dollar cap: agy exposes
+    no pricing info (see llm/harness/agy.py) and no equivalent to Claude's
+    --max-budget-usd, so wall-clock timeout is the primary cost control
+    here, not a cost ceiling. Stated honestly, not silently assumed
+    equivalent to CTRL-041's stronger guarantee.
+
+    Auto-triggered, not opt-in (explicit decision, 2026-08-09) -- unlike
+    CTRL-041, no criterion field gates this. Safe to auto-trigger BECAUSE
+    of worktree isolation: the risk this would otherwise pose (an
+    unattended, blanket-approved agent session, no human choosing it per
+    criterion) is contained to a disposable copy, not the real checkout."""
+    target = c.get("target")
+    if not target:
+        return []
+    target_path = Path(project_root) / target
+    try:
+        target_content = target_path.read_text(errors="replace")
+    except OSError:
+        return []
+    if not native_bridge_verify.should_auto_verify(c, target_content):
+        return []
+    if not diff.strip():
+        return []
+
+    ctx = {"module": mod["name"], "submodule": None, "criterion_id": c["id"], "attempt": 0, "files": [target]}
+
+    try:
+        budget.take_session()
+    except BudgetExceeded:
+        console.print(f"[yellow]Native-bridge agentic review skipped for {mod['name']}/{c['id']}: session circuit breaker.[/yellow]")
+        return []
+
+    review_wt = _setup_review_worktree(project_root)
+    if review_wt is None:
         _qa_record(
-            pcp_dir, ctx, "adversarial-review", [f"could not parse reviewer verdict: {e}"],
-            control_id="CTRL-041", result="error",
+            pcp_dir, ctx, "native-bridge-agentic-review", ["could not create an isolated review worktree"],
+            control_id="CTRL-043", result="error",
         )
         return []
 
-    findings: list[str] = []
-    if verdict.get("is_real") is False:
-        red_flags = verdict.get("red_flags") or []
-        reasoning = verdict.get("reasoning", "")
-        findings.append(
-            f"Adversarial review (CTRL-041): the independent reviewer could NOT confirm "
-            f"{mod['name']}/{c['id']} is genuinely implemented "
-            f"(confidence={verdict.get('confidence', '?')}). Reasoning: {reasoning} "
-            f"Red flags: {'; '.join(red_flags) if red_flags else '(none listed)'}"
+    try:
+        console.print(f"[dim]Native-bridge agentic review ({mod['name']}/{c['id']}): spawning independent cross-vendor reviewer...[/dim]")
+        prompt = _build_native_bridge_agentic_prompt(mod["name"], c, diff, target)
+        cmd = [
+            os.environ.get("PCP_AGY_BIN", "agy"), "-p", prompt,
+            "--output-format", "json",
+            "--dangerously-skip-permissions",
+            "--add-dir", str(review_wt),
+            "--print-timeout", f"{_native_bridge_agentic_timeout_sec()}s",
+            "--effort", os.environ.get("PCP_AGY_EFFORT", "low"),
+        ]
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=review_wt, start_new_session=True,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=_native_bridge_agentic_timeout_sec() + 30)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()
+            _qa_record(
+                pcp_dir, ctx, "native-bridge-agentic-review",
+                [f"timed out after {_native_bridge_agentic_timeout_sec()}s"],
+                control_id="CTRL-043", result="error",
+            )
+            return []
 
-    _qa_record(pcp_dir, ctx, "adversarial-review", findings, control_id="CTRL-041")
-    return findings
+        if proc.returncode != 0:
+            _qa_record(
+                pcp_dir, ctx, "native-bridge-agentic-review",
+                [f"agy process exited {proc.returncode}: {stderr[-500:]}"],
+                control_id="CTRL-043", result="error",
+            )
+            return []
+
+        try:
+            envelope = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            _qa_record(
+                pcp_dir, ctx, "native-bridge-agentic-review",
+                [f"could not parse agy envelope: {e}"],
+                control_id="CTRL-043", result="error",
+            )
+            return []
+
+        if envelope.get("status") and envelope.get("status") != "SUCCESS":
+            _qa_record(
+                pcp_dir, ctx, "native-bridge-agentic-review",
+                [f"agy reported status={envelope.get('status')}"],
+                control_id="CTRL-043", result="error",
+            )
+            return []
+
+        usage = envelope.get("usage", {}) or {}
+        total_tokens = usage.get("total_tokens", 0)
+        max_tokens = int(os.environ.get("PCP_AGY_MAX_TOKENS_PER_CALL", "200000"))
+        if total_tokens > max_tokens:
+            _qa_record(
+                pcp_dir, ctx, "native-bridge-agentic-review",
+                [f"agy session used {total_tokens} tokens, over the {max_tokens} ceiling -- treated as failed"],
+                control_id="CTRL-043", result="error",
+            )
+            return []
+        _log_usage(pcp_dir, "native-bridge-agentic-review", "agy/default", envelope.get("conversation_id"), usage, None)
+
+        response_text = (envelope.get("response") or "").strip()
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1])
+        try:
+            verdict = json.loads(response_text)
+        except json.JSONDecodeError as e:
+            _qa_record(
+                pcp_dir, ctx, "native-bridge-agentic-review",
+                [f"could not parse reviewer verdict: {e}"],
+                control_id="CTRL-043", result="error",
+            )
+            return []
+
+        findings: list[str] = []
+        if verdict.get("is_real") is False:
+            red_flags = verdict.get("red_flags") or []
+            reasoning = verdict.get("reasoning", "")
+            findings.append(
+                f"Native-bridge agentic review (CTRL-043): an independent, execution-capable "
+                f"cross-vendor reviewer could NOT confirm {mod['name']}/{c['id']} genuinely works "
+                f"(confidence={verdict.get('confidence', '?')}). Reasoning: {reasoning} "
+                f"Red flags: {'; '.join(red_flags) if red_flags else '(none listed)'}"
+            )
+
+        _qa_record(pcp_dir, ctx, "native-bridge-agentic-review", findings, control_id="CTRL-043")
+        return findings
+    finally:
+        _cleanup_review_worktree(project_root, review_wt)
 
 
 def _run_wave_flow_wiring_check(pcp_dir: Path, wave_modules: list[dict], wave_number: int) -> list[str]:
@@ -4566,6 +4898,20 @@ def _build_module_worker_inner(
                 # independent try-to-disprove pass before completion is final,
                 # not a post-hoc audit note nobody acts on.
                 adversarial_findings = _run_adversarial_review(pcp_dir, project_root, mod, c, diff, budget)
+                # CTRL-042, auto-triggered (no opt-in field) for logic_tier:1
+                # criteria touching a native/IPC boundary -- see
+                # native_bridge_verify.py's module docstring. Additive to
+                # CTRL-041, not a replacement: different trigger, cross-vendor
+                # not cross-model-same-vendor, text-only not tool-using.
+                adversarial_findings = adversarial_findings + _run_native_bridge_cross_model_check(
+                    pcp_dir, project_root, mod, c, diff,
+                )
+                # CTRL-043, same trigger as CTRL-042 -- the execution-capable
+                # upgrade (real agy agentic session, worktree-isolated). See
+                # _run_native_bridge_agentic_review's docstring.
+                adversarial_findings = adversarial_findings + _run_native_bridge_agentic_review(
+                    pcp_dir, project_root, mod, c, diff, budget,
+                )
                 if adversarial_findings:
                     console.print(f"[red]✗ Adversarial review disputes Criterion [{c['id']}] — NOT marked complete:[/red]")
                     for f in adversarial_findings:
@@ -4610,6 +4956,12 @@ def _build_module_worker_inner(
             )
             if success:
                 adversarial_findings = _run_adversarial_review(pcp_dir, project_root, mod, c, diff, budget)
+                adversarial_findings = adversarial_findings + _run_native_bridge_cross_model_check(
+                    pcp_dir, project_root, mod, c, diff,
+                )
+                adversarial_findings = adversarial_findings + _run_native_bridge_agentic_review(
+                    pcp_dir, project_root, mod, c, diff, budget,
+                )
                 if adversarial_findings:
                     console.print(f"[red]✗ Adversarial review disputes Criterion [{c['id']}] — NOT marked complete:[/red]")
                     for f in adversarial_findings:

@@ -18,6 +18,7 @@ from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 from pcp.test_composition import analyze_test_composition
+from pcp.test_composition_c import analyze_c_test_composition
 from pcp.mutation_confirm import (
     cosmic_ray_available, resolve_definition_file_all, run_targeted_mutation_test,
 )
@@ -210,6 +211,16 @@ def _run_test_composition_check(project_root: Path) -> dict:
     return result
 
 
+def _run_c_test_composition_check(project_root: Path) -> dict:
+    """C counterpart to `_run_test_composition_check` (backlog #1, 2026-08-09
+    -- fake-test detection was Python-only, proven by the win2mac/WRE
+    dogfood session). Always runs (never skipped for lack of a project
+    finding), returns `available: False` gracefully when the optional
+    `tree-sitter`/`tree-sitter-c` extra isn't installed -- same posture as
+    every other optional-tool integration here."""
+    return analyze_c_test_composition(project_root)
+
+
 DEFAULT_MUTATION_CONFIRM_MAX = 5
 
 
@@ -351,7 +362,7 @@ def _write_audit_md(
     ast_grep_result: dict | None = None, jscpd_result: dict | None = None,
     coverage_result: dict | None = None, test_composition_result: dict | None = None,
     mutation_confirm_result: dict | None = None, falsegreen_result: dict | None = None,
-    flaky_detect_result: dict | None = None,
+    flaky_detect_result: dict | None = None, c_test_composition_result: dict | None = None,
 ) -> Path:
     tool = result["tool"]
     findings = result["findings"]
@@ -510,6 +521,65 @@ def _write_audit_md(
                     lines.append(f"- `{f['path']}`: {f['self_mocked']} — {names}")
                 if len(sm_files) > MAX_FINDINGS_SHOWN:
                     lines.append(f"- _...and {len(sm_files) - MAX_FINDINGS_SHOWN} more file(s)_")
+            if tc.get("oracle_risk", 0) > 0:
+                orpct = tc["oracle_risk_ratio"] * 100
+                lines += [
+                    "", f"⚠ **{tc['oracle_risk']} oracle-traceability risk** ({orpct:.0f}%) — asserts "
+                    "against a literal that ALSO appears hardcoded in the implementation it imports "
+                    "from. The implementation could return that literal without doing any real work "
+                    "and the test could not tell the difference (real incident, 2026-08-09: a Mach "
+                    "call stripped to a hardcoded fallback, echoed back by its own test).",
+                ]
+                or_files = sorted(
+                    (f for f in tc["files"] if f.get("oracle_risk", 0) > 0),
+                    key=lambda f: f["oracle_risk"], reverse=True,
+                )
+                lines += ["", "### Oracle-traceability risk"]
+                for f in or_files[:MAX_FINDINGS_SHOWN]:
+                    names = ", ".join(f"`{r['test_name']}`" for r in f["oracle_risk_functions"][:5])
+                    lines.append(f"- `{f['path']}`: {f['oracle_risk']} — {names}")
+                if len(or_files) > MAX_FINDINGS_SHOWN:
+                    lines.append(f"- _...and {len(or_files) - MAX_FINDINGS_SHOWN} more file(s)_")
+
+    if c_test_composition_result is not None and c_test_composition_result.get("available"):
+        ctc = c_test_composition_result
+        lines += ["", "## Test Composition — C (backlog #1, 2026-08-09)", "",
+                   f"_{ctc['scope_note']}_", ""]
+        if ctc["total_test_functions"] == 0:
+            lines.append("_No C test_*.c / *_test.c files found._")
+        else:
+            lines.append(f"{ctc['total_test_functions']} test function(s) analyzed.")
+            if ctc.get("assertion_free", 0) > 0:
+                afpct = ctc["assertion_free_ratio"] * 100
+                lines += [
+                    "", f"⚠ **{ctc['assertion_free']} assertion-free** ({afpct:.0f}%) — no `assert()`/"
+                    "framework-assert call anywhere in the function body.",
+                ]
+                af_files = sorted(
+                    (f for f in ctc["files"] if f.get("assertion_free", 0) > 0),
+                    key=lambda f: f["assertion_free"], reverse=True,
+                )
+                lines += ["", "### Assertion-free tests"]
+                for f in af_files[:MAX_FINDINGS_SHOWN]:
+                    names = ", ".join(f"`{n}`" for n in f["assertion_free_functions"][:5])
+                    lines.append(f"- `{f['path']}`: {f['assertion_free']} — {names}")
+            if ctc.get("oracle_risk", 0) > 0:
+                orpct = ctc["oracle_risk_ratio"] * 100
+                lines += [
+                    "", f"⚠ **{ctc['oracle_risk']} oracle-traceability risk** ({orpct:.0f}%) — same "
+                    "check as the Python section above, applied to C.",
+                ]
+                or_files = sorted(
+                    (f for f in ctc["files"] if f.get("oracle_risk", 0) > 0),
+                    key=lambda f: f["oracle_risk"], reverse=True,
+                )
+                lines += ["", "### Oracle-traceability risk"]
+                for f in or_files[:MAX_FINDINGS_SHOWN]:
+                    names = ", ".join(f"`{r['test_name']}`" for r in f["oracle_risk_functions"][:5])
+                    lines.append(f"- `{f['path']}`: {f['oracle_risk']} — {names}")
+    elif c_test_composition_result is not None:
+        lines += ["", "## Test Composition — C (backlog #1, 2026-08-09)", "",
+                   f"_{c_test_composition_result['scope_note']}_"]
 
     if mutation_confirm_result is None:
         lines += ["", "## Mutation Confirmation (empirical follow-up)", "",
@@ -618,6 +688,7 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutat
     falsegreen_result = _run_falsegreen(project_root)
     coverage_result = _run_coverage_check(project_root) if with_coverage else None
     test_composition_result = _run_test_composition_check(project_root)
+    c_test_composition_result = _run_c_test_composition_check(project_root)
     mutation_confirm_result = (
         _run_mutation_confirm_check(project_root, test_composition_result) if with_mutation_confirm else None
     )
@@ -631,6 +702,7 @@ def audit(project_path: str | None, quiet: bool, with_coverage: bool, with_mutat
     out_path = _write_audit_md(
         pcp_dir, result, timestamp, trend, ast_grep_result, jscpd_result, coverage_result,
         test_composition_result, mutation_confirm_result, falsegreen_result, flaky_detect_result,
+        c_test_composition_result,
     )
 
     if quiet:

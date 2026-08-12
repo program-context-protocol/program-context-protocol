@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "program-context-protocol"
-version = "0.13.19"
+version = "0.13.20"
 description = "PCP — prevent LLM hallucination and context drift across dev sessions"
 readme = "README.md"
 keywords = [
@@ -38,6 +38,13 @@ visual = ["playwright>=1.40"]
 # semantic conventions (vendor-neutral), viewable in self-hosted Langfuse or
 # any other OTLP-compatible backend.
 otel = ["opentelemetry-api>=1.24", "opentelemetry-sdk>=1.24", "opentelemetry-exporter-otlp-proto-http>=1.24"]
+# C-language coverage for test_composition_c.py's fake-test detection
+# (backlog #1, 2026-08-09 -- test_composition.py's own scope_note admits
+# Python-only, proven a real gap by the win2mac/WRE C-adapter dogfood
+# session). Real prior art, not a hand-rolled C parser -- tree-sitter is a
+# proven multi-language incremental parser, one dependency covers C now and
+# other languages later without re-architecting per language.
+c = ["tree-sitter>=0.21", "tree-sitter-c>=0.21"]
 
 [project.urls]
 Homepage = "https://github.com/program-context-protocol/program-context-protocol"

@@ -146,6 +146,20 @@ def detect_otel() -> dict:
     return {"extra_installed": extra_installed, "endpoint_configured": bool(endpoint)}
 
 
+def detect_c_lang_support() -> dict:
+    """Pure detection for the optional `c` extra (tree-sitter/tree-sitter-c)
+    that powers test_composition_c.py's fake-test detection for C (backlog
+    #1, 2026-08-09). Same shape as detect_otel -- installed-package check
+    only, no project_root needed."""
+    import importlib.util
+
+    extra_installed = (
+        importlib.util.find_spec("tree_sitter") is not None
+        and importlib.util.find_spec("tree_sitter_c") is not None
+    )
+    return {"extra_installed": extra_installed}
+
+
 def configure_context7(project_root: Path) -> bool:
     """Adds a context7 entry to .mcp.json, creating the file if absent and
     preserving any other MCP servers already declared there. Returns False
@@ -741,6 +755,14 @@ def doctor(project_path: str | None, check_only: bool, fix_bloat: bool, fix_work
     else:
         otel_status = "[dim]inactive[/dim] (set PCP_OTEL_ENDPOINT to trace PCP's own LLM calls, additive to token_ledger.yaml)"
     console.print(f"OTel tracing of PCP's own LLM calls: {otel_status}")
+
+    c_lang = detect_c_lang_support()
+    c_lang_status = (
+        "[green]active[/green] (`pcp audit`'s C fake-test detection enabled)" if c_lang["extra_installed"]
+        else "[dim]not installed[/dim] (pip install program-context-protocol[c] to enable "
+             "test_composition_c.py's C coverage in `pcp audit`)"
+    )
+    console.print(f"C-language test coverage (tree-sitter): {c_lang_status}")
 
     # Context-route staleness (CTRL-021): a route resolving to zero files
     # silently starves agents of context — flag it here where humans look.

@@ -281,6 +281,61 @@ def _is_authored_source(path: str) -> bool:
     return dot > 0 and name[dot:].lower() in _SOURCE_EXTS
 
 
+def issues_after_first_green(records: list[dict]) -> dict:
+    """Per (module, criterion_id): how many later QA/build issues (result
+    "block"/"error") were recorded AFTER that criterion's first "pass" --
+    across ALL recorded history, not just one run, so a later `pcp verify`,
+    `pcp pressure-test`, or manual re-check finding a real problem in an
+    already-"complete" criterion counts exactly as much as a same-run retry.
+
+    Real, measurable proxy for "did verification actually dig" vs. "did it
+    pass" (backlog item #3, 2026-08-09): avrt alone had 5 stacked bugs found
+    by peeling one at a time, several found only AFTER an earlier attempt
+    had already reported pass. A build report that only shows the LAST
+    attempt's result would never surface that a criterion needed repeated
+    correction after looking done -- a high post-green count on a criterion
+    is a real signal that layer marked it done too early, not proof of a
+    bug in the metric.
+
+    Criteria that never passed are excluded (not applicable -- there is no
+    "after first green" to measure). Criteria that passed and never had a
+    later issue are excluded too (clean, nothing to report) -- same
+    report-first, findings-only posture as `audit.md`/`design_audit.md`."""
+    by_key: dict[tuple, list[dict]] = defaultdict(list)
+    for r in records:
+        crit = r.get("criterion_id")
+        if not crit:
+            continue
+        by_key[(r.get("module") or "?", crit)].append(r)
+
+    flagged = []
+    criteria_with_a_pass = 0
+    for (module, crit), recs in by_key.items():
+        recs_sorted = sorted(recs, key=lambda r: str(r.get("timestamp") or ""))
+        first_pass_idx = next((i for i, r in enumerate(recs_sorted) if r.get("result") == "pass"), None)
+        if first_pass_idx is None:
+            continue
+        criteria_with_a_pass += 1
+        after = recs_sorted[first_pass_idx + 1:]
+        issues = [r for r in after if r.get("result") in ("block", "error")]
+        if not issues:
+            continue
+        flagged.append({
+            "module": module,
+            "criterion_id": crit,
+            "first_pass_at": recs_sorted[first_pass_idx].get("timestamp"),
+            "issues_found_after": len(issues),
+            "issue_checks": [r.get("check") for r in issues],
+        })
+
+    flagged.sort(key=lambda f: -f["issues_found_after"])
+    return {
+        "criteria_with_a_pass": criteria_with_a_pass,
+        "criteria_with_post_green_issues": len(flagged),
+        "flagged": flagged,
+    }
+
+
 def aggregate(records: list[dict]) -> dict:
     """Roll up build/qa records per module. Shared by `pcp telemetry`, end-of-build
     summary, and the pcp.md 'Build Efficiency' section — one aggregation, three views."""

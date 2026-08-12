@@ -21,6 +21,17 @@ Scope, stated honestly rather than silently: Python only (stdlib `ast`).
 A project's Swift/C#/other-language tests are invisible to this pass --
 not analyzed, not counted in the ratio, and the report says so rather than
 implying full coverage.
+
+Known residual limitation of the oracle-traceability check specifically
+(see `meaningful_literal_overlap`): occurrence frequency is scoped to the
+RESOLVING TEST's own imported modules, not the whole project. A globally
+common enum/status value can still slip through if it happens to appear
+only once or twice within the specific module a given test imports from --
+real residual noise found dogfooding this against PCP's own suite (2026-08-09,
+"complete"/"pending" still occasionally flagged post-fix). Advisory-only, so
+left as a stated limitation rather than chased to zero -- same posture as
+every other check in this file earning tighter status only after a measured
+false-positive rate, not before.
 """
 
 import ast
@@ -41,6 +52,7 @@ _SAFE_CALL_NAMES = {
     "rstrip", "split", "splitlines", "join", "format", "get", "items",
     "keys", "values", "append", "extend", "sort", "lower", "upper",
     "startswith", "endswith", "replace", "encode", "decode",
+    "exists", "isfile", "isdir",
 }
 
 
@@ -203,6 +215,23 @@ def calls_only_its_own_patched_target(func: ast.FunctionDef) -> bool:
     return real_calls.issubset(patched)
 
 
+_EXISTENCE_CHECK_NAMES = ("exists", "isfile", "isdir")
+
+
+def _is_existence_check(node: ast.AST) -> bool:
+    """`os.path.exists(...)` / `Path(...).exists()` / `os.path.isfile(...)`,
+    optionally negated (`not os.path.exists(...)`). A leading file-presence
+    guard alongside `assert "X" in src` is the same source-grep pattern this
+    module exists to catch (see module docstring's real finding: 97% of a
+    real suite was exactly this shape) -- treating it as disqualifying
+    grep_shaped just pushed the whole pattern into the unclassified 'other'
+    bucket instead, which undercounts grep-shaped tests just as badly as
+    the pre-fix 'real_execution' misclassification did."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        node = node.operand
+    return isinstance(node, ast.Call) and _call_name(node) in _EXISTENCE_CHECK_NAMES
+
+
 def classify_test_function(func: ast.FunctionDef) -> str:
     """'real_execution' | 'grep_shaped' | 'other'.
 
@@ -225,8 +254,11 @@ def classify_test_function(func: ast.FunctionDef) -> str:
             return "real_execution"
 
     all_in_checks = all(
-        isinstance(a.test, ast.Compare)
-        and any(isinstance(op, (ast.In, ast.NotIn)) for op in a.test.ops)
+        (
+            isinstance(a.test, ast.Compare)
+            and any(isinstance(op, (ast.In, ast.NotIn)) for op in a.test.ops)
+        )
+        or _is_existence_check(a.test)
         for a in asserts
     )
     has_file_read = any(_is_file_read_call(n) for n in ast.walk(func))
@@ -262,10 +294,146 @@ def extract_grep_targets(func: ast.FunctionDef) -> list[str]:
     return targets
 
 
-def analyze_test_file(path: Path) -> dict:
+_TRIVIAL_LITERALS = {"", None, True, False, 0, 1, -1, 2}
+
+
+def assertion_literals(func: ast.FunctionDef) -> set:
+    """Every literal constant a test's `==`/`!=` assertions compare against
+    -- the value the test claims is "correct". Distinct from
+    `extract_grep_targets` (which is `in`/`not in` checks specifically);
+    this is the equality-comparison counterpart, feeding the
+    oracle-traceability check below."""
+    literals = set()
+    for a in ast.walk(func):
+        if not isinstance(a, ast.Assert) or not isinstance(a.test, ast.Compare):
+            continue
+        if not any(isinstance(op, (ast.Eq, ast.NotEq)) for op in a.test.ops):
+            continue
+        for node in (a.test.left, *a.test.comparators):
+            if isinstance(node, ast.Constant) and node.value not in _TRIVIAL_LITERALS:
+                literals.add(node.value)
+    return literals
+
+
+def source_literal_pool(tree: ast.Module) -> "Counter":
+    """Every literal constant appearing anywhere in a SOURCE (non-test)
+    module, WITH occurrence counts -- the pool a hardcoded fallback value
+    would live in. Deliberately broad (every literal, not just return
+    values): a fallback can be assigned to a variable and returned two
+    lines later, and this is a conservative overlap check, not a data-flow
+    proof.
+
+    Counted, not a plain set, since 2026-08-09: see
+    `meaningful_literal_overlap`'s docstring for why frequency is the real
+    signal here, not mere presence."""
+    from collections import Counter
+    literals: Counter = Counter()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and node.value not in _TRIVIAL_LITERALS:
+            literals[node.value] += 1
+    return literals
+
+
+def oracle_traceability_risk(func: ast.FunctionDef, source_literals: "Counter") -> set:
+    """The literal(s) this test asserts as correct that ALSO appear as a
+    hardcoded literal inside the implementation it's importing from.
+
+    Real incident this closes (2026-08-09, win2mac/avrt dogfood): a Mach
+    thread-scheduling call was stripped down to a hardcoded no-op fallback
+    value, and the test asserting the function "worked" simply compared the
+    result against that same hardcoded literal -- passing honestly, proving
+    nothing, because the implementation could return the literal without
+    doing any real work and the test could not tell the difference. A test
+    whose expected value is a literal the code itself could fabricate is not
+    an independent check; it is the code checking itself.
+
+    Advisory only, same posture as the rest of this module — a real overlap
+    is a prompt to look closer, not proof the test is fake. See
+    `meaningful_literal_overlap` for the evidence bar."""
+    return meaningful_literal_overlap(assertion_literals(func), source_literals)
+
+
+_MIN_MEANINGFUL_LITERAL_LEN = 6
+_MAX_SHARED_OCCURRENCES = 2
+
+
+def meaningful_literal_overlap(test_literals: set, source_literals: "Counter") -> set:
+    """Language-agnostic core of `oracle_traceability_risk` -- factored out
+    so other languages' test-composition modules (see test_composition_c.py)
+    reuse the exact same evidence bar instead of re-deriving it.
+
+    Real dogfood correction (2026-08-09): the first version of this check,
+    run for real against PCP's own 1481-test suite (not just unit tests
+    against synthetic fixtures), flagged 114 "risks" -- almost all noise.
+    Two real bugs, both caught only by running on a real project, same
+    lesson as `feedback_metric_must_be_run_on_real_data_2026_07_30`:
+
+    1. The length filter only applied to strings, not numbers -- `_TRIVIAL_
+       LITERALS` only excludes a fixed handful (0, 1, -1, 2), so ANY other
+       small int (3, 4, 50, 300...) counted as "meaningful evidence." Small
+       numbers recur constantly for unrelated reasons (counts, indices,
+       timeouts) and prove nothing. Fixed by applying the same length
+       threshold to the number's string form, not just literal strings.
+
+    2. Presence alone isn't evidence. The top false positives were PCP's
+       OWN schema vocabulary -- "complete" (74 occurrences across src/),
+       "pending" (47), "skipped" (26), "advisory" (15) -- widely-reused,
+       legitimate enum/status values that tests are SUPPOSED to reference,
+       not fabricated fallbacks. A genuine ad-hoc hardcoded fallback is
+       narrowly scoped (defined and used in one place); a real shared
+       vocabulary term recurs everywhere. `_MAX_SHARED_OCCURRENCES` bounds
+       this: only a literal appearing in the source pool a FEW times (not
+       dozens) counts as risk-worthy."""
+    risky = set()
+    for lit in test_literals:
+        if len(str(lit)) < _MIN_MEANINGFUL_LITERAL_LEN:
+            continue
+        count = source_literals.get(lit, 0)
+        if 0 < count <= _MAX_SHARED_OCCURRENCES:
+            risky.add(lit)
+    return risky
+
+
+def _resolve_imported_source_literals(tree: ast.Module, project_root: Path) -> "Counter":
+    """Best-effort: for every module this test file imports, find that
+    module's source file under project_root and pool its literals (with
+    occurrence counts -- see `meaningful_literal_overlap`).
+
+    Deliberately simple and fail-open — a project's import layout varies
+    too much for a general resolver to be exact, so this only ever
+    UNDER-flags (misses a real overlap because the import didn't resolve),
+    never over-flags. Zero matches for an import is silently skipped, not
+    an error: "we couldn't trace this one" is honest, not a false claim
+    that the source is clean."""
+    from collections import Counter
+    module_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            module_names.add(node.module.split(".")[-1])
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                module_names.add(alias.name.split(".")[-1])
+
+    literals: Counter = Counter()
+    for name in module_names:
+        for candidate in project_root.rglob(f"{name}.py"):
+            if any(seg in candidate.parts for seg in _SKIP_DIR_SEGMENTS):
+                continue
+            try:
+                literals.update(source_literal_pool(ast.parse(candidate.read_text(errors="replace"))))
+            except (SyntaxError, OSError):
+                continue
+    return literals
+
+
+def analyze_test_file(path: Path, project_root: Path | None = None) -> dict:
     """Per-file breakdown. Fails open (empty result) on a syntax error --
     a test file that doesn't even parse is a different, louder problem
-    (surfaced elsewhere), not silently double-counted here."""
+    (surfaced elsewhere), not silently double-counted here.
+
+    `project_root` is optional -- without it, oracle-traceability checking
+    is skipped entirely (reported as 0, not guessed at), since it needs a
+    root to resolve imports against."""
     try:
         tree = ast.parse(path.read_text(errors="replace"))
     except (SyntaxError, OSError):
@@ -273,12 +441,16 @@ def analyze_test_file(path: Path) -> dict:
             "path": str(path), "real_execution": 0, "grep_shaped": 0, "other": 0,
             "grep_shaped_functions": [], "assertion_free": 0, "assertion_free_functions": [],
             "self_mocked": 0, "self_mocked_functions": [],
+            "oracle_risk": 0, "oracle_risk_functions": [],
         }
+
+    source_literals = _resolve_imported_source_literals(tree, project_root) if project_root else set()
 
     counts = {"real_execution": 0, "grep_shaped": 0, "other": 0}
     grep_shaped_functions = []
     assertion_free_functions = []
     self_mocked_functions = []
+    oracle_risk_functions = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             verdict = classify_test_function(node)
@@ -292,12 +464,18 @@ def analyze_test_file(path: Path) -> dict:
                 assertion_free_functions.append(node.name)
             if calls_only_its_own_patched_target(node):
                 self_mocked_functions.append(node.name)
+            if source_literals:
+                risk = oracle_traceability_risk(node, source_literals)
+                if risk:
+                    oracle_risk_functions.append({"test_name": node.name, "shared_literals": sorted(map(str, risk))})
     return {
         "path": str(path), **counts, "grep_shaped_functions": grep_shaped_functions,
         "assertion_free": len(assertion_free_functions),
         "assertion_free_functions": assertion_free_functions,
         "self_mocked": len(self_mocked_functions),
         "self_mocked_functions": self_mocked_functions,
+        "oracle_risk": len(oracle_risk_functions),
+        "oracle_risk_functions": oracle_risk_functions,
     }
 
 
@@ -318,13 +496,14 @@ def analyze_test_composition(project_root: Path) -> dict:
                 continue
             files.append(p)
 
-    per_file = [analyze_test_file(p) for p in sorted(set(files))]
+    per_file = [analyze_test_file(p, project_root) for p in sorted(set(files))]
     total_real = sum(f["real_execution"] for f in per_file)
     total_grep = sum(f["grep_shaped"] for f in per_file)
     total_other = sum(f["other"] for f in per_file)
     total = total_real + total_grep + total_other
     total_assertion_free = sum(f["assertion_free"] for f in per_file)
     total_self_mocked = sum(f["self_mocked"] for f in per_file)
+    total_oracle_risk = sum(f["oracle_risk"] for f in per_file)
 
     return {
         "total_test_functions": total,
@@ -336,6 +515,8 @@ def analyze_test_composition(project_root: Path) -> dict:
         "assertion_free_ratio": round(total_assertion_free / total, 4) if total else 0.0,
         "self_mocked": total_self_mocked,
         "self_mocked_ratio": round(total_self_mocked / total, 4) if total else 0.0,
+        "oracle_risk": total_oracle_risk,
+        "oracle_risk_ratio": round(total_oracle_risk / total, 4) if total else 0.0,
         "files": per_file,
         "scope_note": "Python only (stdlib ast) -- other languages' test files are not analyzed.",
     }

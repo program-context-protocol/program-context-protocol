@@ -12,6 +12,7 @@ from pcp.commands.doctor import (
     detect_tools, check_environment, _detect_one, _guess_deploy_command,
     detect_context7, configure_context7, check_schema_bloat, fix_schema_bloat,
     check_orphaned_worktrees, fix_orphaned_worktrees, check_timeout_heavy_criteria,
+    detect_c_lang_support,
 )
 from pcp import telemetry
 
@@ -409,3 +410,26 @@ def test_successful_attempts_never_count_as_timeouts(tmp_path):
     for _ in range(5):
         telemetry.record(pcp_dir, cycle="build", module="billing", criterion_id="A001", result="pass")
     assert check_timeout_heavy_criteria(pcp_dir) == []
+
+
+# ── C-language coverage detection (2026-08-09, backlog #1) ──
+
+def test_detect_c_lang_support_true_when_both_packages_present(monkeypatch):
+    import importlib.util
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    assert detect_c_lang_support() == {"extra_installed": True}
+
+
+def test_detect_c_lang_support_false_when_tree_sitter_c_missing(monkeypatch):
+    import importlib.util
+    monkeypatch.setattr(
+        importlib.util, "find_spec",
+        lambda name: object() if name == "tree_sitter" else None,
+    )
+    assert detect_c_lang_support() == {"extra_installed": False}
+
+
+def test_detect_c_lang_support_false_when_neither_present(monkeypatch):
+    import importlib.util
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert detect_c_lang_support() == {"extra_installed": False}

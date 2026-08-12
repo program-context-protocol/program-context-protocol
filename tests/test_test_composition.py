@@ -6,10 +6,12 @@ distinguishing -- this module makes that distinction computable."""
 
 import ast
 import textwrap
+from collections import Counter
 
 from pcp.test_composition import (
     classify_test_function, analyze_test_file, analyze_test_composition, has_any_assertion,
-    calls_only_its_own_patched_target,
+    calls_only_its_own_patched_target, assertion_literals, source_literal_pool,
+    oracle_traceability_risk,
 )
 
 
@@ -134,6 +136,7 @@ def test_analyze_test_file_fails_open_on_syntax_error(tmp_path):
         "path": str(f), "real_execution": 0, "grep_shaped": 0, "other": 0,
         "grep_shaped_functions": [], "assertion_free": 0, "assertion_free_functions": [],
         "self_mocked": 0, "self_mocked_functions": [],
+        "oracle_risk": 0, "oracle_risk_functions": [],
     }
 
 
@@ -382,3 +385,164 @@ def test_analyze_test_file_reports_self_mocked_functions(tmp_path):
     result = analyze_test_file(f)
     assert result["self_mocked"] == 1
     assert result["self_mocked_functions"] == ["test_fake"]
+
+
+# ── oracle-traceability risk detection (2026-08-09, backlog #2) ──
+
+def test_assertion_literals_extracts_equality_comparisons():
+    func = _func("""
+        def test_x():
+            assert compute() == "expected-value-here"
+            assert other() != "another-target"
+    """)
+    assert assertion_literals(func) == {"expected-value-here", "another-target"}
+
+
+def test_assertion_literals_ignores_trivial_values():
+    func = _func("""
+        def test_x():
+            assert flag() == True
+            assert count() == 0
+            assert result() == 1
+    """)
+    assert assertion_literals(func) == set()
+
+
+def test_assertion_literals_ignores_in_checks():
+    """`in`/`not in` is extract_grep_targets's territory, not this one --
+    only `==`/`!=` count as "the test's claimed expected value"."""
+    func = _func("""
+        def test_x():
+            assert "needle" in haystack()
+    """)
+    assert assertion_literals(func) == set()
+
+
+def test_source_literal_pool_collects_every_literal():
+    tree = ast.parse(textwrap.dedent("""
+        FALLBACK = "hardcoded-fallback-value"
+
+        def do_thing():
+            return FALLBACK
+    """))
+    pool = source_literal_pool(tree)
+    assert pool["hardcoded-fallback-value"] == 1
+
+
+def test_oracle_traceability_risk_flags_shared_literal():
+    func = _func("""
+        def test_thread_priority():
+            result = get_thread_priority()
+            assert result == "hardcoded-fallback-value"
+    """)
+    risk = oracle_traceability_risk(func, Counter({"hardcoded-fallback-value": 1}))
+    assert risk == {"hardcoded-fallback-value"}
+
+
+def test_oracle_traceability_risk_ignores_short_strings():
+    """Short strings are too common to be meaningful evidence of a shared
+    fallback -- avoids flagging every test that happens to assert == "ok" """
+    func = _func("""
+        def test_x():
+            assert status() == "ok"
+    """)
+    risk = oracle_traceability_risk(func, Counter({"ok": 1}))
+    assert risk == set()
+
+
+def test_oracle_traceability_risk_clean_when_no_overlap():
+    func = _func("""
+        def test_compute():
+            assert compute(2, 3) == "genuinely-computed-result"
+    """)
+    risk = oracle_traceability_risk(func, Counter({"some-other-unrelated-literal": 1}))
+    assert risk == set()
+
+
+def test_oracle_traceability_risk_ignores_widely_reused_literal():
+    """Real dogfood correction (2026-08-09): a literal appearing dozens of
+    times across the source pool is shared vocabulary (an enum/status
+    value tests are SUPPOSED to reference), not a fabricated fallback --
+    real false positive found running this against PCP's own suite
+    ("complete", 74 occurrences, flagged on nearly every status-related
+    test before this fix)."""
+    func = _func("""
+        def test_status():
+            assert get_status() == "complete-status"
+    """)
+    risk = oracle_traceability_risk(func, Counter({"complete-status": 74}))
+    assert risk == set()
+
+
+def test_oracle_traceability_risk_ignores_short_numbers():
+    """Real bug found dogfooding 2026-08-09: the trivial-literals exclusion
+    only covered a fixed few small ints (0, 1, -1, 2) -- any OTHER short
+    number (3, 4, 50, 300) sailed through as "meaningful evidence." Small
+    numbers recur constantly for unrelated reasons (counts, indices,
+    timeouts) and prove nothing."""
+    func = _func("""
+        def test_x():
+            assert get_retry_count() == 50
+    """)
+    risk = oracle_traceability_risk(func, Counter({50: 1}))
+    assert risk == set()
+
+
+def test_oracle_traceability_risk_flags_narrowly_scoped_long_number():
+    """A distinctive, longer numeric constant (e.g. a hex/Mach-style value)
+    appearing only once or twice in the source pool IS meaningful evidence
+    -- the length filter targets short numbers, not all numbers."""
+    func = _func("""
+        def test_x():
+            assert get_flag_value() == 3735928559
+    """)
+    risk = oracle_traceability_risk(func, Counter({3735928559: 1}))
+    assert risk == {3735928559}
+
+
+def test_analyze_test_file_flags_oracle_risk_with_project_root(tmp_path):
+    """End-to-end: a test importing from a real source file whose
+    implementation returns a hardcoded literal, and the test asserts
+    against that exact same literal -- the avrt incident shape."""
+    (tmp_path / "thing.py").write_text(textwrap.dedent("""
+        def get_priority():
+            return "hardcoded-fallback-value"  # real Mach call was stripped
+    """))
+    test_file = tmp_path / "test_thing.py"
+    test_file.write_text(textwrap.dedent("""
+        from thing import get_priority
+
+        def test_get_priority():
+            assert get_priority() == "hardcoded-fallback-value"
+    """))
+    result = analyze_test_file(test_file, project_root=tmp_path)
+    assert result["oracle_risk"] == 1
+    assert result["oracle_risk_functions"][0]["test_name"] == "test_get_priority"
+    assert "hardcoded-fallback-value" in result["oracle_risk_functions"][0]["shared_literals"]
+
+
+def test_analyze_test_file_skips_oracle_check_without_project_root(tmp_path):
+    """No project_root given -- skipped honestly (0), never guessed at."""
+    test_file = tmp_path / "test_thing.py"
+    test_file.write_text(textwrap.dedent("""
+        def test_x():
+            assert compute() == "some-literal-value"
+    """))
+    result = analyze_test_file(test_file)
+    assert result["oracle_risk"] == 0
+
+
+def test_analyze_test_composition_rolls_up_oracle_risk(tmp_path):
+    (tmp_path / "thing.py").write_text(textwrap.dedent("""
+        def get_priority():
+            return "hardcoded-fallback-value"
+    """))
+    (tmp_path / "test_thing.py").write_text(textwrap.dedent("""
+        from thing import get_priority
+
+        def test_get_priority():
+            assert get_priority() == "hardcoded-fallback-value"
+    """))
+    result = analyze_test_composition(tmp_path)
+    assert result["oracle_risk"] == 1
+    assert result["oracle_risk_ratio"] == 1.0

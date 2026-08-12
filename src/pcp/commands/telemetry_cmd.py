@@ -160,6 +160,31 @@ def telemetry_cmd(project_path: str | None, output_json: bool):
                 "trend, not an accounting figure.[/dim]"
             )
 
+    # Issues found after a criterion's first "pass" -- a real proxy for "did
+    # verification actually dig" vs "did it pass", not just pass/fail on the
+    # last attempt. See telemetry.issues_after_first_green's own docstring.
+    post_green = telemetry_lib.issues_after_first_green(records)
+    if post_green["criteria_with_a_pass"]:
+        pt = Table(title="Issues found after first green")
+        pt.add_column("Module")
+        pt.add_column("Criterion")
+        pt.add_column("First pass at")
+        pt.add_column("Issues found after", justify="right")
+        pt.add_column("Checks")
+        for f in post_green["flagged"]:
+            pt.add_row(
+                f["module"], f["criterion_id"], f["first_pass_at"] or "—",
+                str(f["issues_found_after"]), ", ".join(filter(None, f["issue_checks"])) or "—",
+            )
+        if post_green["flagged"]:
+            console.print(pt)
+        console.print(
+            f"[dim]{post_green['criteria_with_post_green_issues']}/{post_green['criteria_with_a_pass']} "
+            "criteria that passed at least once later had a real issue found against them -- "
+            "a high count here means that layer's gate marked work done too early, not that "
+            "the metric is noisy.[/dim]"
+        )
+
     console.print(
         f"\n[dim]{len(records)} total records — {len(agg['build_records'])} build, "
         f"{len(agg['qa_records'])} qa — total cost ~${total_cost:.2f}[/dim]"
