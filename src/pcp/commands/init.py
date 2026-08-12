@@ -923,6 +923,29 @@ venv/
 .testmondata-journal
 """
 
+MERGE_REGENERATED_GLOBS_TEMPLATE = """\
+# Glob patterns for files that legitimately differ on every run (fixtures with
+# fresh timestamps, coverage/tracking JSON, a generated snapshot, test-runner
+# scratch output, ...). PCP discards a worktree's uncommitted copy of a
+# matching path right before a wave merge, and auto-resolves a real merge
+# CONFLICT on a matching path by keeping main's version — so these never
+# abort a criterion's merge or leave a worktree stranded for manual
+# resolution. Only ever touches a path matching a pattern below; real agent
+# work is never at risk.
+#
+# Seeded with common test-runner/build scratch outputs (Win2Mac dogfood
+# 2026-08-08 — report.json, pytest scratch output, repeatedly collided across
+# parallel criterion branches, both as uncommitted dirt AND as a real
+# committed conflict). Add project-specific patterns below; delete a default
+# if it happens to match a real file this project actually needs tracked.
+patterns:
+  - "report.json"
+  - "**/report.json"
+  - "coverage.json"
+  - "**/coverage.json"
+  - "**/*.snapshot.json"
+"""
+
 SDLC_PHASE_TEMPLATE = """\
 version: "1.0"
 current_phase: alpha
@@ -1789,6 +1812,7 @@ def init(project_path: str, module_name: str | None, force: bool):
         pcp / "design_conventions.yaml": DESIGN_CONVENTIONS_TEMPLATE,
         pcp / "ui_kit_recipes.yaml": UI_KIT_RECIPES_TEMPLATE,
         pcp / "strategy" / "user_flows.yaml": USER_FLOWS_TEMPLATE,
+        pcp / "merge_regenerated_globs.yaml": MERGE_REGENERATED_GLOBS_TEMPLATE,
     }
 
     if module_name:

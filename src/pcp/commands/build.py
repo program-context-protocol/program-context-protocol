@@ -599,8 +599,17 @@ def _load_merge_regenerated_globs(pcp_dir: Path) -> list[str]:
     ever committing them -- but it has no visibility into a project's own
     regenerated artifacts, which is exactly the "every project has to
     discover and fix this themselves" gap this closes. Absent file means an
-    empty list -- fully backward compatible, opt-in, never scaffolded by
-    `pcp init` (a human declares this only once they've actually hit it)."""
+    empty list -- fully backward compatible.
+
+    `pcp init` now scaffolds this with a short default pattern list (common
+    test-runner scratch outputs) rather than leaving it purely reactive --
+    Win2Mac 2026-08-08 hit the identical Project W shape independently
+    (report.json) weeks after Project W's own fix landed, because nothing
+    primed a fresh project with the well-known patterns; a human still owns
+    and edits the file freely from there. `_resolve_regenerated_conflicts`
+    (below) reads the same patterns to also cover a path that was actually
+    COMMITTED on a criterion branch, which this discard-before-merge step
+    alone can't reach."""
     path = Path(pcp_dir) / "merge_regenerated_globs.yaml"
     if not path.exists():
         return []
@@ -660,6 +669,47 @@ def _restore_append_only(paths: list[Path]) -> None:
             set_append_only(p)
 
 
+def _resolve_regenerated_conflicts(project_root: Path, pcp_dir: Path | None) -> bool:
+    """After a `git merge` leaves real conflicts, auto-resolves any conflicted
+    path that matches a project-declared regenerated-file pattern (same
+    source as `_discard_regenerated_files_before_merge`) by keeping our side
+    (main) and discarding the incoming branch's version -- the file is
+    declared throwaway, so there is nothing on the incoming side worth
+    keeping. Only acts when EVERY conflicted path matches a pattern; a single
+    real conflict alongside a regenerated-file conflict still falls through
+    to the existing abort-and-leave-for-inspection path, unchanged.
+
+    Closes a gap `_discard_regenerated_files_before_merge` can't:  that
+    helper only clears uncommitted dirt BEFORE the merge starts, so a
+    regenerated file the agent actually committed on its own branch still
+    reaches a real merge conflict. Real incident, Win2Mac 2026-08-08:
+    report.json (pytest scratch output) got committed on 3 separate
+    criterion branches, hitting add/add or content conflicts every time --
+    the pre-merge discard never saw it because it was never dirty at merge
+    time, it was already committed. Returns True if the merge was fully
+    resolved and committed."""
+    if pcp_dir is None:
+        return False
+    patterns = _load_merge_regenerated_globs(pcp_dir)
+    if not patterns:
+        return False
+    unmerged = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=project_root, capture_output=True, text=True,
+    )
+    conflicted = [f for f in unmerged.stdout.splitlines() if f]
+    if not conflicted or not all(any(fnmatch.fnmatch(f, pat) for pat in patterns) for f in conflicted):
+        return False
+    for f in conflicted:
+        subprocess.run(["git", "checkout", "--ours", "--", f], cwd=project_root, capture_output=True)
+        subprocess.run(["git", "add", "--", f], cwd=project_root, capture_output=True)
+    commit = subprocess.run(["git", "commit", "--no-edit"], cwd=project_root, capture_output=True, text=True)
+    if commit.returncode == 0:
+        console.print(f"[dim]Auto-resolved {len(conflicted)} conflicting project-declared regenerated file(s) (kept main's version): {', '.join(conflicted[:5])}[/dim]")
+        return True
+    return False
+
+
 def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | None = None) -> tuple[bool, str]:
     branch = f"feat/{module_name}"
     discarded = _discard_regenerated_files_before_merge(project_root, pcp_dir)
@@ -674,6 +724,8 @@ def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | N
             cwd=project_root, capture_output=True, text=True,
         )
         ok = result.returncode == 0
+        if not ok:
+            ok = _resolve_regenerated_conflicts(project_root, pcp_dir)
         if not ok:
             # Leave NO half-merged state behind. Without this, a conflicting merge
             # leaves project_root mid-MERGE with conflict markers in the tree, and
