@@ -18,6 +18,7 @@ NAME_DENYLIST = {
     r"signtool": "Project S",
     r"LinkBox": "Project L",
     r"Event-Manager": "Project E",
+    r"pisco-sour": "Project I",
     r"ganeshnallasivam": "the maintainer",
 }
 

@@ -1,8 +1,8 @@
 """Test-suite composition audit for C -- the language-coverage gap
 `test_composition.py` names honestly in its own scope_note ("Python only").
 
-Real finding this closes (2026-08-09, Project W/pisco-sour-wre dogfood, see
-memory `project_pcp_learnings_from_win2mac_debug_2026_08_09`): every
+Real finding this closes (2026-08-09, Project W/Project I native-bridge
+dogfood): every
 fake-pass pattern found auditing 15 C DLL adapters that session -- a Mach
 thread-scheduling call stripped to a hardcoded fallback literal that its own
 test then echoed back as the "expected" value -- was written in C, and

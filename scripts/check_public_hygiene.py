@@ -17,7 +17,11 @@ from public_hygiene_denylist import (
 )
 
 _LEAK_PATTERN = re.compile(
-    "|".join(rf"\b{p}\b" for p in NAME_DENYLIST), re.IGNORECASE,
+    # (?<![A-Za-z0-9]) / (?![A-Za-z0-9]) instead of \b -- \b treats '_' as a
+    # word char, so it misses names embedded in snake_case identifiers (e.g.
+    # a memory-key string like `..._from_win2mac_debug_...`).
+    "|".join(rf"(?<![A-Za-z0-9]){p}(?![A-Za-z0-9])" for p in NAME_DENYLIST),
+    re.IGNORECASE,
 )
 
 

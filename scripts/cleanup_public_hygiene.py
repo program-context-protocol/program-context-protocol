@@ -43,7 +43,12 @@ def substitute_leaks(files: list[str]) -> list[str]:
             continue
         original = text
         for pattern, label in NAME_DENYLIST.items():
-            text = re.sub(rf"\b{pattern}\b", label, text, flags=re.IGNORECASE)
+            # See check_public_hygiene.py: (?<!...)/(?!...) instead of \b,
+            # since \b misses names embedded in snake_case identifiers.
+            text = re.sub(
+                rf"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])", label, text,
+                flags=re.IGNORECASE,
+            )
         if text != original:
             path.write_text(text)
             fixed.append(f)
