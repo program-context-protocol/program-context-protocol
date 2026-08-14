@@ -71,8 +71,11 @@
           },
           "verified_by": {
             "type": "string",
-            "enum": ["pcp_build", "pcp_build_install_only", "manual"],
-            "description": "Who/what flipped status to complete. Stamped automatically by build.py's _mark_criterion_complete -- the ONLY place this ever gets set by the real gated loop (full TDD/QA/architect-review cycle = pcp_build; install-only fast path, CTRL-034 = pcp_build_install_only). Absence on a complete criterion means it was hand-edited outside pcp build entirely -- never set that by hand, it would defeat the point."
+            "anyOf": [
+              { "enum": ["pcp_build", "pcp_build_install_only", "manual"] },
+              { "pattern": "^pcp_verify:" }
+            ],
+            "description": "Who/what flipped status to complete. `pcp_build`/`pcp_build_install_only` stamped by build.py's _mark_criterion_complete (full TDD/QA/architect-review cycle vs. CTRL-034's install-only fast path). `pcp_verify:<check>` (e.g. pcp_verify:file_exists, pcp_verify:manual, pcp_verify:test_passes(weak-override)) stamped by verify.py's gated re-check path -- prefix-matched, not enumerated, since it's built from the criterion's own `check` field. Absence on a complete criterion means it was hand-edited outside both gated paths entirely -- never set that by hand, it would defeat the point."
           },
           "logic_tier": {
             "type": "integer",
