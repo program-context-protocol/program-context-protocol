@@ -12,6 +12,15 @@ topic citations, known-issues hits, and blast radius (via graphify, when
 installed) into one Build-Plan-style package per target file. Zero LLM
 calls -- pure aggregation over data kb_file_metadata/kb_catalog/kb_index/
 kb_ingest/coupling/impact already compute.
+
+A014 — Disclosure-and-routing layer over A013's package: render_context_
+package turns the package dict into agent-readable text without silently
+dropping an empty (not-found) section; refresh_context_package writes that
+text to a generated per-module projection routed through context_map.yaml's
+own scenario table (kb_grounding_context, {module}-templated -- same
+convention module_state already uses), and _build_agent_prompt (build.py)
+wires it into a criterion's actual prompt when the criterion declares a
+`target`.
 """
 
 import subprocess
@@ -19,6 +28,8 @@ from unittest.mock import patch
 
 import yaml
 
+from pcp import context_map
+from pcp.commands.build import _build_agent_prompt
 from pcp.kb_grounding import (
     build_blast_radius_section,
     build_context_package,
@@ -27,9 +38,12 @@ from pcp.kb_grounding import (
     build_topic_citations_section,
     check_constraint_protection,
     check_kb_contradiction,
+    context_package_path,
     extract_protected_identifiers,
     load_constraint_index,
     load_kb_claims_for_files,
+    refresh_context_package,
+    render_context_package,
 )
 
 
@@ -641,3 +655,145 @@ def test_build_context_package_multiple_target_files_independent(tmp_path):
     assert package["target_files"] == ["src/a.py", "src/b.py"]
     assert package["files"]["src/a.py"]["file_metadata"]["found"] is True
     assert package["files"]["src/b.py"]["file_metadata"]["found"] is False
+
+
+# ── A014 — render_context_package: disclosure must survive rendering ───────
+
+def test_render_discloses_all_four_sections_even_when_nothing_found(tmp_path):
+    """The actual failure mode A014 guards against: a naive renderer that
+    only prints sections with real content would throw away A013's own
+    not-found disclosure the moment it reaches an agent's prompt, even
+    though build_context_package's own dict preserved it."""
+    pcp_dir = tmp_path / ".pcp"
+    package = build_context_package(tmp_path, pcp_dir, ["src/ungrounded.py"])
+
+    rendered = render_context_package(package)
+
+    for label in ("File metadata", "Topic citations", "Known issues", "Blast radius"):
+        assert label in rendered
+    assert rendered.count("NOT FOUND") == 4
+
+
+def test_render_marks_found_sections_with_real_detail(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_card(tmp_path, "src/thing.py", ["A real claim"])
+
+    package = build_context_package(tmp_path, pcp_dir, ["src/thing.py"])
+    rendered = render_context_package(package)
+
+    assert "File metadata" in rendered
+    assert "FOUND" in rendered
+    assert "A real claim" in rendered  # actual evidence surfaced, not just a flag
+
+
+def test_render_multiple_target_files_each_get_their_own_disclosure(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_card(tmp_path, "src/a.py", ["claim about a"])
+
+    package = build_context_package(tmp_path, pcp_dir, ["src/a.py", "src/b.py"])
+    rendered = render_context_package(package)
+
+    assert "src/a.py" in rendered
+    assert "src/b.py" in rendered
+    assert "claim about a" in rendered
+
+
+def test_render_no_target_files_discloses_explicitly():
+    package = {"target_files": [], "files": {}, "generated_at": "x"}
+    rendered = render_context_package(package)
+    assert "No target files" in rendered
+
+
+# ── A014 — context_package_path / refresh_context_package ──────────────────
+
+def test_context_package_path_matches_module_state_style_convention(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    path = context_package_path(pcp_dir, "auth")
+    assert path == pcp_dir / "kb" / "context_packages" / "auth.md"
+
+
+def test_refresh_context_package_writes_generated_file(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_card(tmp_path, "src/thing.py", ["A real claim"])
+
+    written = refresh_context_package(tmp_path, pcp_dir, "auth", ["src/thing.py"])
+
+    assert written == context_package_path(pcp_dir, "auth")
+    assert written.exists()
+    text = written.read_text()
+    assert "src/thing.py" in text
+    assert "A real claim" in text
+
+
+def test_refresh_context_package_returns_none_without_target_files(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    written = refresh_context_package(tmp_path, pcp_dir, "auth", [])
+    assert written is None
+    assert not context_package_path(pcp_dir, "auth").exists()
+
+
+def test_refresh_context_package_regenerates_fresh_not_append(tmp_path):
+    """A GENERATED projection, same posture as module docs/built.md --
+    regenerated fresh on every call, never a hand-maintained/accumulating
+    log."""
+    pcp_dir = tmp_path / ".pcp"
+    refresh_context_package(tmp_path, pcp_dir, "auth", ["src/first.py"])
+    written = refresh_context_package(tmp_path, pcp_dir, "auth", ["src/second.py"])
+
+    text = written.read_text()
+    assert "src/second.py" in text
+    assert "src/first.py" not in text
+
+
+# ── A014 — context_map.yaml-style routing ───────────────────────────────────
+
+def test_kb_grounding_context_route_registered_in_default_routes():
+    assert "kb_grounding_context" in context_map.DEFAULT_ROUTES
+    route = context_map.DEFAULT_ROUTES["kb_grounding_context"]
+    assert "{module}" in route["files"][0]
+
+
+def test_context_map_resolves_generated_grounding_file(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    refresh_context_package(tmp_path, pcp_dir, "auth", ["src/thing.py"])
+
+    files = context_map.resolve(pcp_dir, "kb_grounding_context", module="auth")
+    assert files == [".pcp/kb/context_packages/auth.md"]
+
+
+def test_agent_prompt_includes_grounding_context_when_target_declared(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_card(tmp_path, "src/thing.py", ["A real claim"])
+
+    prompt = _build_agent_prompt(
+        pcp_dir, "auth",
+        {"id": "A1", "description": "x", "target": "src/thing.py"},
+        {"name": "auth"},
+    )
+
+    assert "kb/context_packages/auth.md" in prompt
+    written = context_package_path(pcp_dir, "auth")
+    assert written.exists()
+    assert "src/thing.py" in written.read_text()
+
+
+def test_agent_prompt_omits_grounding_route_without_declared_target(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    prompt = _build_agent_prompt(pcp_dir, "auth", {"id": "A1", "description": "x"}, {"name": "auth"})
+    assert "kb/context_packages" not in prompt
+    assert not context_package_path(pcp_dir, "auth").exists()
+
+
+def test_agent_prompt_grounding_injection_off_switch(tmp_path, monkeypatch):
+    monkeypatch.setenv("PCP_BUILD_INJECT_KB_GROUNDING", "0")
+    pcp_dir = tmp_path / ".pcp"
+    _write_card(tmp_path, "src/thing.py", ["A real claim"])
+
+    prompt = _build_agent_prompt(
+        pcp_dir, "auth",
+        {"id": "A1", "description": "x", "target": "src/thing.py"},
+        {"name": "auth"},
+    )
+
+    assert "kb/context_packages" not in prompt
+    assert not context_package_path(pcp_dir, "auth").exists()

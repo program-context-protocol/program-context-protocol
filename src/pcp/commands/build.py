@@ -1828,7 +1828,33 @@ def _build_agent_prompt(
     from pcp import context_map
     always_files = context_map.resolve(pcp_dir, "always")
     state_files = context_map.resolve(pcp_dir, "module_state", module=module_name)
-    read_list = [f"- {p}" for p in always_files + state_files] or [
+
+    # kb grounding context (A014): the criterion's own declared `target` file
+    # gets a disclosed grounding-evidence package (kb_grounding.py's A013
+    # context-package builder, rendered by A014's disclosure-preserving
+    # renderer) refreshed fresh right here, then routed through the same
+    # context_map scenario table as everything else above
+    # ("kb_grounding_context", {module}-templated like module_state) — not a
+    # separate paste-it-in mechanism. Best-effort: kb_grounding pulls in
+    # impact.py's module graph, which can raise on a malformed spec.yaml
+    # belonging to an unrelated module; a broken disclosure must never block
+    # an otherwise-unrelated criterion's build. Off-switch mirrors
+    # PCP_BUILD_INJECT_LIBRARIAN/PCP_BUILD_INJECT_DECISIONS above.
+    grounding_target = criterion.get("target")
+    grounding_files: list[str] = []
+    if grounding_target and os.environ.get("PCP_BUILD_INJECT_KB_GROUNDING", "1") != "0":
+        try:
+            from pcp import kb_grounding
+            kb_grounding.refresh_context_package(
+                pcp_dir.parent, pcp_dir, module_name, [grounding_target],
+            )
+            grounding_files = context_map.resolve(
+                pcp_dir, "kb_grounding_context", module=module_name,
+            )
+        except Exception:
+            grounding_files = []
+
+    read_list = [f"- {p}" for p in always_files + state_files + grounding_files] or [
         "- .pcp/objective.md", "- .pcp/architecture.md", "- .pcp/current_state.md",
     ]
     prompt_parts = [
@@ -1849,7 +1875,7 @@ def _build_agent_prompt(
     # 2026-07-08 that without this hint the agent spent several turns per
     # criterion re-discovering it via `find`/`grep`, real turns/cache_read
     # volume for information already on disk.
-    target = criterion.get("target")
+    target = grounding_target
     if target:
         prompt_parts.append(
             f"This criterion's target file is `{target}` — start there instead of "
