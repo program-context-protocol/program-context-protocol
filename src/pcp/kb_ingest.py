@@ -21,13 +21,32 @@ never against every topic in topics.yaml — and Phase B (deterministic fetch
 + integrity check) is a later criterion again. Detection has to be cheap and
 rung-1 precisely because it runs first and gates whether the expensive LLM
 research step happens at all.
+
+A010: Phase B ingestion. Given a candidate A009 already staged AND a human/
+caller has since approved (candidates.yaml's status advanced past 'staged'
+to STATUS_APPROVED), fetches its raw content and stores it VERBATIM under
+`.pcp/kb/<topic>/` — no summarization, no paraphrase, the stored file's
+body is exactly what was fetched — then re-runs the catalog (kb_catalog.py)
+and index (kb_index.py) builders so the new content becomes searchable.
+Deterministic, zero LLM calls (logic_tier 1): the judgment step (deciding
+what's worth fetching) already happened in A009; this is pure
+fetch+store+reindex, state-tracked and idempotent per topic via
+`.pcp/kb/ingest_state.yaml` so a re-run only pulls the new delta rather
+than re-fetching an already-ingested candidate.
 """
 
+import hashlib
+import re
+import urllib.error
+import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+
+from pcp import kb_catalog, kb_index
 
 # Below this many characters of matching content, a topic is "thin" rather
 # than "covered". Zero matching characters is always a gap regardless of
@@ -415,3 +434,223 @@ def load_staged_candidates(pcp_dir: Path) -> list[dict]:
         return []
     rows = data.get("staged_candidates") if isinstance(data, dict) else None
     return rows if isinstance(rows, list) else []
+
+
+# ── A010: Phase B -- deterministic fetch + verbatim store + reindex ────────
+#
+# A candidate becomes eligible for Phase B only once a human/caller has
+# advanced its candidates.yaml row's status past STATUS_STAGED to
+# STATUS_APPROVED -- staying deliberately explicit about "approved" (rather
+# than "anything that isn't 'staged'") so a row a human marked "rejected"
+# is never mistaken for approval and silently fetched anyway.
+
+STATUS_APPROVED = "approved"
+STATUS_INGESTED = "ingested"
+
+# IngestResult.result values -- one per candidate processed each run.
+RESULT_INGESTED = "ingested"            # fetched + stored this run
+RESULT_ALREADY_INGESTED = "already_ingested"  # idempotency: state file says done already
+RESULT_FETCH_FAILED = "fetch_failed"    # fetcher raised -- status left unchanged, never advanced
+RESULT_EMPTY_CONTENT = "empty_content"  # fetcher returned nothing -- nothing stored
+
+INGEST_STATE_FILENAME = "ingest_state.yaml"
+DEFAULT_FETCH_TIMEOUT_SEC = 15
+
+_TOPIC_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+@dataclass
+class IngestResult:
+    """One Phase-B outcome row, one per candidate examined this run."""
+
+    gap_topic_id: str
+    url: str
+    result: str  # RESULT_* above
+    topic_dir: str | None = None
+    stored_path: str | None = None  # "<topic_dir>/<filename>.md", relative to kb/
+    content_hash: str | None = None  # sha256 hex of the verbatim stored content
+    detail: str = ""
+
+
+def _default_fetcher(url: str, timeout: int) -> str:
+    """Stdlib-only GET -- same urllib.request pattern as uat.py's
+    check_url_responds/check_dom_contains, no third-party HTTP dependency.
+    `fetcher` is always overridable (dependency injection, same posture as
+    A009's own `search_results` argument) so no caller/test ever needs a
+    real network call to exercise this module."""
+    req = urllib.request.Request(url, method="GET", headers={"User-Agent": "pcp-kb-ingest"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode(errors="replace")
+
+
+def _topic_dirname(gap_topic_id: str) -> str:
+    """Slugifies a candidate's gap_topic_id (e.g. 'dependency:networkx')
+    into a filesystem-safe kb topic directory name ('dependency-networkx').
+    Deliberately a local, minimal transform rather than importing
+    commands/kb_topics.py's private `_slugify` -- this pure-logic module
+    doesn't take a dependency on the CLI-layer commands package for a
+    one-line string transform (same lazy/no-hard-dependency posture as this
+    module's own lazy `from pcp.commands.kb_topics import
+    load_routing_categories` a few lines up)."""
+    slug = _TOPIC_SLUG_RE.sub("-", gap_topic_id.strip().lower()).strip("-")
+    return slug or "untitled"
+
+
+def _stored_filename(candidate: dict) -> str:
+    """<slug-of-title-or-url>-<10 hex chars of url sha256>.md -- the hash
+    suffix keeps filenames stable and collision-free across re-runs (same
+    url always yields the same filename) without needing a real title."""
+    slug_source = candidate.get("title") or candidate.get("url") or "source"
+    slug = _TOPIC_SLUG_RE.sub("-", str(slug_source).strip().lower()).strip("-")[:60]
+    digest = hashlib.sha256(str(candidate.get("url") or "").encode()).hexdigest()[:10]
+    return f"{slug or 'source'}-{digest}.md"
+
+
+def _load_ingest_state(pcp_dir: Path) -> dict:
+    path = Path(pcp_dir) / "kb" / INGEST_STATE_FILENAME
+    if path.exists():
+        try:
+            data = yaml.safe_load(path.read_text(errors="replace")) or {}
+        except yaml.YAMLError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+    else:
+        data = {}
+    if not isinstance(data.get("ingested"), list):
+        data["ingested"] = []
+    return data
+
+
+def _write_ingest_state(pcp_dir: Path, state: dict) -> Path:
+    kb_dir = Path(pcp_dir) / "kb"
+    kb_dir.mkdir(parents=True, exist_ok=True)
+    out = kb_dir / INGEST_STATE_FILENAME
+    state["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out.write_text(yaml.safe_dump(state, sort_keys=False))
+    return out
+
+
+def _advance_candidate_statuses(pcp_dir: Path, keys: set[tuple], new_status: str) -> None:
+    """Batch-updates candidates.yaml rows matching (gap_topic_id, url) in
+    `keys` to `new_status` -- a forward-only transition (approved ->
+    ingested), same file shape write_staged_candidates/load_staged_candidates
+    already use. No-op when `keys` is empty (skips a pointless read+rewrite,
+    e.g. on a run where every candidate failed to fetch)."""
+    if not keys:
+        return
+    path = Path(pcp_dir) / "kb" / "candidates.yaml"
+    if not path.exists():
+        return
+    try:
+        data = yaml.safe_load(path.read_text(errors="replace")) or {}
+    except yaml.YAMLError:
+        return
+    if not isinstance(data, dict) or not isinstance(data.get("staged_candidates"), list):
+        return
+
+    changed = False
+    for row in data["staged_candidates"]:
+        if isinstance(row, dict) and (row.get("gap_topic_id"), row.get("url")) in keys:
+            row["status"] = new_status
+            changed = True
+    if changed:
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+
+def ingest_approved_candidates(
+    pcp_dir: Path,
+    fetcher: Callable[[str, int], str] | None = None,
+    timeout: int = DEFAULT_FETCH_TIMEOUT_SEC,
+    project_root: Path | None = None,
+) -> list[IngestResult]:
+    """Phase B: for every `.pcp/kb/candidates.yaml` row whose status is
+    STATUS_APPROVED, fetches its raw content and stores it VERBATIM under
+    `.pcp/kb/<topic>/<file>.md` -- the stored file's body is exactly what
+    `fetcher` returned, no summarization, no paraphrase, nothing else
+    written into it.
+
+    Idempotent per topic: a (gap_topic_id, url) pair already recorded in
+    `.pcp/kb/ingest_state.yaml` is never re-fetched, even if its
+    candidates.yaml row somehow still (or once again) reads 'approved' --
+    the state file is the authoritative idempotency record. The candidate
+    row's own status is a human-facing progress marker this function also
+    advances to STATUS_INGESTED on success (left unchanged on failure, so a
+    failed fetch stays visibly 'approved' and eligible for a later retry).
+
+    Zero LLM calls (logic_tier 1) -- the judgment step (deciding what's
+    worth fetching) already happened in A009's stage_candidates_for_gap.
+
+    Whenever at least one candidate is newly ingested this run, re-runs
+    kb_catalog.write_topic_catalogs and kb_index.write_kb_index once (a
+    full rebuild, matching their own existing "no incremental staleness
+    tracking" posture -- see kb_catalog.py's module docstring) so the new
+    content becomes searchable. Skipped entirely on a no-op run (nothing
+    approved, or everything already ingested) to avoid a pointless rewrite.
+    """
+    pcp_dir = Path(pcp_dir)
+    fetcher = fetcher or _default_fetcher
+
+    candidates = load_staged_candidates(pcp_dir)
+    state = _load_ingest_state(pcp_dir)
+    already_ingested_keys = {
+        (entry.get("gap_topic_id"), entry.get("url"))
+        for entry in state["ingested"] if isinstance(entry, dict)
+    }
+
+    results: list[IngestResult] = []
+    newly_ingested_keys: set[tuple] = set()
+
+    for row in candidates:
+        if not isinstance(row, dict) or row.get("status") != STATUS_APPROVED:
+            continue
+        gap_topic_id = str(row.get("gap_topic_id") or "")
+        url = str(row.get("url") or "").strip()
+        if not url:
+            continue
+
+        key = (row.get("gap_topic_id"), row.get("url"))
+        if key in already_ingested_keys:
+            results.append(IngestResult(gap_topic_id, url, RESULT_ALREADY_INGESTED))
+            continue
+
+        try:
+            raw_content = fetcher(url, timeout)
+        except Exception as e:
+            results.append(IngestResult(gap_topic_id, url, RESULT_FETCH_FAILED, detail=str(e)))
+            continue
+
+        if not raw_content:
+            results.append(IngestResult(gap_topic_id, url, RESULT_EMPTY_CONTENT))
+            continue
+
+        topic_dir = _topic_dirname(gap_topic_id or "untitled")
+        filename = _stored_filename(row)
+        topic_path = pcp_dir / "kb" / topic_dir
+        topic_path.mkdir(parents=True, exist_ok=True)
+        (topic_path / filename).write_text(raw_content)  # verbatim -- nothing added, nothing altered
+
+        content_hash = hashlib.sha256(raw_content.encode("utf-8", errors="replace")).hexdigest()
+        stored_rel = f"{topic_dir}/{filename}"
+
+        results.append(IngestResult(
+            gap_topic_id, url, RESULT_INGESTED,
+            topic_dir=topic_dir, stored_path=stored_rel, content_hash=content_hash,
+        ))
+        state["ingested"].append({
+            "gap_topic_id": gap_topic_id,
+            "url": url,
+            "topic_dir": topic_dir,
+            "stored_path": stored_rel,
+            "content_hash": content_hash,
+            "ingested_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+        newly_ingested_keys.add(key)
+
+    if newly_ingested_keys:
+        _write_ingest_state(pcp_dir, state)
+        _advance_candidate_statuses(pcp_dir, newly_ingested_keys, STATUS_INGESTED)
+        kb_catalog.write_topic_catalogs(pcp_dir)
+        kb_index.write_kb_index(pcp_dir, project_root)
+
+    return results
