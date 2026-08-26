@@ -819,3 +819,118 @@ def test_default_fetcher_uses_stdlib_urllib_get(tmp_path):
     files = list(stored.glob("*.md"))
     assert len(files) == 1
     assert files[0].read_text() == "fetched via urllib\n"
+
+
+# ── A011: ingestion integrity gate wired into ingest_approved_candidates ───
+
+def test_flagged_batch_stored_but_not_indexed(tmp_path):
+    """The real incident this closes: a JS-driven video-listing app-shell
+    whose scraped body is just 'No video found.' -- content is fetched and
+    stored verbatim (never silently dropped), but the catalog/index
+    rebuild is withheld until a human reviews the flag."""
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    results = ingest_approved_candidates(
+        pcp_dir, fetcher=_fake_fetcher({"https://openpolicyagent.org/docs": "No video found.\n"}),
+    )
+
+    assert len(results) == 1
+    assert results[0].result == RESULT_INGESTED
+    stored = pcp_dir / "kb" / "candidate-opa"
+    assert list(stored.glob("*.md"))  # content IS stored, verbatim
+
+    # but never indexed while the flag is unresolved
+    assert not (pcp_dir / "kb" / "catalog").exists()
+    assert not (pcp_dir / "kb" / "index.yaml").exists()
+
+    flags_path = pcp_dir / "kb" / "integrity_flags.yaml"
+    assert flags_path.exists()
+    flags = yaml.safe_load(flags_path.read_text())["flags"]
+    assert len(flags) == 1
+    assert flags[0]["check"] == "fingerprint"
+    assert flags[0]["status"] == "pending"
+
+
+def test_clean_batch_indexes_normally_no_flags_written(tmp_path):
+    """Existing clean-content behavior is unchanged -- A011 must not
+    introduce a false positive on ordinary fetched content."""
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    ingest_approved_candidates(
+        pcp_dir,
+        fetcher=_fake_fetcher({"https://openpolicyagent.org/docs": "# Real Doc\n\nGenuine content.\n"}),
+    )
+
+    assert (pcp_dir / "kb" / "catalog").exists()
+    assert (pcp_dir / "kb" / "index.yaml").exists()
+    assert not (pcp_dir / "kb" / "integrity_flags.yaml").exists()
+
+
+def test_prior_unresolved_flag_blocks_a_later_clean_ingest_run(tmp_path):
+    """An earlier run's still-pending flag withholds indexing even for a
+    LATER run's entirely clean batch -- kb_catalog/kb_index are full
+    rebuilds with no incremental staleness tracking, so a rebuild
+    triggered now would sweep the still-unresolved flagged content back
+    into the searchable index too."""
+    from pcp.kb_ingest_integrity import (
+        FLAG_FINGERPRINT,
+        IntegrityFlag,
+        write_integrity_flags,
+    )
+
+    pcp_dir = tmp_path / ".pcp"
+    (pcp_dir / "kb").mkdir(parents=True)
+    write_integrity_flags(pcp_dir, [
+        IntegrityFlag(
+            stored_path="candidate-opa/old.md", gap_topic_id="candidate:opa",
+            url="https://openpolicyagent.org/old", check=FLAG_FINGERPRINT,
+            reason="matched 'no video found'",
+        ),
+    ])
+
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="dependency:networkx",
+        url="https://networkx.org/docs", status=STATUS_APPROVED,
+    )
+    ingest_approved_candidates(
+        pcp_dir, fetcher=_fake_fetcher({"https://networkx.org/docs": "# NetworkX\n\nClean.\n"}),
+    )
+
+    assert not (pcp_dir / "kb" / "catalog").exists()
+    assert not (pcp_dir / "kb" / "index.yaml").exists()
+
+
+def test_clearing_the_flag_lets_a_later_run_index(tmp_path):
+    """Once a human clears the outstanding flag, the next run's rebuild
+    proceeds normally -- the gate is real but not permanent."""
+    from pcp.kb_ingest_integrity import clear_integrity_flag
+
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    first = ingest_approved_candidates(
+        pcp_dir, fetcher=_fake_fetcher({"https://openpolicyagent.org/docs": "No video found.\n"}),
+    )
+    assert not (pcp_dir / "kb" / "index.yaml").exists()
+
+    cleared = clear_integrity_flag(
+        pcp_dir, first[0].stored_path, "fingerprint", "reviewed: real doc about video APIs",
+    )
+    assert cleared is True
+
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="dependency:networkx",
+        url="https://networkx.org/docs", status=STATUS_APPROVED,
+    )
+    ingest_approved_candidates(
+        pcp_dir, fetcher=_fake_fetcher({"https://networkx.org/docs": "# NetworkX\n\nClean.\n"}),
+    )
+    assert (pcp_dir / "kb" / "index.yaml").exists()
