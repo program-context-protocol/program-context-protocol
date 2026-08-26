@@ -22,6 +22,7 @@ from their own runner functions in commands/check.py.
 
 import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -392,3 +393,207 @@ def check_kb_contradiction(
         return []
 
     return _verify_contradiction_findings(pcp_dir, diff, findings)
+
+
+# ── A013: grounding-gate context-package builder ────────────────────────────
+#
+# The grounding gate (module spec.yaml, component 5) has two halves: this
+# is the FIRST -- a disclosed context package assembled pre-build, so an
+# agent starting work on a target file sees what grounding evidence already
+# exists before it writes anything. check_kb_contradiction/A016 above is
+# the second half -- a genuinely-blocking AFTER-the-fact check run at
+# architect-review, once a diff exists to compare against loaded claims.
+# The two are complementary, not redundant: this builder never blocks
+# anything by itself, it discloses; A016 blocks.
+#
+# "Build-Plan-style" mirrors commands/build_plan.py's own posture exactly
+# (see that module's docstring): pure aggregation over data other kb
+# components already compute, zero LLM calls, spawns nothing, one
+# JSON-serializable dict. Nothing here recomputes a card, a catalog, an
+# index, a gap list, or a dependency graph -- every section below is a thin
+# read over an existing kb component's own output/input.
+#
+# Four sections, each assembled and disclosed INDEPENDENTLY -- a target
+# file missing a card, missing topic citations, missing known-issues hits,
+# or unattributable to any module for blast-radius purposes is real,
+# actionable grounding information (exactly what a caller needs to decide
+# whether it's safe to proceed on thin evidence), never silently folded
+# into a package that merely reports "built" with nothing to show:
+#   1. file_metadata   -- kb_file_metadata.py's per-file card (A001-A003)
+#   2. topic_citations -- kb_index.py's basename cross-reference resolved
+#                          against kb_catalog.py's heading-TOC (A006/A007),
+#                          i.e. which kb topic docs mention this file, and
+#                          under which headings
+#   3. known_issues     -- kb/domain + kb/adr prose that mentions this file
+#                          by basename -- the human-curated failure-mode/
+#                          gotcha layer CLAUDE.md documents for kb/domain/
+#                          *.md, reusing kb_ingest.py's own definition of
+#                          "kb content" (the same two directories its gap
+#                          detector treats as real prose, A008)
+#   4. blast_radius      -- which OTHER modules would be affected if this
+#                          file's owning module changes. Reuses impact.py's
+#                          own module-attribution + dependency-graph
+#                          traversal (built for QA test-selection, same
+#                          graph coupling.py's coupling_score already
+#                          trusts) rather than a second implementation,
+#                          optionally enriched with graphify's community
+#                          detection (coupling.py's own compute_communities
+#                          -- graphify is already an adopted dependency in
+#                          this repo, see that module's own docstring;
+#                          degrades to {"available": False} if graphify
+#                          isn't installed, never an error)
+
+
+def build_file_metadata_section(pcp_dir: Path, project_root: Path, target_file: str) -> dict:
+    """{"found": bool, "card": dict | None} -- the target file's
+    kb_file_metadata card (A001-A003), read straight off disk. A missing
+    card, a target_file outside project_root, or malformed card YAML all
+    disclose as found=False rather than raising -- Layer 1's schema-
+    validation problem, not this builder's, same posture load_constraint_
+    index/load_kb_claims_for_files already take on a broken spec/card."""
+    from pcp.kb_file_metadata import card_path_for
+
+    project_root = Path(project_root)
+    source_file = project_root / target_file
+    try:
+        card_path = card_path_for(pcp_dir, project_root, source_file)
+    except ValueError:
+        return {"found": False, "card": None}
+    if not card_path.exists():
+        return {"found": False, "card": None}
+    try:
+        data = yaml.safe_load(card_path.read_text(errors="replace")) or {}
+    except yaml.YAMLError:
+        return {"found": False, "card": None}
+    if not isinstance(data, dict):
+        return {"found": False, "card": None}
+    return {"found": True, "card": data}
+
+
+def build_topic_citations_section(pcp_dir: Path, project_root: Path, target_file: str) -> dict:
+    """{"found": bool, "citations": [{"doc": str, "headings": [...]}, ...]}
+    -- every kb topic doc that mentions target_file's basename as a
+    filename-shaped token (kb_index.py's own cross-reference, A007),
+    resolved into that doc's real heading TOC (kb_catalog.py's
+    extract_headings, A006) so a citation points at a section, not just a
+    filename. Reads live rather than requiring `pcp kb-catalog`/
+    `pcp kb-index` to have been run first -- both underlying scans are
+    already cheap, deterministic, single-basename-scoped reads here."""
+    from pcp.kb_catalog import extract_headings
+    from pcp.kb_index import collect_kb_references
+
+    project_root = Path(project_root)
+    basename = Path(target_file).name
+    references = collect_kb_references(pcp_dir, {basename})
+    doc_rels = references.get(basename, [])
+
+    citations = []
+    for doc_rel in doc_rels:
+        doc_path = project_root / doc_rel
+        citations.append({"doc": doc_rel, "headings": extract_headings(doc_path)})
+
+    return {"found": bool(citations), "citations": citations}
+
+
+def build_known_issues_section(pcp_dir: Path, target_file: str) -> dict:
+    """{"found": bool, "hits": [{"doc": str, "matches": [str, ...]}, ...]}
+    -- lines in kb/domain + kb/adr prose (kb_ingest.py's own definition of
+    real kb content, A008's _kb_content_files) that mention target_file's
+    basename. "Known issues" here means the human-curated failure-mode/
+    invariant/gotcha layer CLAUDE.md documents for kb/domain/*.md -- a
+    verbatim substring match against that prose, same posture as
+    kb_ingest.detect_content_gaps's own matching (deterministic, no
+    summarisation, no relevance judgment)."""
+    from pcp.kb_ingest import _kb_content_files
+
+    needle = Path(target_file).name.lower()
+    hits = []
+    for path in _kb_content_files(pcp_dir):
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        matches = [
+            line.strip() for line in text.splitlines()
+            if needle in line.lower() and line.strip()
+        ]
+        if matches:
+            hits.append({"doc": path.name, "matches": matches})
+
+    return {"found": bool(hits), "hits": hits}
+
+
+def build_blast_radius_section(pcp_dir: Path, project_root: Path, target_file: str) -> dict:
+    """{"found": bool, "owning_modules": [...], "affected_modules": [...],
+    "graphify_communities": {...}} -- which module(s) own target_file
+    (impact.py's changed_files_to_modules -- declared `target` +
+    path-convention attribution) and every module that transitively
+    depends on them (impact.py's blast_radius_modules, nx.ancestors on
+    coupling.py's own dependency graph -- one graph, not a second one).
+    "found": False (with empty module lists) when target_file can't be
+    attributed to any declared module -- degrade honestly, never guess.
+    graphify_communities enriches with coupling.py's compute_communities
+    (advisory, {"available": False} if graphify isn't installed)."""
+    from pcp.coupling import build_dependency_graph, compute_communities
+    from pcp.impact import (
+        _load_modules_for_impact,
+        blast_radius_modules,
+        changed_files_to_modules,
+    )
+
+    pcp_dir = Path(pcp_dir)
+    modules = _load_modules_for_impact(pcp_dir)
+    empty = {
+        "found": False, "owning_modules": [], "affected_modules": [],
+        "graphify_communities": {"available": False},
+    }
+    if not modules:
+        return empty
+
+    owning = changed_files_to_modules(pcp_dir, modules, [target_file])
+    if not owning:
+        return empty
+
+    radius = blast_radius_modules(modules, owning)
+    affected = sorted(radius - owning)
+
+    G = build_dependency_graph(modules)
+    communities = compute_communities(G)
+
+    return {
+        "found": True,
+        "owning_modules": sorted(owning),
+        "affected_modules": affected,
+        "graphify_communities": communities,
+    }
+
+
+def build_context_package(
+    project_root: Path, pcp_dir: Path, target_files: list[str],
+) -> dict:
+    """The grounding-gate context package (module spec.yaml component 5,
+    first half -- see the section docstring above): {"target_files": [...],
+    "files": {target_file: {"file_metadata": ..., "topic_citations": ...,
+    "known_issues": ..., "blast_radius": ...}}, "generated_at": "..."}.
+
+    Build-Plan-style: pure aggregation, zero LLM calls, spawns nothing,
+    JSON-serializable. Every one of the four sections is assembled and
+    disclosed independently per target file -- see the module-level
+    section docstring above for why that independence matters."""
+    project_root = Path(project_root)
+    pcp_dir = Path(pcp_dir)
+
+    files: dict[str, dict] = {}
+    for target_file in target_files:
+        files[target_file] = {
+            "file_metadata": build_file_metadata_section(pcp_dir, project_root, target_file),
+            "topic_citations": build_topic_citations_section(pcp_dir, project_root, target_file),
+            "known_issues": build_known_issues_section(pcp_dir, target_file),
+            "blast_radius": build_blast_radius_section(pcp_dir, project_root, target_file),
+        }
+
+    return {
+        "target_files": list(target_files),
+        "files": files,
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }

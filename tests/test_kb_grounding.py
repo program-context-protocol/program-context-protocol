@@ -6,6 +6,12 @@ A016 — Tier-6 LLM-judged check: compares a diff against loaded
 kb/file_metadata content for non-mechanical contradictions and returns a
 genuinely-blocking verdict, same posture as CTRL-015 (mocked judge calls
 only, same convention as test_narrative_lint.py).
+
+A013 — Grounding-gate context-package builder: assembles file metadata,
+topic citations, known-issues hits, and blast radius (via graphify, when
+installed) into one Build-Plan-style package per target file. Zero LLM
+calls -- pure aggregation over data kb_file_metadata/kb_catalog/kb_index/
+kb_ingest/coupling/impact already compute.
 """
 
 import subprocess
@@ -14,6 +20,11 @@ from unittest.mock import patch
 import yaml
 
 from pcp.kb_grounding import (
+    build_blast_radius_section,
+    build_context_package,
+    build_file_metadata_section,
+    build_known_issues_section,
+    build_topic_citations_section,
     check_constraint_protection,
     check_kb_contradiction,
     extract_protected_identifiers,
@@ -409,3 +420,224 @@ def test_judge_returns_no_contradictions_skips_verifier_call(tmp_path):
         findings = check_kb_contradiction([rel], tmp_path, tmp_path / ".pcp")
     assert mock_call.call_count == 1
     assert findings == []
+
+
+# ── A013 — grounding-gate context-package builder ───────────────────────────
+
+def _write_module_dep(pcp_dir, name, deps=None, target=None):
+    """Minimal module scaffold matching impact.py's own expectations:
+    spec.yaml with dependencies, acceptance.yaml with one criterion
+    declaring `target` (the declared-target attribution signal
+    changed_files_to_modules reads)."""
+    mod_dir = pcp_dir / "strategy" / "modules" / name
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "spec.yaml").write_text(yaml.safe_dump({"dependencies": deps or []}))
+    criteria = [{"id": "A001", "target": target}] if target else []
+    (mod_dir / "acceptance.yaml").write_text(yaml.safe_dump({"criteria": criteria}))
+
+
+# --- build_file_metadata_section ---------------------------------------------
+
+def test_file_metadata_section_found_returns_card(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_card(tmp_path, "src/thing.py", ["A real claim"])
+
+    section = build_file_metadata_section(pcp_dir, tmp_path, "src/thing.py")
+
+    assert section["found"] is True
+    assert section["card"]["card_version"] == 1
+    assert section["card"]["claims"] == ["A real claim"]
+
+
+def test_file_metadata_section_not_found_when_no_card(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+
+    section = build_file_metadata_section(pcp_dir, tmp_path, "src/missing.py")
+
+    assert section == {"found": False, "card": None}
+
+
+def test_file_metadata_section_disclosed_on_malformed_card(tmp_path):
+    from pcp.kb_file_metadata import card_path_for
+
+    pcp_dir = tmp_path / ".pcp"
+    card_path = card_path_for(pcp_dir, tmp_path, tmp_path / "src/thing.py")
+    card_path.parent.mkdir(parents=True, exist_ok=True)
+    card_path.write_text("not: valid: yaml: [")
+
+    section = build_file_metadata_section(pcp_dir, tmp_path, "src/thing.py")
+
+    assert section["found"] is False
+    assert section["card"] is None
+
+
+# --- build_topic_citations_section -------------------------------------------
+
+def test_topic_citations_section_found_extracts_headings(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    adr_dir = pcp_dir / "kb" / "adr"
+    adr_dir.mkdir(parents=True)
+    (adr_dir / "ADR-001.md").write_text(
+        "# ADR-001: thing.py rationale\n\n## Context\n\nSee src/thing.py.\n"
+    )
+
+    section = build_topic_citations_section(pcp_dir, tmp_path, "src/thing.py")
+
+    assert section["found"] is True
+    assert len(section["citations"]) == 1
+    citation = section["citations"][0]
+    assert citation["doc"].endswith("ADR-001.md")
+    assert {"line": 1, "level": 1, "text": "ADR-001: thing.py rationale"} in citation["headings"]
+
+
+def test_topic_citations_section_not_found_when_no_reference(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    domain_dir = pcp_dir / "kb" / "domain"
+    domain_dir.mkdir(parents=True)
+    (domain_dir / "general.md").write_text("# General\n\nNo filenames here.\n")
+
+    section = build_topic_citations_section(pcp_dir, tmp_path, "src/thing.py")
+
+    assert section == {"found": False, "citations": []}
+
+
+# --- build_known_issues_section -----------------------------------------------
+
+def test_known_issues_section_found_when_domain_doc_mentions_file(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    domain_dir = pcp_dir / "kb" / "domain"
+    domain_dir.mkdir(parents=True)
+    (domain_dir / "gotchas.md").write_text(
+        "# Gotchas\n\nsrc/thing.py has a known race condition on init.\nUnrelated line.\n"
+    )
+
+    section = build_known_issues_section(pcp_dir, "src/thing.py")
+
+    assert section["found"] is True
+    assert len(section["hits"]) == 1
+    assert section["hits"][0]["doc"] == "gotchas.md"
+    assert any("race condition" in m for m in section["hits"][0]["matches"])
+
+
+def test_known_issues_section_not_found_when_no_mention(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    domain_dir = pcp_dir / "kb" / "domain"
+    domain_dir.mkdir(parents=True)
+    (domain_dir / "gotchas.md").write_text("# Gotchas\n\nNothing about this file.\n")
+
+    section = build_known_issues_section(pcp_dir, "src/thing.py")
+
+    assert section == {"found": False, "hits": []}
+
+
+def test_known_issues_section_no_kb_dir_returns_not_found(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+
+    section = build_known_issues_section(pcp_dir, "src/thing.py")
+
+    assert section == {"found": False, "hits": []}
+
+
+# --- build_blast_radius_section -----------------------------------------------
+
+def test_blast_radius_section_reports_affected_modules(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_module_dep(pcp_dir, "auth", deps=[], target="src/auth/login.py")
+    _write_module_dep(pcp_dir, "api", deps=["auth"], target="src/api/routes.py")
+
+    section = build_blast_radius_section(pcp_dir, tmp_path, "src/auth/login.py")
+
+    assert section["found"] is True
+    assert section["owning_modules"] == ["auth"]
+    assert section["affected_modules"] == ["api"]
+
+
+def test_blast_radius_section_not_found_when_file_unattributed(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_module_dep(pcp_dir, "auth", deps=[], target="src/auth/login.py")
+
+    section = build_blast_radius_section(pcp_dir, tmp_path, "src/unrelated/file.py")
+
+    assert section["found"] is False
+    assert section["owning_modules"] == []
+    assert section["affected_modules"] == []
+
+
+def test_blast_radius_section_not_found_when_no_modules(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+
+    section = build_blast_radius_section(pcp_dir, tmp_path, "src/thing.py")
+
+    assert section["found"] is False
+
+
+def test_blast_radius_graphify_communities_unavailable_without_graphify(tmp_path):
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("graphify"):
+            raise ImportError("no graphify")
+        return real_import(name, *args, **kwargs)
+
+    pcp_dir = tmp_path / ".pcp"
+    _write_module_dep(pcp_dir, "auth", deps=[], target="src/auth/login.py")
+
+    builtins.__import__ = fake_import
+    try:
+        section = build_blast_radius_section(pcp_dir, tmp_path, "src/auth/login.py")
+    finally:
+        builtins.__import__ = real_import
+
+    assert section["graphify_communities"] == {"available": False}
+
+
+# --- build_context_package -----------------------------------------------------
+
+def test_build_context_package_assembles_all_four_sections(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_card(tmp_path, "src/thing.py", ["A real claim"])
+    adr_dir = pcp_dir / "kb" / "adr"
+    adr_dir.mkdir(parents=True)
+    (adr_dir / "ADR-001.md").write_text("# thing.py notes\n\nAbout src/thing.py.\n")
+    domain_dir = pcp_dir / "kb" / "domain"
+    domain_dir.mkdir(parents=True)
+    (domain_dir / "gotchas.md").write_text("thing.py has a known issue.\n")
+    _write_module_dep(pcp_dir, "core", deps=[], target="src/thing.py")
+
+    package = build_context_package(tmp_path, pcp_dir, ["src/thing.py"])
+
+    assert package["target_files"] == ["src/thing.py"]
+    sections = package["files"]["src/thing.py"]
+    assert set(sections) == {"file_metadata", "topic_citations", "known_issues", "blast_radius"}
+    assert sections["file_metadata"]["found"] is True
+    assert sections["topic_citations"]["found"] is True
+    assert sections["known_issues"]["found"] is True
+    assert sections["blast_radius"]["found"] is True
+    assert "generated_at" in package
+
+
+def test_build_context_package_discloses_not_found_independently(tmp_path):
+    """A target file with none of the four kinds of grounding evidence gets
+    an honest not-found disclosure in every section, not a silently empty
+    package."""
+    pcp_dir = tmp_path / ".pcp"
+
+    package = build_context_package(tmp_path, pcp_dir, ["src/ungrounded.py"])
+
+    sections = package["files"]["src/ungrounded.py"]
+    assert sections["file_metadata"]["found"] is False
+    assert sections["topic_citations"]["found"] is False
+    assert sections["known_issues"]["found"] is False
+    assert sections["blast_radius"]["found"] is False
+
+
+def test_build_context_package_multiple_target_files_independent(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_card(tmp_path, "src/a.py", ["claim about a"])
+
+    package = build_context_package(tmp_path, pcp_dir, ["src/a.py", "src/b.py"])
+
+    assert package["target_files"] == ["src/a.py", "src/b.py"]
+    assert package["files"]["src/a.py"]["file_metadata"]["found"] is True
+    assert package["files"]["src/b.py"]["file_metadata"]["found"] is False
