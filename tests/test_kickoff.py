@@ -1,3 +1,6 @@
+from unittest.mock import patch
+
+import yaml
 
 
 # ── Screen/shared-entity DECOMPOSE-FIRST instructions actually shipped ──
@@ -70,3 +73,59 @@ def test_orphan_check_ignores_stray_dirs_without_a_spec(tmp_path):
 def test_orphan_check_noop_without_a_modules_dir(tmp_path):
     from pcp.commands.kickoff import _report_orphaned_modules
     assert _report_orphaned_modules(tmp_path, {"anything"}) == []
+
+
+# ── kb topic finalization wired into kickoff (A017) ──
+
+def _minimal_kickoff_result():
+    return {
+        "objective": "# Objective\nBuild a todo app.",
+        "target_state": "# Target State\nDone.",
+        "architecture": "# Architecture\nCLI.",
+        "decomposition": "# Decomposition\nOne module.",
+        "sdlc_phase": {"current_phase": "planning", "phases": [
+            {"name": "planning", "exit_criteria": [{"id": "E001", "status": "pending"}]},
+        ]},
+        "ci_rules": {"rules": []},
+        "architect_persona": "# Architect Persona\nBe careful.",
+        "modules": [
+            {
+                "name": "core",
+                "spec": {"description": "Core module."},
+                "acceptance": {"criteria": []},
+            },
+        ],
+        "capabilities_enumerated": ["add a todo"],
+        "assumptions_enumerated": [],
+        "shared_entities_enumerated": [],
+    }
+
+
+def test_kickoff_finalizes_kb_topics_from_generated_objective(tmp_path):
+    """topics.yaml (kb component 2) is derived once, at kickoff time, from
+    the objective.md kickoff itself just wrote -- not left for a later
+    per-build pass. See kb_bootstrap.run_topic_finalization."""
+    from click.testing import CliRunner
+    from pcp.cli import cli
+
+    vision_file = tmp_path / "vision.md"
+    vision_file.write_text("Build a todo app.")
+
+    def fake_call_json(system, user, model=None, **kwargs):
+        if "expert product manager" in system:
+            return _minimal_kickoff_result()
+        return {}  # validate-strategy call -- every field is .get()-accessed
+
+    with patch("pcp.commands.kickoff.llm.call_json", side_effect=fake_call_json):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["kickoff", str(vision_file), "--path", str(tmp_path), "--force"],
+            input="n\n",  # decline strategy approval -- not exercising that branch here
+        )
+
+    assert result.exit_code == 0, result.output
+    topics_path = tmp_path / ".pcp" / "kb" / "topics.yaml"
+    assert topics_path.exists()
+    data = yaml.safe_load(topics_path.read_text())
+    assert any(t["label"] == "Objective" for t in data["topics"])
+    assert "kb topics finalized" in result.output
