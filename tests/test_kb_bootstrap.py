@@ -147,3 +147,102 @@ def test_run_progressive_bootstrap_does_not_call_topic_finalization(tmp_path, mo
     kb_bootstrap.run_progressive_bootstrap(project_root, pcp_dir)
 
     assert called == []
+
+
+# --- run_eager_import_sweep (A018) -- existing-project one-shot full sweep ---
+
+def _make_import_project(tmp_path):
+    """A project shaped like `pcp import` just scaffolded it: objective.md +
+    a module spec already on disk (import writes these before the sweep
+    runs), plus one real source file for component 1 to card."""
+    project_root, pcp_dir = _make_project(tmp_path)
+    (pcp_dir / "objective.md").write_text("# Program Objective\n\nBuild things.\n")
+    (pcp_dir / "target_state.md").write_text("# Target State\n\nDone means shipped.\n")
+    mod_dir = pcp_dir / "strategy" / "modules" / "widgets"
+    mod_dir.mkdir(parents=True)
+    (mod_dir / "spec.yaml").write_text(
+        "module: widgets\ndescription: x\ndependencies: []\nconstraints: []\n"
+    )
+    return project_root, pcp_dir
+
+
+def test_eager_import_sweep_runs_component_1_file_metadata(tmp_path):
+    project_root, pcp_dir = _make_import_project(tmp_path)
+
+    result = kb_bootstrap.run_eager_import_sweep(project_root, pcp_dir)
+
+    assert result["component_1_file_metadata"]["ran"] is True
+    card_path = pcp_dir / "kb" / "file_metadata" / "src" / "app.py.yaml"
+    assert card_path.exists()
+
+
+def test_eager_import_sweep_runs_component_2_topics(tmp_path):
+    project_root, pcp_dir = _make_import_project(tmp_path)
+
+    result = kb_bootstrap.run_eager_import_sweep(project_root, pcp_dir)
+
+    assert result["component_2_topics"]["ran"] is True
+    topics_path = pcp_dir / "kb" / "topics.yaml"
+    assert topics_path.exists()
+    data = yaml.safe_load(topics_path.read_text())
+    assert any(t["label"] == "Program Objective" for t in data["topics"])
+
+
+def test_eager_import_sweep_runs_component_3_catalog_and_index(tmp_path):
+    project_root, pcp_dir = _make_import_project(tmp_path)
+    domain_dir = pcp_dir / "kb" / "domain"
+    domain_dir.mkdir(parents=True)
+    (domain_dir / "notes.md").write_text("# Heading One\n\nsome prose\n")
+
+    result = kb_bootstrap.run_eager_import_sweep(project_root, pcp_dir)
+
+    assert result["component_3_catalog_index"]["ran"] is True
+    assert (pcp_dir / "kb" / "catalog" / "domain.yaml").exists()
+    assert (pcp_dir / "kb" / "index.yaml").exists()
+
+
+def test_eager_import_sweep_runs_component_4_gap_detection_after_topics_exist(tmp_path):
+    """Component 4 (gap detection) reads topics.yaml -- proves the sweep
+    runs component 2 before component 4, not in some other order, since
+    topics.yaml doesn't exist until component 2 writes it."""
+    project_root, pcp_dir = _make_import_project(tmp_path)
+
+    result = kb_bootstrap.run_eager_import_sweep(project_root, pcp_dir)
+
+    assert result["component_4_gap_ingestion"]["ran"] is True
+    summary = result["component_4_gap_ingestion"]["summary"]
+    # "Program Objective" topic has zero kb/domain+kb/adr content -> a gap.
+    assert summary["gap_count"] >= 1
+
+
+def test_eager_import_sweep_runs_once_synchronously_not_per_file(tmp_path):
+    """Unlike run_progressive_bootstrap, this is a single explicit call the
+    caller (`pcp import`) makes exactly once -- no hidden re-entrancy or
+    background scheduling here."""
+    project_root, pcp_dir = _make_import_project(tmp_path)
+
+    result = kb_bootstrap.run_eager_import_sweep(project_root, pcp_dir)
+
+    for key in (
+        "component_1_file_metadata",
+        "component_2_topics",
+        "component_3_catalog_index",
+        "component_4_gap_ingestion",
+    ):
+        assert key in result
+
+
+def test_eager_import_sweep_never_raises_when_a_component_errors(tmp_path, monkeypatch):
+    project_root, pcp_dir = _make_import_project(tmp_path)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr("pcp.kb_file_metadata.generate_file_metadata_cards", _boom)
+
+    result = kb_bootstrap.run_eager_import_sweep(project_root, pcp_dir)
+
+    assert result["component_1_file_metadata"]["ran"] is False
+    assert "kaboom" in result["component_1_file_metadata"]["reason"]
+    # Other components still ran -- one failure doesn't abort the sweep.
+    assert result["component_2_topics"]["ran"] is True

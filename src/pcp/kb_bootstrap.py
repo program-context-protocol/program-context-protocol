@@ -89,6 +89,101 @@ def run_progressive_bootstrap(project_root: Path, pcp_dir: Path) -> dict:
     return results
 
 
+def run_eager_import_sweep(project_root: Path, pcp_dir: Path) -> dict:
+    """A018 -- existing-project (`pcp import`) eager synchronous sweep.
+
+    A fresh `pcp init` project has files created one at a time as `pcp
+    build` runs, so run_progressive_bootstrap has a real "as files are
+    created" moment to hook into per criterion. An EXISTING project being
+    imported has no such moment -- every file already exists the instant
+    `pcp import` runs -- so the only correct posture is to run kb's
+    components 1-4 once, synchronously, in full, right then, rather than
+    leave the whole kb tree empty until some later per-file trigger that
+    will never retroactively fire for code that predates PCP's own
+    involvement.
+
+    Caller contract: `pcp import` must call this AFTER its .pcp/ scaffold
+    write (objective.md, target_state.md, module spec.yaml files) has
+    already landed on disk -- component 2 (topic finalization) reads those,
+    the same precondition kickoff.py's own call site already relies on.
+
+    Runs strictly in this order, in one call, not four separate ones a
+    caller could accidentally interleave with other work:
+      1. File-metadata cards (kb_file_metadata.py, A001) -- full walk,
+         every source file, not just ones touched since some prior run.
+      2. Topic finalization (kb_topics.py, A004), via
+         run_topic_finalization -- the same single entry point kickoff.py
+         uses, so there is exactly one writer of topics.yaml regardless of
+         which caller (kickoff vs. import) triggers it.
+      3. Catalog + index builders (kb_catalog.py A006, kb_index.py A007) --
+         called directly, not through run_progressive_bootstrap's dynamic
+         dispatch table, because that table's component_3 entry names a
+         combined `build_catalog_and_index` function that does not exist;
+         the real, already-built builders are write_topic_catalogs and
+         write_kb_index, called here for real instead of silently no-op'ing
+         as "not yet built" the way the stale dispatch entry would.
+      4. Gap detection (kb_ingest.py, A008 -- the deterministic gate Phase A
+         of the two-phase ingestion engine sits behind) -- must run AFTER
+         component 2, since it reads the topics.yaml component 2 writes.
+         Phase A itself (LLM candidate staging, a later criterion) and
+         Phase B (deterministic fetch, later still) are not yet built;
+         once they land this function's component_4 step is the one place
+         to extend, the same "component lands, sweep picks it up" posture
+         run_progressive_bootstrap already established for components 3/4.
+
+    Never raises: each component's failure is captured per-key instead of
+    propagated, and one component erroring does not stop the others from
+    running -- this is advisory grounding infrastructure, same posture as
+    run_progressive_bootstrap/run_topic_finalization, never a hard gate on
+    `pcp import` succeeding.
+    """
+    results: dict[str, dict] = {}
+
+    # Component 1 -- file-metadata cards, full walk.
+    try:
+        from pcp.kb_file_metadata import generate_file_metadata_cards
+        summary = generate_file_metadata_cards(project_root, pcp_dir)
+        results["component_1_file_metadata"] = {"ran": True, "summary": summary}
+    except Exception as exc:  # advisory only -- never blocks pcp import
+        results["component_1_file_metadata"] = {"ran": False, "reason": f"error: {exc}"}
+
+    # Component 2 -- topic finalization. Must run before component 4.
+    results["component_2_topics"] = run_topic_finalization(project_root, pcp_dir)
+
+    # Component 3 -- catalog + index builders.
+    try:
+        from pcp.kb_catalog import write_topic_catalogs
+        from pcp.kb_index import write_kb_index
+        catalog_paths = write_topic_catalogs(pcp_dir)
+        index_path = write_kb_index(pcp_dir, project_root)
+        results["component_3_catalog_index"] = {
+            "ran": True,
+            "summary": {
+                "catalogs_written": [str(p) for p in catalog_paths],
+                "index_written": str(index_path),
+            },
+        }
+    except Exception as exc:  # advisory only -- never blocks pcp import
+        results["component_3_catalog_index"] = {"ran": False, "reason": f"error: {exc}"}
+
+    # Component 4 -- gap/ingestion engine (current build: deterministic gap
+    # detection, A008). Runs last -- depends on topics.yaml from component 2.
+    try:
+        from pcp.kb_ingest import detect_content_gaps
+        gaps = detect_content_gaps(pcp_dir)
+        results["component_4_gap_ingestion"] = {
+            "ran": True,
+            "summary": {
+                "gap_count": len(gaps),
+                "gap_topic_ids": [g.topic_id for g in gaps],
+            },
+        }
+    except Exception as exc:  # advisory only -- never blocks pcp import
+        results["component_4_gap_ingestion"] = {"ran": False, "reason": f"error: {exc}"}
+
+    return results
+
+
 def run_topic_finalization(project_root: Path, pcp_dir: Path) -> dict:
     """Component 2 -- topics.yaml. Deliberately separate from
     run_progressive_bootstrap: topic finalization derives from whole-
