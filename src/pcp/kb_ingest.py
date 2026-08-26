@@ -24,6 +24,7 @@ research step happens at all.
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -154,3 +155,263 @@ def detect_content_gaps(
         ))
 
     return gaps
+
+
+# ── A009: Phase A -- LLM-staged candidate identification ───────────────────
+#
+# Phase A never fetches or stores page content -- that's Phase B (A010), a
+# later criterion. This function's job: given raw search-RESULT METADATA
+# (title/url/snippet only) for a gap flagged above by detect_content_gaps,
+# ask an LLM which of those results are genuinely relevant and why, and
+# output a staged candidate list. Nothing here ever downloads a page.
+#
+# Why this takes `search_results` as an argument instead of calling
+# WebSearch/crawl4ai itself: llm/client.py's own harness (`claude -p`, a
+# one-shot subprocess) has no tool-use capability, by design -- same
+# constraint documented on inspiration_art.py's headless path (CLAUDE.md's
+# LLM Routing section: "PCP does not rebuild agentic search infra"). The
+# real WebSearch/crawl4ai call happens in whichever session drives this --
+# the interactive `/pcp` skill has genuine WebSearch/Agent access, same as
+# inspiration_art.py's own research step -- and this function's contract
+# starts once those raw results already exist. build_vs_buy for A009
+# (acceptance.yaml) records this as reuse_whole of WebSearch/crawl4ai, not a
+# rebuild: this module composes their output, it doesn't reimplement search.
+
+SOURCE_KINDS = ("docs", "book", "blog", "bug_tracker", "git_repo", "other")
+STATUS_STAGED = "staged"
+
+# A search result's snippet is truncated defensively -- WebSearch/crawl4ai
+# both return short result-listing snippets by nature, but this caps it
+# regardless so a caller that accidentally passes a full page body (a
+# misuse of this function's contract) can't smuggle real fetched content
+# into the judge prompt or the staged record under the 'snippet' key.
+_SNIPPET_MAX_CHARS = 500
+
+CANDIDATE_STAGING_SYSTEM_PROMPT = (
+    "You are staging candidate external sources for a detected knowledge gap in a "
+    "project's knowledge base. You are given the gap's label and a numbered list of "
+    "search results -- each one ONLY a title, a url, and a short snippet, never full "
+    "page content, because none of this has been fetched or verified yet. For each "
+    "result that is genuinely relevant to filling this specific gap, classify its "
+    "source_kind (exactly one of: docs, book, blog, bug_tracker, git_repo, other) and "
+    "write a short relevance_rationale explaining why it is worth fetching later -- "
+    "do not claim anything about the page's actual content beyond what the title/"
+    "snippet already say. Omit any result that is not genuinely relevant (off-topic, "
+    "spam, or a near-duplicate of another result you are keeping). You are staging "
+    "candidates for human approval only -- you must not fetch, download, browse, or "
+    "otherwise retrieve any of these urls yourself. "
+    'Respond with JSON only: {"candidates": [{"index": <int>, "source_kind": "...", '
+    '"relevance_rationale": "..."}]}. Empty list if none are relevant.'
+)
+
+
+@dataclass
+class StagedCandidate:
+    """One Phase-A output row: a candidate external source for a detected
+    gap, staged with a relevance rationale -- never fetched, never storing
+    any page content. `status` is always STATUS_STAGED coming out of this
+    module; Phase B (a later criterion) is the only place a candidate's
+    status ever advances past "staged"."""
+
+    gap_topic_id: str
+    gap_label: str
+    url: str
+    title: str
+    source_kind: str
+    relevance_rationale: str
+    discovered_via: str  # "websearch" | "crawl4ai" -- whichever tool found it
+    already_considered: bool = False
+    status: str = STATUS_STAGED
+
+
+def _sanitize_search_results(search_results: list[dict]) -> list[dict]:
+    """Boundary enforcement for 'never fetched or stored': reads ONLY
+    title/url/snippet off each raw result, regardless of what other keys a
+    caller's result dict happens to carry (a 'content'/'html'/'body' key,
+    for instance, if a crawl4ai call over-fetched upstream of this
+    function) -- those never reach the judge prompt or a staged record."""
+    sanitized = []
+    for r in search_results:
+        if not isinstance(r, dict):
+            continue
+        url = str(r.get("url") or "").strip()
+        if not url:
+            continue
+        sanitized.append({
+            "url": url,
+            "title": str(r.get("title") or "").strip(),
+            "snippet": str(r.get("snippet") or "").strip()[:_SNIPPET_MAX_CHARS],
+        })
+    return sanitized
+
+
+def _already_considered_urls_and_titles(pcp_dir: Path) -> set[str]:
+    """Lowercased build_vs_buy_candidate labels already on record in
+    topics.yaml -- kb_topics.py's own load_routing_categories docstring:
+    'a newly-proposed candidate is checked against what has already been
+    considered before a human is asked to approve fetching it.' Import is
+    lazy to avoid a hard dependency on click/rich (commands/kb_topics.py's
+    CLI-layer imports) from this pure-logic module, same posture as
+    kb_grounding.py's lazy `from pcp.llm import client as llm`."""
+    from pcp.commands.kb_topics import load_routing_categories
+
+    considered: set[str] = set()
+    for topic in load_routing_categories(pcp_dir):
+        if not isinstance(topic, dict) or topic.get("source") != "build_vs_buy_candidate":
+            continue
+        label = str(topic.get("label") or "").strip().lower()
+        if label:
+            considered.add(label)
+    return considered
+
+
+def stage_candidates_for_gap(
+    gap: TopicGap,
+    search_results: list[dict],
+    pcp_dir: Path,
+    discovered_via: str = "websearch",
+    model: str | None = None,
+) -> list[StagedCandidate]:
+    """Phase A: turns raw WebSearch/crawl4ai result metadata for one
+    detected gap into a staged candidate list with relevance rationale.
+    Never fetches or stores page content -- see the section docstring
+    above for why this takes `search_results` rather than calling a
+    search tool itself, and _sanitize_search_results for the boundary
+    that keeps stray fetched content out even if a caller passes it.
+
+    Token Discipline: zero LLM calls when there is nothing to judge (no
+    search results, or every result missing a url) -- same posture as
+    kb_grounding.check_kb_contradiction's early-return. Fails open (stages
+    nothing) on an unreachable/broken judge call, same as
+    kb_grounding.check_kb_contradiction's own judge call: an infra failure
+    is not evidence any result is relevant, so nothing gets staged rather
+    than guessed.
+    """
+    pcp_dir = Path(pcp_dir)
+    sanitized = _sanitize_search_results(search_results)
+    if not sanitized:
+        return []
+
+    already_considered = _already_considered_urls_and_titles(pcp_dir)
+
+    from pcp.llm import client as llm
+
+    numbered = "\n".join(
+        f"[{i}] title={r['title']!r} url={r['url']!r} snippet={r['snippet']!r}"
+        for i, r in enumerate(sanitized)
+    )
+    user_prompt = (
+        f"## Detected gap\nlabel: {gap.label!r}\nsource: {gap.source}\n"
+        f"gap_kind: {gap.gap_kind}\n\n## Search results\n{numbered}"
+    )
+    try:
+        res = llm.call_json(
+            CANDIDATE_STAGING_SYSTEM_PROMPT, user_prompt,
+            model=model or llm.JUDGE_MODEL, pcp_dir=pcp_dir,
+            command="kb-ingest-stage-candidates",
+        )
+    except Exception:
+        return []
+
+    staged: list[StagedCandidate] = []
+    raw_candidates = res.get("candidates") if isinstance(res, dict) else None
+    for c in raw_candidates or []:
+        if not isinstance(c, dict):
+            continue
+        idx = c.get("index")
+        if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < len(sanitized)):
+            continue
+        rationale = str(c.get("relevance_rationale") or "").strip()
+        if not rationale:
+            continue
+        source_kind = c.get("source_kind")
+        if source_kind not in SOURCE_KINDS:
+            source_kind = "other"
+
+        result = sanitized[idx]
+        haystack = f"{result['url']} {result['title']}".lower()
+        staged.append(StagedCandidate(
+            gap_topic_id=gap.topic_id,
+            gap_label=gap.label,
+            url=result["url"],
+            title=result["title"],
+            source_kind=source_kind,
+            relevance_rationale=rationale,
+            discovered_via=discovered_via,
+            already_considered=any(label in haystack for label in already_considered),
+        ))
+
+    return staged
+
+
+def write_staged_candidates(pcp_dir: Path, candidates: list[StagedCandidate]) -> Path:
+    """Appends newly staged candidates to `.pcp/kb/candidates.yaml`, deduped
+    by (gap_topic_id, url) so re-running Phase A for the same gap against
+    overlapping search results never piles up duplicate rows. A row a human
+    or Phase B has already advanced past STATUS_STAGED is left untouched --
+    this function only ever adds a new staged row or refreshes the metadata
+    of one still at STATUS_STAGED, it never regresses a candidate's status
+    backward."""
+    pcp_dir = Path(pcp_dir)
+    kb_dir = pcp_dir / "kb"
+    kb_dir.mkdir(parents=True, exist_ok=True)
+    out = kb_dir / "candidates.yaml"
+
+    existing: dict = {}
+    if out.exists():
+        try:
+            existing = yaml.safe_load(out.read_text(errors="replace")) or {}
+        except yaml.YAMLError:
+            existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+
+    rows = existing.get("staged_candidates")
+    rows = list(rows) if isinstance(rows, list) else []
+    index = {
+        (r.get("gap_topic_id"), r.get("url")): i
+        for i, r in enumerate(rows) if isinstance(r, dict)
+    }
+
+    for c in candidates:
+        key = (c.gap_topic_id, c.url)
+        row = {
+            "gap_topic_id": c.gap_topic_id,
+            "gap_label": c.gap_label,
+            "url": c.url,
+            "title": c.title,
+            "source_kind": c.source_kind,
+            "relevance_rationale": c.relevance_rationale,
+            "discovered_via": c.discovered_via,
+            "already_considered": c.already_considered,
+            "status": STATUS_STAGED,
+        }
+        if key in index:
+            prior = rows[index[key]]
+            prior_status = prior.get("status") if isinstance(prior, dict) else None
+            if prior_status and prior_status != STATUS_STAGED:
+                continue  # advanced past staged already -- never regress it
+            rows[index[key]] = row
+        else:
+            index[key] = len(rows)
+            rows.append(row)
+
+    existing["staged_candidates"] = rows
+    existing["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out.write_text(yaml.safe_dump(existing, sort_keys=False))
+    return out
+
+
+def load_staged_candidates(pcp_dir: Path) -> list[dict]:
+    """Pure read of `.pcp/kb/candidates.yaml`'s `staged_candidates` list --
+    same posture as kb_topics.load_routing_categories: empty list on a
+    missing file, malformed YAML, or a non-list field, never a crash."""
+    path = Path(pcp_dir) / "kb" / "candidates.yaml"
+    if not path.exists():
+        return []
+    try:
+        data = yaml.safe_load(path.read_text(errors="replace")) or {}
+    except yaml.YAMLError:
+        return []
+    rows = data.get("staged_candidates") if isinstance(data, dict) else None
+    return rows if isinstance(rows, list) else []

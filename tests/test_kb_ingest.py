@@ -1,12 +1,24 @@
 """A008 — KB gap detector: flags a topic with zero or thin content against a
 deterministic threshold. Zero LLM calls, pure substring match + char count.
+
+A009 — Phase A: given a detected gap, turns raw WebSearch/crawl4ai result
+metadata into a staged candidate list with relevance rationale via a
+judge-tier LLM call. Never fetches or stores page content.
 """
+
+from unittest.mock import patch
 
 from pcp.kb_ingest import (
     GAP_THIN,
     GAP_ZERO,
+    STATUS_STAGED,
     THIN_CONTENT_THRESHOLD_CHARS,
+    StagedCandidate,
+    TopicGap,
     detect_content_gaps,
+    load_staged_candidates,
+    stage_candidates_for_gap,
+    write_staged_candidates,
 )
 
 
@@ -200,3 +212,287 @@ def test_mixed_topics_only_gaps_returned(tmp_path):
         "dependency:ghost": GAP_ZERO,
     }
     assert "candidate:opa" not in gap_ids
+
+
+# ── A009: stage_candidates_for_gap ──────────────────────────────────────────
+
+_GAP = TopicGap(
+    topic_id="candidate:opa",
+    label="opa",
+    source="build_vs_buy_candidate",
+    gap_kind=GAP_ZERO,
+    content_chars=0,
+)
+
+
+def test_no_search_results_skips_llm_call_entirely(tmp_path):
+    """Token Discipline: nothing to judge, nothing spent."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("pcp.llm.client.call_json") as mock_call:
+        staged = stage_candidates_for_gap(_GAP, [], pcp_dir)
+    mock_call.assert_not_called()
+    assert staged == []
+
+
+def test_search_results_all_missing_url_skips_llm_call(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    results = [{"title": "no url here", "snippet": "..."}]
+    with patch("pcp.llm.client.call_json") as mock_call:
+        staged = stage_candidates_for_gap(_GAP, results, pcp_dir)
+    mock_call.assert_not_called()
+    assert staged == []
+
+
+def test_relevant_result_staged_with_rationale(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    results = [
+        {"title": "OPA docs", "url": "https://openpolicyagent.org/docs", "snippet": "policy engine"},
+    ]
+    judge_res = {"candidates": [
+        {"index": 0, "source_kind": "docs", "relevance_rationale": "official docs for the gap"},
+    ]}
+    with patch("pcp.llm.client.call_json", return_value=judge_res) as mock_call:
+        staged = stage_candidates_for_gap(_GAP, results, pcp_dir, discovered_via="websearch")
+
+    mock_call.assert_called_once()
+    assert len(staged) == 1
+    c = staged[0]
+    assert isinstance(c, StagedCandidate)
+    assert c.gap_topic_id == "candidate:opa"
+    assert c.gap_label == "opa"
+    assert c.url == "https://openpolicyagent.org/docs"
+    assert c.title == "OPA docs"
+    assert c.source_kind == "docs"
+    assert c.relevance_rationale == "official docs for the gap"
+    assert c.discovered_via == "websearch"
+    assert c.status == STATUS_STAGED
+
+
+def test_irrelevant_result_omitted_by_judge_is_not_staged(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    results = [
+        {"title": "OPA docs", "url": "https://openpolicyagent.org/docs", "snippet": "policy engine"},
+        {"title": "unrelated blog", "url": "https://example.com/other", "snippet": "off topic"},
+    ]
+    judge_res = {"candidates": [
+        {"index": 0, "source_kind": "docs", "relevance_rationale": "relevant"},
+    ]}
+    with patch("pcp.llm.client.call_json", return_value=judge_res):
+        staged = stage_candidates_for_gap(_GAP, results, pcp_dir)
+
+    assert len(staged) == 1
+    assert staged[0].url == "https://openpolicyagent.org/docs"
+
+
+def test_judge_call_failure_fails_open_stages_nothing(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    results = [{"title": "x", "url": "https://example.com/x", "snippet": "y"}]
+    with patch("pcp.llm.client.call_json", side_effect=RuntimeError("down")):
+        staged = stage_candidates_for_gap(_GAP, results, pcp_dir)
+    assert staged == []
+
+
+def test_invalid_source_kind_coerced_to_other(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    results = [{"title": "x", "url": "https://example.com/x", "snippet": "y"}]
+    judge_res = {"candidates": [
+        {"index": 0, "source_kind": "not_a_real_kind", "relevance_rationale": "still relevant"},
+    ]}
+    with patch("pcp.llm.client.call_json", return_value=judge_res):
+        staged = stage_candidates_for_gap(_GAP, results, pcp_dir)
+    assert len(staged) == 1
+    assert staged[0].source_kind == "other"
+
+
+def test_candidate_with_empty_rationale_is_skipped(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    results = [{"title": "x", "url": "https://example.com/x", "snippet": "y"}]
+    judge_res = {"candidates": [{"index": 0, "source_kind": "other", "relevance_rationale": ""}]}
+    with patch("pcp.llm.client.call_json", return_value=judge_res):
+        staged = stage_candidates_for_gap(_GAP, results, pcp_dir)
+    assert staged == []
+
+
+def test_candidate_with_out_of_range_index_is_skipped_not_crashed(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    results = [{"title": "x", "url": "https://example.com/x", "snippet": "y"}]
+    judge_res = {"candidates": [{"index": 5, "source_kind": "other", "relevance_rationale": "r"}]}
+    with patch("pcp.llm.client.call_json", return_value=judge_res):
+        staged = stage_candidates_for_gap(_GAP, results, pcp_dir)
+    assert staged == []
+
+
+def test_never_passes_extra_content_fields_into_judge_prompt(tmp_path):
+    """Defensive boundary: even if a caller's search_results dict carries a
+    'content'/'html' field (a misuse of this function's contract, or an
+    over-fetching crawl4ai caller), that text never reaches the judge
+    prompt or the staged record -- only title/url/snippet do."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    smuggled = "FULL PAGE BODY SHOULD NEVER APPEAR HERE"
+    results = [{
+        "title": "x", "url": "https://example.com/x", "snippet": "y",
+        "content": smuggled, "html": f"<html>{smuggled}</html>",
+    }]
+    judge_res = {"candidates": [{"index": 0, "source_kind": "other", "relevance_rationale": "r"}]}
+    with patch("pcp.llm.client.call_json", return_value=judge_res) as mock_call:
+        staged = stage_candidates_for_gap(_GAP, results, pcp_dir)
+
+    prompt_text = " ".join(str(a) for a in mock_call.call_args[0])
+    assert smuggled not in prompt_text
+    assert len(staged) == 1
+
+
+def test_already_considered_flagged_via_build_vs_buy_candidate_topic(tmp_path):
+    """Cross-checks a staged candidate's url/title against topics.yaml's
+    build_vs_buy_candidate topics -- kb_topics.py's own
+    load_routing_categories docstring: 'a newly-proposed candidate is
+    checked against what has already been considered before a human is
+    asked to approve fetching it.'"""
+    pcp_dir = tmp_path / ".pcp"
+    kb_dir = pcp_dir / "kb"
+    kb_dir.mkdir(parents=True)
+    (kb_dir / "topics.yaml").write_text(
+        "topics:\n"
+        "  - id: candidate:opa\n"
+        "    source: build_vs_buy_candidate\n"
+        "    label: opa\n"
+    )
+    results = [{"title": "OPA", "url": "https://openpolicyagent.org/docs", "snippet": "s"}]
+    judge_res = {"candidates": [{"index": 0, "source_kind": "docs", "relevance_rationale": "r"}]}
+    with patch("pcp.llm.client.call_json", return_value=judge_res):
+        staged = stage_candidates_for_gap(_GAP, results, pcp_dir)
+    assert len(staged) == 1
+    assert staged[0].already_considered is True
+
+
+def test_not_already_considered_when_no_topic_matches(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    kb_dir = pcp_dir / "kb"
+    kb_dir.mkdir(parents=True)
+    (kb_dir / "topics.yaml").write_text(
+        "topics:\n"
+        "  - id: candidate:networkx\n"
+        "    source: build_vs_buy_candidate\n"
+        "    label: networkx\n"
+    )
+    results = [{"title": "OPA docs", "url": "https://openpolicyagent.org/docs", "snippet": "s"}]
+    judge_res = {"candidates": [{"index": 0, "source_kind": "docs", "relevance_rationale": "r"}]}
+    with patch("pcp.llm.client.call_json", return_value=judge_res):
+        staged = stage_candidates_for_gap(_GAP, results, pcp_dir)
+    assert len(staged) == 1
+    assert staged[0].already_considered is False
+
+
+# ── A009: write_staged_candidates / load_staged_candidates ─────────────────
+
+def test_write_staged_candidates_creates_file(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    c = StagedCandidate(
+        gap_topic_id="candidate:opa", gap_label="opa",
+        url="https://openpolicyagent.org/docs", title="OPA docs",
+        source_kind="docs", relevance_rationale="r", discovered_via="websearch",
+    )
+    out = write_staged_candidates(pcp_dir, [c])
+    assert out == pcp_dir / "kb" / "candidates.yaml"
+    loaded = load_staged_candidates(pcp_dir)
+    assert len(loaded) == 1
+    assert loaded[0]["url"] == "https://openpolicyagent.org/docs"
+    assert loaded[0]["status"] == STATUS_STAGED
+
+
+def test_write_staged_candidates_dedupes_by_gap_and_url(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    c1 = StagedCandidate(
+        gap_topic_id="candidate:opa", gap_label="opa",
+        url="https://openpolicyagent.org/docs", title="OPA docs",
+        source_kind="docs", relevance_rationale="first", discovered_via="websearch",
+    )
+    write_staged_candidates(pcp_dir, [c1])
+    c2 = StagedCandidate(
+        gap_topic_id="candidate:opa", gap_label="opa",
+        url="https://openpolicyagent.org/docs", title="OPA docs",
+        source_kind="docs", relevance_rationale="updated rationale", discovered_via="websearch",
+    )
+    write_staged_candidates(pcp_dir, [c2])
+
+    loaded = load_staged_candidates(pcp_dir)
+    assert len(loaded) == 1
+    assert loaded[0]["relevance_rationale"] == "updated rationale"
+
+
+def test_write_staged_candidates_never_regresses_advanced_status(tmp_path):
+    """A human/Phase B already moved this candidate past 'staged' -- a
+    re-run of Phase A over overlapping search results must not silently
+    reset it back."""
+    pcp_dir = tmp_path / ".pcp"
+    kb_dir = pcp_dir / "kb"
+    kb_dir.mkdir(parents=True)
+    (kb_dir / "candidates.yaml").write_text(
+        "staged_candidates:\n"
+        "  - gap_topic_id: candidate:opa\n"
+        "    gap_label: opa\n"
+        "    url: https://openpolicyagent.org/docs\n"
+        "    title: OPA docs\n"
+        "    source_kind: docs\n"
+        "    relevance_rationale: original\n"
+        "    discovered_via: websearch\n"
+        "    already_considered: false\n"
+        "    status: approved\n"
+    )
+    c = StagedCandidate(
+        gap_topic_id="candidate:opa", gap_label="opa",
+        url="https://openpolicyagent.org/docs", title="OPA docs",
+        source_kind="docs", relevance_rationale="re-staged attempt", discovered_via="websearch",
+    )
+    write_staged_candidates(pcp_dir, [c])
+
+    loaded = load_staged_candidates(pcp_dir)
+    assert len(loaded) == 1
+    assert loaded[0]["status"] == "approved"
+    assert loaded[0]["relevance_rationale"] == "original"
+
+
+def test_write_staged_candidates_preserves_other_gaps_rows(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    c1 = StagedCandidate(
+        gap_topic_id="candidate:opa", gap_label="opa",
+        url="https://openpolicyagent.org/docs", title="OPA docs",
+        source_kind="docs", relevance_rationale="r1", discovered_via="websearch",
+    )
+    write_staged_candidates(pcp_dir, [c1])
+    c2 = StagedCandidate(
+        gap_topic_id="dependency:networkx", gap_label="networkx",
+        url="https://networkx.org/docs", title="NetworkX docs",
+        source_kind="docs", relevance_rationale="r2", discovered_via="crawl4ai",
+    )
+    write_staged_candidates(pcp_dir, [c2])
+
+    loaded = load_staged_candidates(pcp_dir)
+    urls = {row["url"] for row in loaded}
+    assert urls == {"https://openpolicyagent.org/docs", "https://networkx.org/docs"}
+
+
+def test_load_staged_candidates_returns_empty_when_no_file(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    assert load_staged_candidates(pcp_dir) == []
+
+
+def test_load_staged_candidates_returns_empty_on_malformed_yaml(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    kb_dir = pcp_dir / "kb"
+    kb_dir.mkdir(parents=True)
+    (kb_dir / "candidates.yaml").write_text("staged_candidates: [unterminated\n")
+    assert load_staged_candidates(pcp_dir) == []
