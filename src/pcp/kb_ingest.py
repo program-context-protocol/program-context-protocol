@@ -33,6 +33,18 @@ what's worth fetching) already happened in A009; this is pure
 fetch+store+reindex, state-tracked and idempotent per topic via
 `.pcp/kb/ingest_state.yaml` so a re-run only pulls the new delta rather
 than re-fetching an already-ingested candidate.
+
+A011: ingestion integrity gate (kb_ingest_integrity.py). Before this
+function's catalog/index rebuild step runs, every freshly-stored item is
+scanned by kb_ingest_integrity.check_ingestion_batch for SPA-shell/bot-
+wall/junk-page fingerprints, unstripped HTML, and exact duplicates (via
+the sha256 already computed above). Any pending flag -- this run's or an
+earlier run's, never cleared -- withholds the catalog/index rebuild
+entirely: fetched content is still stored verbatim and state-tracked (so
+it is never re-fetched), it just stays outside the searchable kb until a
+human/caller reviews `.pcp/kb/integrity_flags.yaml` and clears the flag.
+See kb_ingest_integrity.py's module docstring for the real incident this
+closes.
 """
 
 import hashlib
@@ -46,7 +58,7 @@ from pathlib import Path
 
 import yaml
 
-from pcp import kb_catalog, kb_index
+from pcp import kb_catalog, kb_index, kb_ingest_integrity
 
 # Below this many characters of matching content, a topic is "thin" rather
 # than "covered". Zero matching characters is always a gap regardless of
@@ -581,12 +593,21 @@ def ingest_approved_candidates(
     Zero LLM calls (logic_tier 1) -- the judgment step (deciding what's
     worth fetching) already happened in A009's stage_candidates_for_gap.
 
-    Whenever at least one candidate is newly ingested this run, re-runs
+    Whenever at least one candidate is newly ingested this run, first runs
+    A011's integrity gate (kb_ingest_integrity.check_ingestion_batch) over
+    the freshly-stored items and records any flags to
+    `.pcp/kb/integrity_flags.yaml`. Only when NO flag anywhere on file is
+    still pending (this run's or an earlier run's -- see
+    kb_ingest_integrity.has_unresolved_flags for why it checks the whole
+    ledger, not just this run's batch) does it re-run
     kb_catalog.write_topic_catalogs and kb_index.write_kb_index once (a
     full rebuild, matching their own existing "no incremental staleness
     tracking" posture -- see kb_catalog.py's module docstring) so the new
     content becomes searchable. Skipped entirely on a no-op run (nothing
     approved, or everything already ingested) to avoid a pointless rewrite.
+    A pending integrity flag never blocks the fetch/store/state-tracking
+    above -- only the catalog/index rebuild that would make the content
+    searchable; disclosed via integrity_flags.yaml, never silently dropped.
     """
     pcp_dir = Path(pcp_dir)
     fetcher = fetcher or _default_fetcher
@@ -650,6 +671,21 @@ def ingest_approved_candidates(
     if newly_ingested_keys:
         _write_ingest_state(pcp_dir, state)
         _advance_candidate_statuses(pcp_dir, newly_ingested_keys, STATUS_INGESTED)
+
+        # A011: integrity gate -- scan this run's freshly-stored batch for
+        # SPA-shell/bot-wall/junk-page fingerprints, unstripped HTML, and
+        # exact duplicates before trusting it enough to reindex.
+        integrity_report = kb_ingest_integrity.check_ingestion_batch(pcp_dir, results)
+        if integrity_report.flags:
+            kb_ingest_integrity.write_integrity_flags(pcp_dir, integrity_report.flags)
+
+        if kb_ingest_integrity.has_unresolved_flags(pcp_dir):
+            # Gate: content above is stored + state-tracked (never
+            # re-fetched), but withheld from the searchable catalog/index
+            # until every pending integrity flag -- this run's or an
+            # earlier run's -- is reviewed and cleared.
+            return results
+
         kb_catalog.write_topic_catalogs(pcp_dir)
         kb_index.write_kb_index(pcp_dir, project_root)
 
