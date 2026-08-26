@@ -1,3 +1,4 @@
+import pytest
 import yaml
 
 from pcp import kb_file_metadata
@@ -121,3 +122,141 @@ def test_empty_project_yields_zero_total_and_no_crash(tmp_path):
     summary = kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
 
     assert summary == {"written": [], "updated": [], "unchanged": [], "total": 0}
+
+
+# --- A002: schema enforcement + non-destructive supersession ---------------
+
+
+def test_validate_card_schema_rejects_missing_card_version():
+    card = {"code_sha_at_verification": "abc123"}
+    with pytest.raises(kb_file_metadata.CardSchemaError):
+        kb_file_metadata.validate_card_schema(card)
+
+
+def test_validate_card_schema_rejects_non_int_card_version():
+    card = {"card_version": "1", "code_sha_at_verification": "abc123"}
+    with pytest.raises(kb_file_metadata.CardSchemaError):
+        kb_file_metadata.validate_card_schema(card)
+
+
+def test_validate_card_schema_rejects_bool_card_version():
+    # bool is a subclass of int in Python -- must still be rejected.
+    card = {"card_version": True, "code_sha_at_verification": "abc123"}
+    with pytest.raises(kb_file_metadata.CardSchemaError):
+        kb_file_metadata.validate_card_schema(card)
+
+
+def test_validate_card_schema_rejects_missing_code_sha():
+    card = {"card_version": 1}
+    with pytest.raises(kb_file_metadata.CardSchemaError):
+        kb_file_metadata.validate_card_schema(card)
+
+
+def test_validate_card_schema_rejects_empty_code_sha():
+    card = {"card_version": 1, "code_sha_at_verification": ""}
+    with pytest.raises(kb_file_metadata.CardSchemaError):
+        kb_file_metadata.validate_card_schema(card)
+
+
+def test_validate_card_schema_accepts_valid_non_superseded_card():
+    card = {"card_version": 1, "code_sha_at_verification": "abc123"}
+    kb_file_metadata.validate_card_schema(card)  # no raise
+
+
+def test_validate_card_schema_requires_delta_summary_when_superseded():
+    card = {"card_version": 2, "code_sha_at_verification": "abc123"}
+    with pytest.raises(kb_file_metadata.CardSchemaError):
+        kb_file_metadata.validate_card_schema(card, is_supersession=True)
+
+
+def test_validate_card_schema_rejects_blank_delta_summary_when_superseded():
+    card = {"card_version": 2, "code_sha_at_verification": "abc123", "delta_summary": "   "}
+    with pytest.raises(kb_file_metadata.CardSchemaError):
+        kb_file_metadata.validate_card_schema(card, is_supersession=True)
+
+
+def test_validate_card_schema_accepts_supersession_with_delta_summary():
+    card = {
+        "card_version": 2,
+        "code_sha_at_verification": "abc123",
+        "delta_summary": "superseded card_version 1",
+    }
+    kb_file_metadata.validate_card_schema(card, is_supersession=True)  # no raise
+
+
+def test_first_write_has_no_delta_summary_field(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    card_path = pcp_dir / "kb" / "file_metadata" / "src" / "app.py.yaml"
+    card = yaml.safe_load(card_path.read_text())
+    assert "delta_summary" not in card
+
+
+def test_supersession_increments_card_version_and_sets_delta_summary(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    (project_root / "src" / "app.py").write_text("def main():\n    return 99\n")
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    card_path = pcp_dir / "kb" / "file_metadata" / "src" / "app.py.yaml"
+    card = yaml.safe_load(card_path.read_text())
+
+    assert card["card_version"] == 2
+    assert isinstance(card["delta_summary"], str) and card["delta_summary"].strip()
+
+
+def test_supersession_never_overwrites_prior_card_in_place(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    card_path = pcp_dir / "kb" / "file_metadata" / "src" / "app.py.yaml"
+    original_bytes = card_path.read_text()
+    original_card = yaml.safe_load(original_bytes)
+
+    (project_root / "src" / "app.py").write_text("def main():\n    return 99\n")
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    # The superseded (v1) card must still exist, byte-identical, somewhere
+    # in permanent history -- never mutated, never deleted.
+    hist_path = kb_file_metadata.history_path_for(pcp_dir, project_root, project_root / "src" / "app.py", 1)
+    assert hist_path.exists()
+    assert hist_path.read_text() == original_bytes
+
+    archived_card = yaml.safe_load(hist_path.read_text())
+    assert archived_card == original_card
+    assert archived_card["code_sha_at_verification"] != yaml.safe_load(card_path.read_text())["code_sha_at_verification"]
+
+    # The canonical path now holds the NEW (v2) card, distinct content.
+    current_card = yaml.safe_load(card_path.read_text())
+    assert current_card["card_version"] == 2
+    assert current_card != original_card
+
+
+def test_multiple_supersessions_preserve_full_history_no_overwrite(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    source = project_root / "src" / "app.py"
+    card_path = pcp_dir / "kb" / "file_metadata" / "src" / "app.py.yaml"
+
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)  # v1
+
+    source.write_text("def main():\n    return 2\n")
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)  # v2
+    v2_snapshot = card_path.read_text()
+
+    source.write_text("def main():\n    return 3\n")
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)  # v3
+
+    v1_hist = kb_file_metadata.history_path_for(pcp_dir, project_root, source, 1)
+    v2_hist = kb_file_metadata.history_path_for(pcp_dir, project_root, source, 2)
+
+    assert v1_hist.exists()
+    assert v2_hist.exists()
+    # v2's archived copy must match exactly what was current right before v3
+    # superseded it -- proving v2 was relocated untouched, not rewritten.
+    assert v2_hist.read_text() == v2_snapshot
+
+    final_card = yaml.safe_load(card_path.read_text())
+    assert final_card["card_version"] == 3
+    assert final_card["delta_summary"]
