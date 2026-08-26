@@ -173,3 +173,222 @@ def check_constraint_protection(
                     )
 
     return violations
+
+
+# ── A016: tier-6 LLM-judged non-mechanical contradiction check ─────────────
+#
+# check_constraint_protection above is tier-1: a protected identifier is a
+# literal token, "did this line change" is a fact a regex can settle. Most
+# of what a file-metadata card actually claims (A001's `claims` list, once
+# A003 populates it) is not that mechanical -- "this endpoint validates
+# input server-side before use", "this cache is invalidated on every write"
+# -- whether a diff still honors that claim is a judgment call, not a
+# string match. That is a genuine rung-6 problem (CLAUDE.md's ladder: "would
+# two competent humans reasonably disagree?" — whether a refactor preserves
+# a described guarantee is exactly that shape), not a tier-1 one stretched
+# past its fit.
+#
+# "Genuinely blocking, same posture as CTRL-015" (build.py's
+# _run_design_justification_check) means two specific things this check
+# mirrors, not just a return-type convention:
+#   1. A non-empty result is meant to fail the criterion it's checked
+#      against -- unlike this repo's advisory-only single-pass judge checks
+#      (narrative_lint.check_narrative_contradictions, which fails open by
+#      design and stays advisory even when the judge is confident). The
+#      caller here is not asked to merely print a warning.
+#   2. Because blocking has real cost, a raw judge finding is not trusted
+#      on its own -- an adversarial second pass (_verify_contradiction_
+#      findings below), cross-model from the model that raised the finding,
+#      has to fail to refute it first. Same judge-decorrelation rationale
+#      build.py's _verify_block_findings documents (arXiv:2605.29800,
+#      arXiv:2502.01534): a same-model self-check adds little independent
+#      signal.
+# What this function does NOT do: decide HOW a caller enforces "block" --
+# that plumbing (wiring this into architect-review) is the grounding gate's
+# own later criterion, per the module's component-5 description. This
+# function's contract stops at: never asks a caller to treat a non-empty
+# result as merely informational.
+
+CONTRADICTION_SYSTEM_PROMPT = (
+    "You are a grounding-contradiction auditor. You are given claims authored in a "
+    "project's kb/file_metadata cards about specific source files, alongside a diff "
+    "touching those files. Flag a NON-MECHANICAL contradiction only: the diff changes "
+    "the file's actual behavior or guarantee in a way that directly contradicts a claim "
+    "(e.g. a claim says input is validated server-side before use, and the diff removes "
+    "that validation; a claim says a value is append-only, and the diff adds in-place "
+    "mutation). Do NOT flag mechanical or cosmetic changes -- renames, formatting, "
+    "comments, added tests, or anything that leaves the claim's substance intact. "
+    'Respond with JSON only: {"contradictions": [{"index": <int>, "reason": '
+    '"<short, cites the claim and the specific diff change>"}]}. Empty list if none found.'
+)
+
+CONTRADICTION_VERIFY_SYSTEM_PROMPT = (
+    "You are an adversarial verifier for grounding-contradiction findings. You are given "
+    "a diff and a list of findings, each claiming the diff contradicts a specific "
+    "kb/file_metadata claim. For each finding, decide whether it holds up against the "
+    "diff. Mark refuted=true only if the diff does not actually support the claimed "
+    "contradiction -- the cited change is not really present in the diff, or it is a "
+    "mechanical/cosmetic change with no real behavioral contradiction. Respond with JSON "
+    'only: {"verdicts": [{"index": 0, "refuted": false, "reason": "..."}, ...]} -- '
+    "exactly one entry per finding above, in order."
+)
+
+
+def load_kb_claims_for_files(
+    project_root: Path, pcp_dir: Path, files: list[str],
+) -> list[tuple[str, str]]:
+    """(source_path, claim_text) pairs for every claim authored in the
+    file-metadata card of a file in `files` (paths relative to
+    project_root). A file with no card yet, or whose card's `claims` list
+    is still empty -- authoring real claims is A003's separate criterion;
+    A001 only guarantees every source file HAS a card -- contributes
+    nothing. That is expected, not an error: this check has nothing to
+    compare a diff against until a claim actually exists for that file.
+    Malformed card YAML is skipped the same way load_constraint_index skips
+    a malformed spec.yaml -- Layer 1's problem, not this check's.
+
+    A claim entry may be a plain string, or a dict with a `text` or `claim`
+    key -- A003 has not landed yet to fix the exact shape, so this stays
+    permissive rather than assuming a schema that does not exist yet.
+    """
+    from pcp.kb_file_metadata import card_path_for
+
+    project_root = Path(project_root)
+    claims: list[tuple[str, str]] = []
+    for rel in files:
+        source_file = project_root / rel
+        try:
+            card_path = card_path_for(pcp_dir, project_root, source_file)
+        except ValueError:
+            continue  # source_file resolves outside project_root
+        if not card_path.exists():
+            continue
+        try:
+            data = yaml.safe_load(card_path.read_text(errors="replace")) or {}
+        except yaml.YAMLError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for claim in data.get("claims") or []:
+            if isinstance(claim, str):
+                text = claim
+            elif isinstance(claim, dict):
+                text = claim.get("text") or claim.get("claim") or ""
+            else:
+                text = ""
+            if text:
+                claims.append((rel, text))
+    return claims
+
+
+def _staged_diff_text(project_root: Path, staged_files: list[str]) -> str:
+    """Full unified diff (default context, not check_constraint_protection's
+    -U0) for the given staged files -- the judge needs surrounding context
+    to tell a real behavioral change from a cosmetic one; a bare +/- line
+    alone is exactly what tier-1's mechanical scan already handles."""
+    if not staged_files:
+        return ""
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--", *staged_files],
+        cwd=project_root, capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+
+def _verify_contradiction_findings(
+    pcp_dir: Path, diff: str, findings: list[str],
+) -> list[str]:
+    """Adversarial second pass over check_kb_contradiction's own raw
+    findings, before they are trusted enough to block a criterion --
+    the CTRL-015 posture this module mirrors (see the section docstring
+    above). Cross-model: the verifier runs on BUILD_MODEL, a different
+    model from the JUDGE_MODEL call that raised the finding, for the same
+    decorrelation reason build.py's _verify_block_findings documents.
+
+    Fails OPEN on any verifier error (timeout, bad JSON, call failure):
+    keeps every finding unverified rather than risk silently dropping a
+    real contradiction because the verifier itself broke. A hallucinated
+    finding that slips through costs one blocked criterion a human can
+    review; a real one silently dropped ships an actual defect -- the same
+    asymmetry build.py's own verifier documents.
+    """
+    if not findings:
+        return []
+
+    from pcp.llm import client as llm
+
+    numbered = "\n".join(f"[{i}] {f}" for i, f in enumerate(findings))
+    prompt = f"## Diff\n{diff[:14000]}\n\n## Findings to verify\n{numbered}"
+    try:
+        res = llm.call_json(
+            CONTRADICTION_VERIFY_SYSTEM_PROMPT, prompt, model=llm.BUILD_MODEL,
+            pcp_dir=pcp_dir, command="kb-grounding-contradiction-verify",
+        )
+    except Exception:
+        return findings  # fail open -- see docstring
+
+    verdicts = {v.get("index"): v for v in res.get("verdicts", []) if isinstance(v, dict)}
+    kept = []
+    for i, f in enumerate(findings):
+        v = verdicts.get(i)
+        if v and v.get("refuted"):
+            continue
+        kept.append(f)
+    return kept
+
+
+def check_kb_contradiction(
+    staged_files: list[str], project_root: Path, pcp_dir: Path,
+) -> list[str]:
+    """Tier-6 LLM-judged: compares a staged diff against loaded
+    kb/file_metadata content (load_kb_claims_for_files) for non-mechanical
+    contradictions. Returns a genuinely-blocking verdict, same posture as
+    CTRL-015 -- see the section docstring above for what that means
+    concretely. Empty list = clean (nothing to compare, or the judge and
+    its adversarial verifier both found nothing that survives scrutiny).
+
+    Zero LLM calls when there is nothing to compare against (no claims
+    touched, or no actual diff) -- Token Discipline: never spend a judge
+    call on a criterion this check has no evidence for either way.
+    """
+    claims = load_kb_claims_for_files(project_root, pcp_dir, staged_files)
+    if not claims:
+        return []
+
+    diff = _staged_diff_text(project_root, staged_files)
+    if not diff.strip():
+        return []
+
+    from pcp.llm import client as llm
+
+    numbered = "\n".join(f"[{i}] {path}: {text}" for i, (path, text) in enumerate(claims))
+    user_prompt = f"## Diff\n{diff[:14000]}\n\n## Claims from kb/file_metadata\n{numbered}"
+    try:
+        res = llm.call_json(
+            CONTRADICTION_SYSTEM_PROMPT, user_prompt, model=llm.JUDGE_MODEL,
+            pcp_dir=pcp_dir, command="kb-grounding-contradiction",
+        )
+    except Exception:
+        # Fails open only on an infra-shaped error (call/parse failure) --
+        # an unreachable judge is not evidence of a real contradiction.
+        # This is the one place this check is forgiving; a returned verdict
+        # never is (see the section docstring).
+        return []
+
+    findings: list[str] = []
+    for c in res.get("contradictions", []):
+        if not isinstance(c, dict):
+            continue
+        i = c.get("index")
+        if isinstance(i, int) and 0 <= i < len(claims):
+            path, text = claims[i]
+            findings.append(
+                f"{path}: diff contradicts kb claim {text[:160]!r} — {c.get('reason', '')[:200]}"
+            )
+
+    if not findings:
+        return []
+
+    return _verify_contradiction_findings(pcp_dir, diff, findings)
