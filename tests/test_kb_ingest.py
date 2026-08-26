@@ -4,18 +4,33 @@ deterministic threshold. Zero LLM calls, pure substring match + char count.
 A009 — Phase A: given a detected gap, turns raw WebSearch/crawl4ai result
 metadata into a staged candidate list with relevance rationale via a
 judge-tier LLM call. Never fetches or stores page content.
+
+A010 — Phase B: fetches an already-APPROVED candidate's raw content
+verbatim, stores it under .pcp/kb/<topic>/, and re-runs the catalog +
+index builders so the new content becomes searchable. Zero LLM calls.
 """
 
+import hashlib
 from unittest.mock import patch
+
+import yaml
 
 from pcp.kb_ingest import (
     GAP_THIN,
     GAP_ZERO,
+    RESULT_ALREADY_INGESTED,
+    RESULT_EMPTY_CONTENT,
+    RESULT_FETCH_FAILED,
+    RESULT_INGESTED,
+    STATUS_APPROVED,
+    STATUS_INGESTED,
     STATUS_STAGED,
     THIN_CONTENT_THRESHOLD_CHARS,
+    IngestResult,
     StagedCandidate,
     TopicGap,
     detect_content_gaps,
+    ingest_approved_candidates,
     load_staged_candidates,
     stage_candidates_for_gap,
     write_staged_candidates,
@@ -496,3 +511,311 @@ def test_load_staged_candidates_returns_empty_on_malformed_yaml(tmp_path):
     kb_dir.mkdir(parents=True)
     (kb_dir / "candidates.yaml").write_text("staged_candidates: [unterminated\n")
     assert load_staged_candidates(pcp_dir) == []
+
+
+# ── A010: ingest_approved_candidates (Phase B) ──────────────────────────────
+
+def _write_candidate_row(pcp_dir, *, gap_topic_id, url, status, title="Example"):
+    kb_dir = pcp_dir / "kb"
+    kb_dir.mkdir(parents=True, exist_ok=True)
+    path = kb_dir / "candidates.yaml"
+    existing = {}
+    if path.exists():
+        existing = yaml.safe_load(path.read_text()) or {}
+    rows = existing.get("staged_candidates") or []
+    rows.append({
+        "gap_topic_id": gap_topic_id,
+        "gap_label": gap_topic_id,
+        "url": url,
+        "title": title,
+        "source_kind": "docs",
+        "relevance_rationale": "r",
+        "discovered_via": "websearch",
+        "already_considered": False,
+        "status": status,
+    })
+    existing["staged_candidates"] = rows
+    path.write_text(yaml.safe_dump(existing, sort_keys=False))
+
+
+def _fake_fetcher(content_by_url, calls=None):
+    def _fetch(url, timeout):
+        if calls is not None:
+            calls.append(url)
+        return content_by_url[url]
+    return _fetch
+
+
+def test_no_candidates_file_returns_empty(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    with patch("pcp.llm.client.call_json") as mock_call:
+        results = ingest_approved_candidates(pcp_dir, fetcher=_fake_fetcher({}))
+    assert results == []
+    mock_call.assert_not_called()
+
+
+def test_staged_candidate_not_fetched(tmp_path):
+    """Only STATUS_APPROVED candidates are eligible -- a still-staged one
+    (Phase A staged it, but no human has approved it yet) is never fetched."""
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_STAGED,
+    )
+    calls = []
+    results = ingest_approved_candidates(pcp_dir, fetcher=_fake_fetcher({}, calls))
+    assert results == []
+    assert calls == []
+    assert not (pcp_dir / "kb" / "candidate-opa").exists()
+
+
+def test_rejected_candidate_not_fetched(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status="rejected",
+    )
+    calls = []
+    results = ingest_approved_candidates(pcp_dir, fetcher=_fake_fetcher({}, calls))
+    assert results == []
+    assert calls == []
+
+
+def test_approved_candidate_fetched_and_stored_verbatim(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    raw = "# OPA Docs\n\nThis is the raw fetched page content, unmodified.\n"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+        title="OPA docs",
+    )
+    calls = []
+    results = ingest_approved_candidates(
+        pcp_dir, fetcher=_fake_fetcher({"https://openpolicyagent.org/docs": raw}, calls),
+    )
+
+    assert calls == ["https://openpolicyagent.org/docs"]
+    assert len(results) == 1
+    r = results[0]
+    assert isinstance(r, IngestResult)
+    assert r.result == RESULT_INGESTED
+    assert r.gap_topic_id == "candidate:opa"
+    assert r.topic_dir == "candidate-opa"
+
+    stored = pcp_dir / "kb" / r.topic_dir / r.stored_path.split("/")[-1]
+    assert stored.exists()
+    # verbatim -- exactly the fetched content, no summarization/paraphrase,
+    # no added header/frontmatter mixed into the body.
+    assert stored.read_text() == raw
+    assert r.content_hash == hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def test_ingest_is_zero_llm_calls(tmp_path):
+    """A010 is pure fetch+store+reindex -- the judgment step already
+    happened in A009. No LLM call, ever, in this phase."""
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    with patch("pcp.llm.client.call_json") as mock_call:
+        ingest_approved_candidates(
+            pcp_dir,
+            fetcher=_fake_fetcher({"https://openpolicyagent.org/docs": "content\n"}),
+        )
+    mock_call.assert_not_called()
+
+
+def test_ingest_advances_candidate_status_to_ingested(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    ingest_approved_candidates(
+        pcp_dir, fetcher=_fake_fetcher({"https://openpolicyagent.org/docs": "content\n"}),
+    )
+    loaded = load_staged_candidates(pcp_dir)
+    assert len(loaded) == 1
+    assert loaded[0]["status"] == STATUS_INGESTED
+
+
+def test_ingest_idempotent_does_not_refetch_on_rerun(tmp_path):
+    """State-tracked per topic: a second run over the same (now already-
+    ingested) candidate never calls the fetcher again."""
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    calls = []
+    fetcher = _fake_fetcher({"https://openpolicyagent.org/docs": "content\n"}, calls)
+
+    first = ingest_approved_candidates(pcp_dir, fetcher=fetcher)
+    second = ingest_approved_candidates(pcp_dir, fetcher=fetcher)
+
+    assert len(first) == 1
+    assert first[0].result == RESULT_INGESTED
+    assert calls == ["https://openpolicyagent.org/docs"]  # only once, ever
+    assert second == []  # status is no longer STATUS_APPROVED -- filtered out
+
+
+def test_ingest_idempotent_even_if_status_manually_reset_to_approved(tmp_path):
+    """Defense in depth: the state file is the authoritative idempotency
+    record, not just the candidate row's own status -- even if something
+    resets a row back to 'approved', an already-ingested (gap, url) is
+    still never re-fetched."""
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    calls = []
+    fetcher = _fake_fetcher({"https://openpolicyagent.org/docs": "content\n"}, calls)
+    ingest_approved_candidates(pcp_dir, fetcher=fetcher)
+
+    # simulate a reset back to 'approved' on the same (gap, url)
+    candidates_path = pcp_dir / "kb" / "candidates.yaml"
+    data = yaml.safe_load(candidates_path.read_text())
+    data["staged_candidates"][0]["status"] = STATUS_APPROVED
+    candidates_path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    results = ingest_approved_candidates(pcp_dir, fetcher=fetcher)
+    assert calls == ["https://openpolicyagent.org/docs"]  # still only once
+    assert len(results) == 1
+    assert results[0].result == RESULT_ALREADY_INGESTED
+
+
+def test_fetch_failure_recorded_not_stored_status_unchanged(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+
+    def _boom(url, timeout):
+        raise OSError("connection refused")
+
+    results = ingest_approved_candidates(pcp_dir, fetcher=_boom)
+    assert len(results) == 1
+    assert results[0].result == RESULT_FETCH_FAILED
+    assert not (pcp_dir / "kb" / "candidate-opa").exists()
+    loaded = load_staged_candidates(pcp_dir)
+    assert loaded[0]["status"] == STATUS_APPROVED  # unchanged -- never advanced on failure
+
+
+def test_empty_fetched_content_not_stored(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    results = ingest_approved_candidates(
+        pcp_dir, fetcher=_fake_fetcher({"https://openpolicyagent.org/docs": ""}),
+    )
+    assert len(results) == 1
+    assert results[0].result == RESULT_EMPTY_CONTENT
+    assert not (pcp_dir / "kb" / "candidate-opa").exists()
+
+
+def test_multiple_candidates_land_in_separate_topic_dirs(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="dependency:networkx",
+        url="https://networkx.org/docs", status=STATUS_APPROVED,
+    )
+    content = {
+        "https://openpolicyagent.org/docs": "opa content\n",
+        "https://networkx.org/docs": "networkx content\n",
+    }
+    results = ingest_approved_candidates(pcp_dir, fetcher=_fake_fetcher(content))
+    topic_dirs = {r.topic_dir for r in results}
+    assert topic_dirs == {"candidate-opa", "dependency-networkx"}
+    assert (pcp_dir / "kb" / "candidate-opa").is_dir()
+    assert (pcp_dir / "kb" / "dependency-networkx").is_dir()
+
+
+def test_ingest_writes_ingest_state_file(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    ingest_approved_candidates(
+        pcp_dir, fetcher=_fake_fetcher({"https://openpolicyagent.org/docs": "content\n"}),
+    )
+    state_path = pcp_dir / "kb" / "ingest_state.yaml"
+    assert state_path.exists()
+    state = yaml.safe_load(state_path.read_text())
+    assert len(state["ingested"]) == 1
+    assert state["ingested"][0]["url"] == "https://openpolicyagent.org/docs"
+    assert state["ingested"][0]["gap_topic_id"] == "candidate:opa"
+
+
+def test_ingest_reruns_catalog_and_index_builders_on_new_content(tmp_path):
+    """'Component 3' -- the catalog + index builders -- must actually run
+    against the newly-ingested content so it becomes searchable."""
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+    ingest_approved_candidates(
+        pcp_dir,
+        fetcher=_fake_fetcher({"https://openpolicyagent.org/docs": "# Heading\nbody\n"}),
+    )
+
+    catalog_path = pcp_dir / "kb" / "catalog" / "candidate-opa.yaml"
+    assert catalog_path.exists()
+    catalog = yaml.safe_load(catalog_path.read_text())
+    assert catalog["heading_count"] == 1
+
+    index_path = pcp_dir / "kb" / "index.yaml"
+    assert index_path.exists()
+
+
+def test_ingest_skips_reindex_when_nothing_new(tmp_path):
+    """A no-op run (nothing approved, or everything already ingested) never
+    touches the catalog/index -- avoids a pointless full rewrite."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    results = ingest_approved_candidates(pcp_dir, fetcher=_fake_fetcher({}))
+    assert results == []
+    assert not (pcp_dir / "kb" / "catalog").exists()
+    assert not (pcp_dir / "kb" / "index.yaml").exists()
+
+
+def test_default_fetcher_uses_stdlib_urllib_get(tmp_path):
+    """No third-party HTTP dependency -- same posture as uat.py's
+    check_url_responds/check_dom_contains (urllib.request, stdlib only)."""
+    pcp_dir = tmp_path / ".pcp"
+    _write_candidate_row(
+        pcp_dir, gap_topic_id="candidate:opa",
+        url="https://openpolicyagent.org/docs", status=STATUS_APPROVED,
+    )
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"fetched via urllib\n"
+
+    with patch("urllib.request.urlopen", return_value=_FakeResponse()) as mock_open:
+        results = ingest_approved_candidates(pcp_dir)  # no fetcher override
+
+    mock_open.assert_called_once()
+    assert len(results) == 1
+    assert results[0].result == RESULT_INGESTED
+    stored = pcp_dir / "kb" / "candidate-opa"
+    files = list(stored.glob("*.md"))
+    assert len(files) == 1
+    assert files[0].read_text() == "fetched via urllib\n"
