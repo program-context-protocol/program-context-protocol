@@ -561,6 +561,9 @@ routes:
   logic_tier_declared:
     files:
       - .pcp/logic_tier_guide.md
+  kb_grounding_context:
+    files:
+      - .pcp/kb/context_packages/{module}.md
 """
 
 LOGIC_TIER_GUIDE_TEMPLATE = """\

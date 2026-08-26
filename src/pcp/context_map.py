@@ -44,6 +44,16 @@ DEFAULT_ROUTES: dict[str, dict] = {
     "logic_tier_declared": {
         "files": [".pcp/logic_tier_guide.md"],
     },
+    # A014 (kb module): the criterion's own grounding-evidence disclosure,
+    # regenerated fresh per criterion by kb_grounding.refresh_context_package
+    # into a per-module projection -- same {module}-templated,
+    # generated-projection convention module_state already uses above.
+    # Never hand-maintained; resolves to nothing (no fallback) until a
+    # criterion with a declared `target` has actually been built once for
+    # this module.
+    "kb_grounding_context": {
+        "files": [".pcp/kb/context_packages/{module}.md"],
+    },
 }
 
 

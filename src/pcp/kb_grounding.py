@@ -597,3 +597,127 @@ def build_context_package(
         "files": files,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+
+
+# ── A014: disclosure-and-routing layer over A013's context package ──────────
+#
+# A013 (above) builds the package -- each of the four sections already
+# discloses found/not-found independently as data. A014 is what has to
+# happen to that data NEXT for the disclosure to matter in practice: it has
+# to reach an actual build-agent prompt without losing the found/not-found
+# distinction on the way, through the same routing mechanism every other
+# piece of routed context in this repo already uses.
+#
+# Two responsibilities, deliberately kept separate:
+#   1. render_context_package -- turns the package dict into agent-readable
+#      text. This is where "never silently omit a section" is actually at
+#      stake: a renderer that only prints sections with real content would
+#      throw away A013's own not-found disclosure the moment it reaches an
+#      agent's prompt, even though build_context_package's dict preserved
+#      it perfectly. Every one of the four sections gets an explicit
+#      FOUND/NOT FOUND header, unconditionally, per target file.
+#   2. context_package_path / refresh_context_package -- write that
+#      rendered text to a GENERATED per-module file and route to it through
+#      context_map.yaml's existing scenario table (context_map.py's own
+#      DEFAULT_ROUTES gains a "kb_grounding_context" scenario, {module}-
+#      templated exactly like "module_state" already is). No new routing
+#      mechanism: the file is simply on disk by the time
+#      context_map.resolve() checks whether it exists, same as every other
+#      route. build.py's _build_agent_prompt calls refresh_context_package
+#      for the criterion's own declared `target` before resolving the
+#      route, so the file an agent is told to read is always this
+#      criterion's fresh package, not a stale one left by an earlier
+#      criterion in the same module.
+
+CONTEXT_PACKAGE_SUBDIR = "context_packages"
+
+_SECTION_LABELS = (
+    ("file_metadata", "File metadata (kb card)"),
+    ("topic_citations", "Topic citations"),
+    ("known_issues", "Known issues"),
+    ("blast_radius", "Blast radius"),
+)
+
+
+def context_package_path(pcp_dir: Path, module_name: str) -> Path:
+    """.pcp/kb/context_packages/<module_name>.md -- the generated-projection
+    path context_map.yaml's "kb_grounding_context" route resolves to for
+    this module, mirroring kb_file_metadata.py's own file_metadata_root()
+    path-helper convention."""
+    return Path(pcp_dir) / "kb" / CONTEXT_PACKAGE_SUBDIR / f"{module_name}.md"
+
+
+def render_context_package(package: dict) -> str:
+    """Renders a build_context_package() dict into agent-readable Markdown.
+
+    Every one of the four sections is rendered UNCONDITIONALLY for every
+    target file -- an explicit "FOUND"/"NOT FOUND" header, never a section
+    that's simply absent from the text because it happened to come back
+    empty. A missing/malformed section entry (defensive only -- the real
+    builder above never produces one) discloses the same way rather than
+    raising or vanishing silently."""
+    target_files = package.get("target_files") or []
+    if not target_files:
+        return (
+            "# Grounding context package (kb module, auto-generated)\n\n"
+            "No target files declared for this criterion -- nothing to disclose.\n"
+        )
+
+    files = package.get("files") or {}
+    lines = [
+        ("# Grounding context package (kb module, auto-generated -- regenerated "
+         "fresh per criterion, never hand-edit)"),
+        "",
+        f"Generated at: {package.get('generated_at', '')}",
+        "",
+    ]
+    for target_file in target_files:
+        sections = files.get(target_file) or {}
+        lines.append(f"## {target_file}")
+        lines.append("")
+        for key, label in _SECTION_LABELS:
+            section = sections.get(key)
+            if not isinstance(section, dict):
+                lines.append(f"### {label}: NOT FOUND (section unavailable)")
+                lines.append("")
+                continue
+            status = "FOUND" if section.get("found") else "NOT FOUND"
+            lines.append(f"### {label}: {status}")
+            if section.get("found"):
+                detail = yaml.safe_dump(
+                    {k: v for k, v in section.items() if k != "found"},
+                    default_flow_style=False, sort_keys=False,
+                ).strip()
+                lines.append("```yaml")
+                lines.append(detail)
+                lines.append("```")
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def refresh_context_package(
+    project_root: Path, pcp_dir: Path, module_name: str, target_files: list[str],
+) -> Path | None:
+    """Builds this criterion's context package (build_context_package),
+    renders it (render_context_package), and writes it to the generated
+    per-module projection context_map.yaml's "kb_grounding_context" route
+    points at -- regenerated fresh on every call (overwrites, never
+    appends), the same posture module docs/built.md already has.
+
+    Returns the written path, or None when target_files is empty: nothing
+    to disclose, so nothing is written -- the route then simply resolves to
+    absence, the same fallback-to-nothing behavior every other context_map
+    route already has for a file that doesn't exist yet."""
+    if not target_files:
+        return None
+    project_root = Path(project_root)
+    pcp_dir = Path(pcp_dir)
+
+    package = build_context_package(project_root, pcp_dir, target_files)
+    rendered = render_context_package(package)
+
+    path = context_package_path(pcp_dir, module_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(rendered)
+    return path
