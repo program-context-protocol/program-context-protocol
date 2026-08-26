@@ -1563,6 +1563,61 @@ DOMAIN_KB_TEMPLATE = """\
 """
 
 
+KB_README_TEMPLATE = """\
+# Knowledge Base Index
+
+Auto-scaffolded by `pcp init`, at project bootstrap -- before `pcp kickoff`
+has run and before any source files exist. This is an honest status index:
+it says what kb content actually exists right now, not what a mature
+project's kb eventually looks like. Keep it that way as the project grows --
+a bucket in "What does not exist yet" moves up only when something real
+lands, never edited ahead of the fact to claim coverage that isn't there.
+
+## What exists right now
+
+- `kb/adr/ADR-001-example.md` -- a placeholder example ADR, not a real
+  decision record yet. Replace it with your first real ADR (or delete it)
+  once one lands; keep one file per decision after that, never edited
+  after acceptance.
+- `kb/domain/general.md` -- a placeholder domain-knowledge template with
+  empty `[bracketed]` fields (failure modes / invariants / gotchas). Not
+  yet populated with anything project-specific.
+- `kb/topics.yaml` -- an empty skeleton (`topics: []`). No topics have
+  been registered yet.
+
+## What does not exist yet
+
+- **No per-file metadata cards.** Cards (with `tier:cited`/
+  `tier:not_grounded` claims, each `tier:cited` claim backed by a literal
+  quote) are authored as the kb module's own card-authoring pieces run --
+  not scaffolded here, and not implied by this file's existence.
+- **No ingested candidates.** Phase A (candidate identification, staged
+  with rationale only) and Phase B (ingestion of an already-approved
+  candidate) of the kb module's gap/ingestion engine have not run.
+- **No catalog or index built from real content.** The deterministic
+  catalog/index builders (regex + filesystem walk, no LLM, no embeddings)
+  regenerate from real cards once they exist. This README does not
+  attempt to synthesize or forecast that content ahead of time.
+
+Do not hand-edit this file to move an item into "What exists right now"
+before it's real -- that defeats the one property an honest index needs.
+"""
+
+KB_TOPICS_TEMPLATE = """\
+# Topic registry.
+#
+# Scaffolded empty by `pcp init`, before `pcp kickoff` has run and before
+# any source files exist. Deterministic topic finalization (see the kb
+# module's spec.yaml constraints) derives entries here only from its four
+# already-structured inputs -- never from a fresh research call inside
+# topic finalization itself. Do not hand-author entries: this file starts
+# empty and stays empty until the kb module's own topic-finalization step
+# writes to it for real.
+
+topics: []
+"""
+
+
 def _write(path: Path, content: str, force: bool) -> bool:
     if path.exists() and not force:
         return False
@@ -1804,6 +1859,8 @@ def init(project_path: str, module_name: str | None, force: bool):
         pcp / "design_system.md": DESIGN_SYSTEM_TEMPLATE,
         pcp / "kb" / "adr" / "ADR-001-example.md": ADR_EXAMPLE,
         pcp / "kb" / "domain" / "general.md": DOMAIN_KB_TEMPLATE,
+        pcp / "kb" / "README.md": KB_README_TEMPLATE,
+        pcp / "kb" / "topics.yaml": KB_TOPICS_TEMPLATE,
         pcp / "policies" / "escalation.rego": POLICY_ESCALATION_TEMPLATE,
         pcp / "policies" / "bypass_approval.rego": POLICY_BYPASS_TEMPLATE,
         pcp / "policies" / "coupling_threshold.rego": POLICY_COUPLING_TEMPLATE,
