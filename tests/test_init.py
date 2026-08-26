@@ -25,6 +25,35 @@ def test_init_scaffolds_expected_files(tmp_path):
     assert (tmp_path / ".gitattributes").exists()
 
 
+def test_init_scaffolds_kb_readme_and_topics_skeleton(tmp_path):
+    """A019: pcp init scaffolds an honest kb/README.md index (states what kb
+    content exists and what does not yet -- no source files exist at this
+    point, no pcp kickoff has run) and an empty kb/topics.yaml skeleton, at
+    project bootstrap."""
+    import yaml
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["init", "--path", str(tmp_path)])
+    assert result.exit_code == 0
+
+    readme_path = tmp_path / ".pcp" / "kb" / "README.md"
+    topics_path = tmp_path / ".pcp" / "kb" / "topics.yaml"
+    assert readme_path.exists()
+    assert topics_path.exists()
+
+    readme = readme_path.read_text()
+    # Honest index: names what already exists (the sibling adr/domain
+    # scaffolding) and explicitly says what does not exist yet, rather than
+    # a generic placeholder that implies coverage.
+    assert "kb/adr" in readme
+    assert "kb/domain" in readme
+    assert "topics.yaml" in readme
+    assert "does not exist yet" in readme.lower() or "not yet" in readme.lower()
+
+    topics = yaml.safe_load(topics_path.read_text())
+    assert topics == {"topics": []}
+
+
 def test_init_registers_inspiration_art_as_protected_path(tmp_path):
     import yaml
 
