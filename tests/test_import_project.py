@@ -148,3 +148,42 @@ def test_import_cli_skip_specs_still_produces_v2_shape(tmp_path):
         assert data["version"] == "2.0"
         errors = validate_file(acc_path, "module_acceptance")
         assert errors == [], errors
+
+
+# ── kb module eager sweep (A018): pcp import runs components 1-4 once ──
+
+def test_import_cli_runs_kb_eager_sweep(tmp_path):
+    """`pcp import` has no per-file build moment to hook a progressive kb
+    build into -- every file already exists -- so it must run the eager
+    sweep once, synchronously, producing real kb output on disk."""
+    _write_tiny_python_project(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["import", "a tiny test app", "--path", str(tmp_path), "--skip-specs"])
+    assert result.exit_code == 0, result.output
+
+    pcp_dir = tmp_path / ".pcp"
+    # Component 1 -- a file-metadata card for a real source file.
+    assert (pcp_dir / "kb" / "file_metadata" / "widgets" / "core.py.yaml").exists()
+    # Component 2 -- topics.yaml derived from the just-written objective.md.
+    assert (pcp_dir / "kb" / "topics.yaml").exists()
+    # Component 3 -- the basename cross-reference index.
+    assert (pcp_dir / "kb" / "index.yaml").exists()
+
+
+def test_import_cli_kb_sweep_is_advisory_never_blocks_import(tmp_path, monkeypatch):
+    """A kb sweep failure must never turn a successful import into a failed
+    CLI run -- same posture every other kb_bootstrap call site takes."""
+    _write_tiny_python_project(tmp_path)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("kb sweep exploded")
+
+    monkeypatch.setattr("pcp.kb_bootstrap.run_eager_import_sweep", _boom)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["import", "a tiny test app", "--path", str(tmp_path), "--skip-specs"])
+
+    assert result.exit_code == 0, result.output
+    assert "kb sweep exploded" in result.output
+    # The rest of the scaffold still got written -- kb sweep failure isn't fatal.
+    assert (tmp_path / ".pcp" / "objective.md").exists()

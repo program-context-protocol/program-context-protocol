@@ -388,7 +388,30 @@ def import_project(description: str, project_path: str | None, dry_run: bool, sk
     }
     (pcp_dir / "discovery_graph.json").write_text(json.dumps(graphify_data, indent=2))
 
-    # ── 7. Summary ────────────────────────────────────────────────────────────
+    # ── 7. kb module eager sweep (A018) ───────────────────────────────────────
+    # An imported project has no "as files are created" moment to hook a
+    # progressive kb build into (every file already exists) -- so components
+    # 1-4 run once, synchronously, in full, right here, now that objective.md/
+    # module specs above are actually on disk (component 2 needs them).
+    # Advisory grounding infrastructure: never blocks `pcp import` from
+    # finishing, same posture as every other kb_bootstrap call site.
+    console.print("[dim]Running kb module eager sweep (components 1-4)...[/dim]")
+    try:
+        from pcp.kb_bootstrap import run_eager_import_sweep
+        sweep_result = run_eager_import_sweep(root, pcp_dir)
+        for key in (
+            "component_1_file_metadata", "component_2_topics",
+            "component_3_catalog_index", "component_4_gap_ingestion",
+        ):
+            outcome = sweep_result.get(key, {})
+            if outcome.get("ran"):
+                console.print(f"  [green]✓[/green] {key}")
+            else:
+                console.print(f"  [yellow]⚠[/yellow] {key}: {outcome.get('reason', 'not yet built')}")
+    except Exception as exc:  # advisory only -- never blocks pcp import
+        console.print(f"  [yellow]⚠  kb eager sweep skipped: {exc}[/yellow]")
+
+    # ── 8. Summary ────────────────────────────────────────────────────────────
     console.print(f"\n[green]✓  .pcp/ scaffold written.[/green]")
     console.print(f"\n[bold]Next steps:[/bold]")
     console.print("  1. Review module specs:  [cyan].pcp/strategy/modules/*/spec.yaml[/cyan]")
