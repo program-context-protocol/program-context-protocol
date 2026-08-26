@@ -26,7 +26,13 @@ No fresh research call happens here, per the kb module's own constraint:
 fresh research call inside topic finalization itself." Same posture as
 traceability.md/architecture_justification.md: pure aggregation over what's
 already on disk, never hand-edited, this is a rollup view, not a second
-place to author any of the four inputs."""
+place to author any of the four inputs.
+
+Consumption side (A005): `load_routing_categories()` is the one read path
+back into topics.yaml -- topics.yaml is consumed as the routing category
+set by the catalog builder, index builder, and ingestion engine (kb module
+components 3 and 4), rather than each of those three re-parsing the file
+independently."""
 
 import json
 import re
@@ -267,6 +273,36 @@ def build_kb_topics(pcp_dir: Path, project_root: Path | None = None) -> dict:
         "topics": topics,
         "counts": counts,
     }
+
+
+def load_routing_categories(pcp_dir: Path) -> list[dict]:
+    """Reads .pcp/kb/topics.yaml's `topics` list and returns it verbatim --
+    the routing category set every later kb-module component consumes
+    instead of re-deriving or re-parsing topics.yaml on its own:
+
+      - the catalog builder (heading-TOC cross-reference) matches a source
+        file's own headings against `objective_scope`-sourced categories to
+        decide which section of the catalog a file's TOC entry belongs
+        under;
+      - the index builder (basename cross-reference) matches a source
+        file's basename/imports against `dependency_manifest`-sourced
+        categories to decide which index bucket a file belongs under;
+      - the two-phase gap/ingestion engine's Phase A stages a candidate
+        external source against `build_vs_buy_candidate`-sourced
+        categories, so a newly-proposed candidate is checked against what
+        has already been considered before a human is asked to approve
+        fetching it.
+
+    Pure read, zero LLM, zero re-derivation -- if topics.yaml does not
+    exist yet (pre-kickoff scaffold, or `pcp kb-topics` never run), is
+    malformed YAML, or its `topics` field isn't a list, this returns an
+    empty list rather than silently generating/repairing it. This function
+    is a consumer, not a second place to author the four already-structured
+    inputs topics.yaml itself derives from -- same posture as
+    build_kb_topics's own module docstring."""
+    data = _load_yaml(Path(pcp_dir) / "kb" / "topics.yaml")
+    topics = data.get("topics") if isinstance(data, dict) else None
+    return topics if isinstance(topics, list) else []
 
 
 def write_kb_topics(pcp_dir: Path, project_root: Path | None = None) -> Path:
