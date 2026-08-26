@@ -50,6 +50,7 @@ from pcp.commands.build_plan import build_plan_cmd
 from pcp.commands.diff_reduce import diff_reduce
 from pcp.commands.traceability import traceability
 from pcp.commands.assumptions_cmd import assumptions_cmd
+from pcp.commands.kb_topics import kb_topics
 
 
 @click.group()
@@ -110,3 +111,4 @@ cli.add_command(self_update)
 cli.add_command(diff_reduce)
 cli.add_command(traceability)
 cli.add_command(assumptions_cmd, name="assumptions")
+cli.add_command(kb_topics)
