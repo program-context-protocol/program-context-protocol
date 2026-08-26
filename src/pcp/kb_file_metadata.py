@@ -1,12 +1,11 @@
-"""File-metadata card generator -- kb module (A001, A002).
+"""File-metadata card generator -- kb module (A001, A002, A003).
 
 Walks every project source file and writes/updates a per-file grounding
 card at the mirrored path under .pcp/kb/file_metadata/<source-path>.yaml.
 Coverage is mandatory for every source file (module spec constraint:
-"depth is a judgment call, coverage is not") -- authoring real evidence-
-tiered claims into a card's `claims` list is a later, separate criterion
-(A003); A001 only guarantees every file gets a card and that a stale card
-gets refreshed rather than silently skipped.
+"depth is a judgment call, coverage is not") -- A001 guarantees every
+file gets a card and that a stale card gets refreshed rather than
+silently skipped.
 
 A002 hardens the card itself into a real schema: `card_version` and
 `code_sha_at_verification` are always validated present and well-typed
@@ -23,9 +22,20 @@ Deterministic, zero LLM calls (logic_tier 1). Reuses the same source-file
 walk pcp scan/pcp import already use (pcp.discovery.scanner) instead of
 building a second file inventory -- one definition of "every source file"
 for the whole project.
+
+A003 -- card content authoring. A card's `claims` list holds statements an
+LLM (or a human) makes about a file. The module constraint is absolute:
+"A card's tier:cited claim requires a literal quote; a filename or function
+name alone is never sufficient evidence -- absence of evidence must be
+marked tier:not_grounded explicitly." `author_claim` is the one place a
+claim is ever constructed, so there is no path into a card that skips this
+discipline; `validate_claims`/`build_card` re-check that same discipline
+against claims loaded back off disk, so a hand-edited or corrupted card
+can't silently smuggle an unhonest claim into the next generation.
 """
 
 import hashlib
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,6 +53,27 @@ class CardSchemaError(ValueError):
     `card_version` and `code_sha_at_verification` must always be present
     and well-typed, and `delta_summary` is required whenever a card
     represents a supersession of a prior card (A002)."""
+
+# The only two honest evidence states a claim can be in. There is no silent
+# third state (e.g. an omitted tier) and no partial-credit state that lets a
+# claim carry both a tier:not_grounded label and a quote at the same time --
+# that would blend "I have real evidence" with "I have none".
+VALID_TIERS = frozenset({"cited", "not_grounded"})
+
+# A bare identifier -- a filename ("kb_file_metadata.py") or a function/symbol
+# name ("generate_file_metadata_cards") -- has no internal whitespace and is
+# built only from path/identifier characters. A literal quote of real prose
+# or real code (e.g. "return 1", "def main():") either contains whitespace or
+# punctuation outside that set. This is what tells "I quoted the source" apart
+# from "I pasted the filename and called it a day".
+_BARE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_./\\-]+$")
+
+
+class ClaimValidationError(ValueError):
+    """Raised when a claim's evidence tier is not honestly documented --
+    a missing/invalid tier, a tier:cited claim with no real quote, a
+    tier:cited quote that is just a bare filename/function name, or a
+    tier:not_grounded claim smuggling a quote in anyway."""
 
 
 def file_metadata_root(pcp_dir: Path) -> Path:
@@ -140,22 +171,106 @@ def archive_superseded_card(pcp_dir: Path, project_root: Path, source_file: Path
     return hist_path
 
 
+def _looks_like_bare_identifier(value: str) -> bool:
+    """True when `value` is nothing but a filename or function/symbol name
+    -- a single token of identifier/path characters with no whitespace --
+    which never counts as evidence on its own."""
+    stripped = value.strip()
+    if not stripped:
+        return True
+    return bool(_BARE_IDENTIFIER_RE.match(stripped))
+
+
+def author_claim(text: str, tier: str, quote: str | None = None) -> dict:
+    """Build one validated claim entry for a card's `claims` list. This is
+    the only constructor for a claim -- every claim that ever reaches a
+    card, human-authored or LLM-authored, goes through here.
+
+    tier must be exactly "cited" or "not_grounded":
+      - "cited" requires a non-empty, non-whitespace `quote` that is real
+        quoted text -- a filename or function name alone (module
+        constraint) is rejected even if non-empty.
+      - "not_grounded" is the explicit admission of absence: no `quote` is
+        allowed, so the two evidence states can never blend together.
+
+    Raises ClaimValidationError on any violation.
+    """
+    if not text or not text.strip():
+        raise ClaimValidationError("claim text must not be empty")
+    if tier not in VALID_TIERS:
+        raise ClaimValidationError(
+            f"tier must be one of {sorted(VALID_TIERS)}, got {tier!r}"
+        )
+
+    if tier == "cited":
+        if not quote or not quote.strip():
+            raise ClaimValidationError(
+                "tier:cited requires a literal `quote` -- a filename or "
+                "function name alone is never sufficient evidence; use "
+                "tier:not_grounded if there is no real supporting text"
+            )
+        if _looks_like_bare_identifier(quote):
+            raise ClaimValidationError(
+                f"quote {quote!r} is a bare filename/function name, not a "
+                "literal quote -- a filename or function name alone never "
+                "counts as evidence; use tier:not_grounded instead if there "
+                "is no real supporting text"
+            )
+        return {"text": text.strip(), "tier": "cited", "quote": quote.strip()}
+
+    # tier == "not_grounded"
+    if quote:
+        raise ClaimValidationError(
+            "tier:not_grounded must not carry a `quote` -- that would blend "
+            "the two evidence states together"
+        )
+    return {"text": text.strip(), "tier": "not_grounded"}
+
+
+def validate_claims(claims: list) -> list[str]:
+    """Re-validate a list of claim dicts (e.g. loaded back off a card on
+    disk) against the same rules `author_claim` enforces at construction
+    time. Returns a list of human-readable problem strings -- empty means
+    every claim is honestly tiered. Never raises on malformed input itself
+    (a non-dict entry is reported, not a crash)."""
+    problems: list[str] = []
+    for i, claim in enumerate(claims or []):
+        if not isinstance(claim, dict):
+            problems.append(f"claim[{i}] is not a mapping: {claim!r}")
+            continue
+        try:
+            author_claim(claim.get("text", ""), claim.get("tier"), claim.get("quote"))
+        except ClaimValidationError as exc:
+            problems.append(f"claim[{i}] ({claim.get('text', '')!r}): {exc}")
+    return problems
+
+
 def build_card(project_root: Path, source_file: Path, existing: dict, code_sha: str) -> dict:
     """Compose the card for one source file. Preserves any authored `claims`
-    from a prior card (A003's territory) and prior `generated_at` -- a
-    refresh never discards accumulated content. When `existing` is
-    non-empty this is a supersession: `card_version` increments and a
-    `delta_summary` is required (validate_card_schema enforces both)."""
+    from a prior card and prior `generated_at` -- a refresh never discards
+    accumulated content. When `existing` is non-empty this is a
+    supersession: `card_version` increments and a `delta_summary` is
+    required (validate_card_schema enforces both). Preserved claims are
+    re-validated (A003) so a hand-edited or corrupted card can't carry an
+    unhonestly-tiered claim forward into the next generation; raises
+    ClaimValidationError rather than silently dropping or passing through
+    a bad claim."""
     rel = str(source_file.resolve().relative_to(Path(project_root).resolve()))
     now = datetime.now(timezone.utc).isoformat()
     is_supersession = bool(existing)
-
+    claims = existing.get("claims", [])
+    problems = validate_claims(claims)
+    if problems:
+        raise ClaimValidationError(
+            f"{rel}: existing card has {len(problems)} unhonestly-tiered "
+            f"claim(s), refusing to carry forward: " + "; ".join(problems)
+        )
     card = {
         "card_version": existing.get("card_version", CARD_VERSION) + 1 if is_supersession else CARD_VERSION,
         "source_path": rel,
         "code_sha_at_verification": code_sha,
         "generated_at": existing.get("generated_at", now),
-        "claims": existing.get("claims", []),
+        "claims": claims,
     }
     if is_supersession:
         card["updated_at"] = now
