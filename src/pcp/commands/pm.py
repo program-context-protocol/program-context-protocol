@@ -545,7 +545,7 @@ def pm(intent: str, project_path: str | None):
         else:
             console.print("[bold]Proposed spec.yaml changes:[/bold] [dim](none -- acceptance.yaml only)[/dim]")
         console.print("[bold]Proposed acceptance.yaml criteria to add:[/bold]")
-        for c in mr.get("acceptance_changes", {}).get("criteria", []):
+        for c in (mr.get("acceptance_changes") or {}).get("criteria", []):
             console.print(f"  - [{c['id']}] {c['description']} (check: {c.get('check', 'manual')})")
         console.print("")
 
