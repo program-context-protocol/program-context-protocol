@@ -4828,6 +4828,19 @@ def _build_one_criterion(
     # the exact Project O web-server-A013/14/15 pattern, 2026-07-23.
     _auto_commit_criterion(project_root, mod["name"], c)
 
+    # kb module progressive-build hook (A017) — only on a genuinely
+    # completed criterion; a criterion that exhausted all attempts left its
+    # worktree "for inspection", never merged, so there's nothing new to
+    # card yet. `pcp_dir` is always the real, shared one (never a worktree
+    # copy — see this function's own docstring), so concurrent criteria
+    # writing cards need the same lock telemetry/token_ledger already use.
+    # Advisory grounding infrastructure: never allowed to affect build
+    # success/failure, so any error is swallowed by kb_bootstrap itself.
+    if success:
+        with _STATE_LOCK:
+            from pcp.kb_bootstrap import run_progressive_bootstrap
+            run_progressive_bootstrap(project_root, pcp_dir)
+
     if run_log_id:
         try:
             external_deps: set[str] = set()

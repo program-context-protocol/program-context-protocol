@@ -20,6 +20,7 @@ from pcp.commands.validate_strategy import (
     _render_results as render_val_results
 )
 from pcp.pcp_status import write_pcp_md
+from pcp.kb_bootstrap import run_topic_finalization
 
 console = Console()
 
@@ -877,6 +878,20 @@ def kickoff(vision_file: str, project_path: str, force: bool):
         _write_file(mod_dir / "acceptance.yaml", yaml.dump(m["acceptance"], default_flow_style=False))
 
     _report_orphaned_modules(pcp_dir, {m["name"] for m in result.get("modules", [])})
+
+    # kb module component 2 -- topic finalization (A017/A004). Runs exactly
+    # once, right here, at kickoff time: this is the first point objective.md/
+    # target_state.md/module specs/acceptance.yaml all exist on disk together,
+    # which is everything build_kb_topics needs (objective/target_state scope,
+    # build_vs_buy candidates, dependency manifests, logic_tier rung 2/3
+    # flags). Deliberately NOT re-run per file during `pcp build` -- see
+    # kb_bootstrap.run_progressive_bootstrap's docstring. Advisory: a failure
+    # here never blocks kickoff from finishing.
+    topic_result = run_topic_finalization(root, pcp_dir)
+    if topic_result.get("ran"):
+        console.print(f"[dim]kb topics finalized -> {topic_result['path']}[/dim]")
+    else:
+        console.print(f"[yellow]⚠  kb topic finalization skipped: {topic_result.get('reason')}[/yellow]")
 
     console.print("[green]✓[/green] Generated PCP files under [cyan].pcp/[/cyan]")
 
