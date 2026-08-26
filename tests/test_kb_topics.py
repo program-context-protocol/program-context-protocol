@@ -7,6 +7,7 @@ from pcp.cli import cli
 from pcp.commands.kb_topics import (
     build_kb_topics,
     write_kb_topics,
+    load_routing_categories,
     _extract_scope_headings,
     _parse_pyproject_dependencies,
     _parse_requirements_txt,
@@ -260,3 +261,74 @@ def test_kb_topics_cli_no_pcp_dir_exits(tmp_path):
     runner = CliRunner()
     result = runner.invoke(cli, ["kb-topics", "--path", str(tmp_path)])
     assert result.exit_code == 2
+
+
+# --- load_routing_categories (A005: topics.yaml consumed as the routing --
+# category set by the catalog builder, index builder, and ingestion engine)
+
+def test_load_routing_categories_missing_topics_file_returns_empty(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    assert load_routing_categories(pcp_dir) == []
+
+
+def test_load_routing_categories_reads_written_topics_list(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Program Objective\n")
+    (tmp_path / "requirements.txt").write_text("requests==2.31.0\n")
+    _write_module(
+        pcp_dir, "kb",
+        spec={"module": "kb", "description": "KB module.",
+              "build_vs_buy": {"decision": "reuse_partial", "rationale": "r",
+                                "candidates_considered": ["graphify"]}},
+        acceptance={"module": "kb", "criteria": [
+            {"id": "A001", "description": "solver bit", "check": "manual", "status": "pending",
+             "logic_tier": 2, "build_vs_buy": {"decision": "reuse_whole", "rationale": "OR-Tools"}},
+        ]},
+    )
+    write_kb_topics(pcp_dir, project_root=tmp_path)
+
+    categories = load_routing_categories(pcp_dir)
+    assert isinstance(categories, list) and categories
+    sources = {c["source"] for c in categories}
+    assert sources == {
+        "objective_scope", "build_vs_buy_candidate", "logic_tier_rung",
+        "dependency_manifest",
+    }
+    ids = {c["id"] for c in categories}
+    assert "candidate:graphify" in ids
+    assert "dependency:requests" in ids
+
+
+def test_load_routing_categories_is_read_only_never_regenerates(tmp_path):
+    """A missing topics.yaml stays missing -- this is a consumer, not a
+    second place to author the four already-structured inputs."""
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    (pcp_dir / "objective.md").write_text("# Would show up if regenerated\n")
+    load_routing_categories(pcp_dir)
+    assert not (pcp_dir / "kb" / "topics.yaml").exists()
+
+
+def test_load_routing_categories_malformed_yaml_returns_empty(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    (pcp_dir / "kb").mkdir(parents=True)
+    (pcp_dir / "kb" / "topics.yaml").write_text("topics: [unterminated\n")
+    assert load_routing_categories(pcp_dir) == []
+
+
+def test_load_routing_categories_non_list_topics_field_returns_empty(tmp_path):
+    pcp_dir = tmp_path / ".pcp"
+    (pcp_dir / "kb").mkdir(parents=True)
+    (pcp_dir / "kb" / "topics.yaml").write_text("topics: not-a-list\n")
+    assert load_routing_categories(pcp_dir) == []
+
+
+def test_load_routing_categories_empty_skeleton_returns_empty(tmp_path):
+    """Matches pcp init's KB_TOPICS_TEMPLATE scaffold (`topics: []`) --
+    the pre-kickoff state every fresh project starts in."""
+    pcp_dir = tmp_path / ".pcp"
+    (pcp_dir / "kb").mkdir(parents=True)
+    (pcp_dir / "kb" / "topics.yaml").write_text("topics: []\n")
+    assert load_routing_categories(pcp_dir) == []
