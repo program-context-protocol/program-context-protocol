@@ -1,0 +1,123 @@
+import yaml
+
+from pcp import kb_file_metadata
+
+
+def _make_project(tmp_path):
+    """A tiny multi-file Python project with a nested package + a dir that
+    must be skipped (node_modules) to prove the walk is scoped correctly."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def main():\n    return 1\n")
+    (tmp_path / "src" / "pkg").mkdir()
+    (tmp_path / "src" / "pkg" / "util.py").write_text("def helper():\n    return 2\n")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "junk.py").write_text("# should never be walked\n")
+    pcp_dir = tmp_path / ".pcp"
+    pcp_dir.mkdir()
+    return tmp_path, pcp_dir
+
+
+def test_walks_every_source_file_no_file_skipped(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    summary = kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    assert summary["total"] == 2  # app.py + pkg/util.py, node_modules excluded
+    assert sorted(summary["written"]) == ["src/app.py", "src/pkg/util.py"]
+    assert summary["updated"] == []
+    assert summary["unchanged"] == []
+
+
+def test_card_written_at_mirrored_path(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    card_path = pcp_dir / "kb" / "file_metadata" / "src" / "app.py.yaml"
+    assert card_path.exists()
+
+    card_path_nested = pcp_dir / "kb" / "file_metadata" / "src" / "pkg" / "util.py.yaml"
+    assert card_path_nested.exists()
+
+
+def test_card_contents_have_required_fields(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    card_path = pcp_dir / "kb" / "file_metadata" / "src" / "app.py.yaml"
+    card = yaml.safe_load(card_path.read_text())
+
+    assert card["source_path"] == "src/app.py"
+    assert card["card_version"] == kb_file_metadata.CARD_VERSION
+    assert isinstance(card["code_sha_at_verification"], str) and card["code_sha_at_verification"]
+    assert "generated_at" in card
+    assert card["claims"] == []
+
+
+def test_rerun_with_no_changes_marks_unchanged_not_rewritten(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    card_path = pcp_dir / "kb" / "file_metadata" / "src" / "app.py.yaml"
+    first_write = card_path.read_text()
+
+    summary = kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    assert sorted(summary["unchanged"]) == ["src/app.py", "src/pkg/util.py"]
+    assert summary["written"] == []
+    assert summary["updated"] == []
+    assert card_path.read_text() == first_write
+
+
+def test_changed_file_updates_existing_card_and_preserves_claims(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    card_path = pcp_dir / "kb" / "file_metadata" / "src" / "app.py.yaml"
+    card = yaml.safe_load(card_path.read_text())
+    card["claims"] = [{"text": "returns 1", "tier": "cited", "quote": "return 1"}]
+    card_path.write_text(yaml.safe_dump(card, sort_keys=False))
+
+    # Modify the underlying source so its sha changes.
+    (project_root / "src" / "app.py").write_text("def main():\n    return 99\n")
+
+    summary = kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    assert "src/app.py" in summary["updated"]
+    assert "src/app.py" not in summary["written"]
+
+    updated_card = yaml.safe_load(card_path.read_text())
+    assert updated_card["claims"] == [{"text": "returns 1", "tier": "cited", "quote": "return 1"}]
+    assert "updated_at" in updated_card
+
+
+def test_new_file_added_after_first_run_is_written_not_skipped(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    (project_root / "src" / "new_module.py").write_text("VALUE = 42\n")
+
+    summary = kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    assert "src/new_module.py" in summary["written"]
+    card_path = pcp_dir / "kb" / "file_metadata" / "src" / "new_module.py.yaml"
+    assert card_path.exists()
+
+
+def test_card_path_for_mirrors_relative_source_path(tmp_path):
+    project_root, pcp_dir = _make_project(tmp_path)
+    source = project_root / "src" / "pkg" / "util.py"
+
+    result = kb_file_metadata.card_path_for(pcp_dir, project_root, source)
+
+    assert result == pcp_dir / "kb" / "file_metadata" / "src" / "pkg" / "util.py.yaml"
+
+
+def test_empty_project_yields_zero_total_and_no_crash(tmp_path):
+    project_root = tmp_path / "empty"
+    project_root.mkdir()
+    pcp_dir = project_root / ".pcp"
+    pcp_dir.mkdir()
+
+    summary = kb_file_metadata.generate_file_metadata_cards(project_root, pcp_dir)
+
+    assert summary == {"written": [], "updated": [], "unchanged": [], "total": 0}
