@@ -79,8 +79,18 @@ def _local_llm_build_timeout_sec() -> int:
     `local_llm_build: true` / `_run_local_llm_attempt` below) — same
     stuck-process concern as `_build_agent_timeout_sec`, separate knob
     since a local, self-hosted model has a different realistic ceiling
-    than a `claude -p` session. Override with PCP_LOCAL_LLM_BUILD_TIMEOUT_SEC."""
-    return int(os.environ.get("PCP_LOCAL_LLM_BUILD_TIMEOUT_SEC", "300"))
+    than a `claude -p` session.
+
+    Raised 300 -> 900, 2026-09-02: the original 300s default was picked
+    before any harder-task-shape timing data existed and would have KILLED
+    a real, successful run — a real Harbor/Terminus-2 sandboxed eval on
+    Ornith measured an ambiguous-spec build task (pricing.py from prose,
+    a genuine order-of-ops trap) at 7m49s (469s), and a multi-file
+    error-handling fix at 2m51s (171s), both correct. 900s gives real
+    margin above the slowest observed real task, not just the trivial
+    single-file cases this knob was originally sized against. Override
+    with PCP_LOCAL_LLM_BUILD_TIMEOUT_SEC."""
+    return int(os.environ.get("PCP_LOCAL_LLM_BUILD_TIMEOUT_SEC", "900"))
 
 
 def _run_local_llm_attempt(project_root: Path, agent_prompt: str) -> tuple[bool, str]:
