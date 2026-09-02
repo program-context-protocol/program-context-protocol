@@ -74,6 +74,54 @@ def _build_agent_max_budget_usd() -> str:
     return os.environ.get("PCP_BUILD_AGENT_MAX_BUDGET_USD", "5")
 
 
+def _local_llm_build_timeout_sec() -> int:
+    """Wall-clock cap on the opt-in local-LLM criterion attempt (see
+    `local_llm_build: true` / `_run_local_llm_attempt` below) — same
+    stuck-process concern as `_build_agent_timeout_sec`, separate knob
+    since a local, self-hosted model has a different realistic ceiling
+    than a `claude -p` session. Override with PCP_LOCAL_LLM_BUILD_TIMEOUT_SEC."""
+    return int(os.environ.get("PCP_LOCAL_LLM_BUILD_TIMEOUT_SEC", "300"))
+
+
+def _run_local_llm_attempt(project_root: Path, agent_prompt: str) -> tuple[bool, str]:
+    """Opt-in (`local_llm_build: true` on the criterion, checked by the
+    caller) — routes attempt 1 to Ornith via a read+write tool loop scoped
+    to `project_root`, instead of spawning `claude -p`. Purely additive:
+    only reached when a criterion explicitly opts in; every other criterion
+    takes the unmodified `claude -p` path below exactly as before.
+
+    `project_root` here is already the criterion's own isolated worktree
+    (`_setup_worktree` runs before this is ever called in the parallel
+    path; serial path uses the real project root the same way the claude
+    path does) — no separate staging directory needed the way
+    delegate-to-workhorse-build uses one for a bare filesystem target.
+
+    Deliberately does NOT run or interpret test results itself. Whatever
+    diff results is evaluated by the exact same gates (tests/lint/sast/l1/
+    arch/gate) as a Claude-produced diff, in the unchanged code immediately
+    following this function's caller — that's the real verification, not
+    this function. Also deliberately not wired into the `budget`/
+    `--max-budget-usd` circuit breakers above: those cap real Anthropic API
+    spend, which a self-hosted local call doesn't incur.
+
+    Returns (ran_without_error, error_message)."""
+    script = str(Path.home() / "bin" / "delegate-to-workhorse-pcp-criterion")
+    timeout_sec = _local_llm_build_timeout_sec()
+    try:
+        result = subprocess.run(
+            [script, "--worktree", str(project_root), "--prompt", agent_prompt,
+             "--timeout", str(timeout_sec)],
+            capture_output=True, text=True, timeout=timeout_sec + 15,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"local build script exceeded its own {timeout_sec}s timeout wrapper"
+    except FileNotFoundError:
+        return False, f"local build script not found at {script}"
+    if result.returncode != 0:
+        return False, f"local build script exited {result.returncode}: {result.stderr[-500:]}"
+    return True, ""
+
+
 def _max_agent_depth() -> int:
     """Hard cap on pcp build/pcp watch re-entrancy depth -- how many times a
     coding agent spawned by this process may itself trigger another pcp
@@ -212,11 +260,22 @@ def _git_head(project_root: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else "HEAD"
 
 
-def gather_modules_to_build(pcp_dir: Path, module_name: str | None = None) -> list[dict]:
+def gather_modules_to_build(
+    pcp_dir: Path, module_name: str | None = None, criterion_ids: frozenset[str] | None = None,
+) -> list[dict]:
     """Public — reused by external orchestrators (e.g. a multi-user/Temporal
     build layer) that want this run's exact module/criteria selection logic
     without duplicating it. Kept in sync with `build()`'s own gathering step
-    by construction, since `build()` calls this too."""
+    by construction, since `build()` calls this too.
+
+    `criterion_ids` (2026-09-02): optional narrowing to a specific id set
+    WITHIN `module_name` — added for the pcp-skill Workflow orchestration's
+    wave-partition (`local_llm_build: true` criteria route through this
+    Python engine instead of the Workflow-tool's `agent()` pipeline, which
+    has no path to a local/self-hosted model; everything else in the same
+    wave still goes through Workflow as before). Ignored when `module_name`
+    is unset — filtering criteria by id only makes sense scoped to one
+    already-identified module, not across a whole-program gather."""
     modules_dir = get_modules_dir(pcp_dir)
     modules_to_build = []
     for spec_path in sorted(modules_dir.glob("*/spec.yaml")):
@@ -231,6 +290,8 @@ def gather_modules_to_build(pcp_dir: Path, module_name: str | None = None) -> li
             continue
         acc_data = load_yaml(acc_path)
         pending = [c for c in acc_data.get("criteria", []) if c.get("status", "pending") == "pending"]
+        if module_name and criterion_ids:
+            pending = [c for c in pending if c.get("id") in criterion_ids]
         if pending:
             modules_to_build.append({
                 "name": m_name,
@@ -4588,6 +4649,30 @@ def _build_one_criterion(
                     "## Architect pre-flight concerns (advisory, raised before you started — address or explicitly reason past them):",
                     *[f"- {line}" for line in preflight_lines],
                 ])
+            # local_llm_build + UI-facing (2026-09-02): _build_agent_prompt's UI
+            # section (see _is_ui_facing_criterion above) tells the agent to vendor
+            # shadcn components via its shadcn MCP server or `npx shadcn add` — the
+            # local workhorse tool loop (delegate-to-workhorse-pcp-criterion) has
+            # neither, by design (file operations only, no shell/MCP access). Left
+            # unclarified, the real failure mode this note exists to prevent is
+            # Ornith hand-rolling markup instead of vendoring real components —
+            # exactly what pcp-ui-design's Step 2.5 exists to avoid. Composing from
+            # already-vendored primitives is still fine; a genuinely missing
+            # component should be flagged, not faked, so gates catch it and the
+            # criterion falls through to the normal claude-p retry path (which does
+            # have shadcn access) instead of silently shipping hand-rolled markup.
+            if c.get("local_llm_build") is not False and _is_ui_facing_criterion(c):
+                agent_prompt += (
+                    "\n\n## Local build environment note\n"
+                    "You have file read/write tools only — no shell, no MCP servers. "
+                    "You cannot run `npx shadcn add` or reach a shadcn MCP server "
+                    "yourself. Compose ONLY from shadcn components already vendored "
+                    "in this project (check the project's existing component "
+                    "directory with your read tools first). If this screen genuinely "
+                    "needs a component that isn't vendored yet, state that plainly in "
+                    "what you write rather than hand-rolling replacement markup — "
+                    "leave it for a follow-up build pass, don't fake it."
+                )
             session_flag = ["--session-id", agent_session_id]
         elif attempt == 2:
             agent_prompt = _build_retry_prompt(feedback)
@@ -4612,87 +4697,116 @@ def _build_one_criterion(
         if attempt == 3 and not build_model_explicit:
             attempt_model = llm.ESCALATION_MODEL
 
-        cmd = [
-            _claude_bin(),
-            "-p",
-            "--permission-mode", "acceptEdits",
-            "--output-format", "json",
-            "--max-budget-usd", _build_agent_max_budget_usd(),
-            *session_flag,
-        ]
-        if attempt_model:
-            cmd += ["--model", attempt_model]
-
-        # Run Claude agent — wall-clock capped. A stuck/looping agent must
-        # not be able to run unbounded just because it hasn't returned yet.
-        # start_new_session=True puts the child in its own process group so
-        # the timeout handler below can kill it AND any descendants (a
-        # background bash call, an MCP server the CLI spawned) with one
-        # os.killpg -- plain subprocess.run(timeout=...) only kills the
-        # direct `claude` child on timeout, orphaning everything under it
-        # (same failure class as the AppleMDM testcontainers worktree gap).
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, cwd=project_root, start_new_session=True,
-        )
-        try:
-            stdout, stderr = proc.communicate(input=agent_prompt, timeout=_build_agent_timeout_sec())
-            result = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.communicate()  # reap, discard -- process is already dead
-            timeout_sec = _build_agent_timeout_sec()
-            console.print(f"[red]Claude agent timed out after {timeout_sec}s.[/red]")
-            feedback = f"Previous attempt exceeded the {timeout_sec}s per-attempt timeout and was killed."
-            attempt_history.append(f"Attempt {attempt}: {feedback}")
-            with _STATE_LOCK:
-                telemetry.record(
-                    pcp_dir,
-                    cycle="build", cycle_number=attempt,
-                    module=mod["name"], submodule=None, criterion_id=c["id"], run_id=run_log_id,
-                    files=[], languages=[], lines_added=0, lines_removed=0,
-                    model=attempt_model, result="timeout", errors=[feedback],
-                    duration_ms=timeout_sec * 1000,
-                )
-            continue
-
-        if result.returncode != 0:
-            console.print("[red]Claude agent exited with error.[/red]")
-            feedback = "Claude CLI agent run failed or exited with non-zero code."
-            attempt_history.append(f"Attempt {attempt}: {feedback}")
-            continue
-
-        agent_usage = {}
-        try:
-            envelope = json.loads(result.stdout)
-            if envelope.get("is_error"):
-                console.print(f"[red]Claude agent reported an error:[/red] {envelope.get('result', '')}")
-                feedback = f"Previous attempt errored: {envelope.get('result', '')}"
-                attempt_history.append(f"Attempt {attempt}: {feedback[:500]}")
+        # CTRL-0XX: local-LLM build attempt, attempt 1 only, DEFAULT ON as of
+        # 2026-09-02 (Ganesh's explicit call: "auto opt in... if any specific
+        # reason I can opt out for that use case" -- flipped from the original
+        # opt-in design). Every criterion tries Ornith first UNLESS it
+        # explicitly sets `local_llm_build: false` (module_acceptance.schema.json)
+        # -- no automatic carve-out for adversarial_review/UI-facing/etc.; an
+        # explicit per-criterion false is how those get excluded, by design,
+        # not a heuristic this code guesses at. Low real downside even at
+        # attempt 1 across the whole board: a local miss costs nothing (Ornith
+        # is free) and attempts 2/3 ALWAYS still take the unmodified `claude -p`
+        # path below with the real gate feedback from whatever happened on
+        # attempt 1 -- this flag only ever touches attempt 1, the existing
+        # escalation ladder is the safety net, not a separate mechanism.
+        # See _run_local_llm_attempt's own docstring for the full rationale
+        # (Ornith writes in place inside this criterion's own isolated
+        # worktree; the SAME gates below verify its diff as any Claude diff).
+        if attempt == 1 and c.get("local_llm_build") is not False:
+            console.print(f"[dim]Local LLM build attempt (Ornith) — {mod['name']}/{c['id']}...[/dim]")
+            ok, local_err = _run_local_llm_attempt(project_root, agent_prompt)
+            if not ok:
+                console.print(f"[red]Local LLM build attempt failed: {local_err}[/red]")
+                feedback = f"Local LLM (Ornith) build attempt failed to run: {local_err}"
+                attempt_history.append(f"Attempt {attempt}: {feedback}")
                 continue
-            with _STATE_LOCK:
-                _log_usage(
-                    pcp_dir, "build-agent", attempt_model, envelope.get("session_id"),
-                    envelope.get("usage", {}), envelope.get("total_cost_usd"),
-                )
-            budget.add_cost(envelope.get("total_cost_usd"))
             agent_usage = {
-                "model": attempt_model or "default",
-                "session_id": envelope.get("session_id"),
-                "usage": envelope.get("usage", {}),
-                "cost_usd": envelope.get("total_cost_usd"),
-                "duration_ms": envelope.get("duration_ms"),
+                "model": "ornith-1.5-35b-a3b-nvfp4 (local)", "session_id": None,
+                "usage": {}, "cost_usd": 0.0, "duration_ms": None,
             }
-            _u = envelope.get("usage", {})
-            run_log_tokens["input"] += _u.get("input_tokens", 0) + _u.get("cache_creation_input_tokens", 0)
-            run_log_tokens["output"] += _u.get("output_tokens", 0)
-            run_log_tokens["cache_read"] += _u.get("cache_read_input_tokens", 0)
-            run_log_tokens["cost"] += envelope.get("total_cost_usd") or 0
-        except (json.JSONDecodeError, TypeError):
-            pass
+        else:
+            cmd = [
+                _claude_bin(),
+                "-p",
+                "--permission-mode", "acceptEdits",
+                "--output-format", "json",
+                "--max-budget-usd", _build_agent_max_budget_usd(),
+                *session_flag,
+            ]
+            if attempt_model:
+                cmd += ["--model", attempt_model]
+
+            # Run Claude agent — wall-clock capped. A stuck/looping agent must
+            # not be able to run unbounded just because it hasn't returned yet.
+            # start_new_session=True puts the child in its own process group so
+            # the timeout handler below can kill it AND any descendants (a
+            # background bash call, an MCP server the CLI spawned) with one
+            # os.killpg -- plain subprocess.run(timeout=...) only kills the
+            # direct `claude` child on timeout, orphaning everything under it
+            # (same failure class as the AppleMDM testcontainers worktree gap).
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, cwd=project_root, start_new_session=True,
+            )
+            try:
+                stdout, stderr = proc.communicate(input=agent_prompt, timeout=_build_agent_timeout_sec())
+                result = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.communicate()  # reap, discard -- process is already dead
+                timeout_sec = _build_agent_timeout_sec()
+                console.print(f"[red]Claude agent timed out after {timeout_sec}s.[/red]")
+                feedback = f"Previous attempt exceeded the {timeout_sec}s per-attempt timeout and was killed."
+                attempt_history.append(f"Attempt {attempt}: {feedback}")
+                with _STATE_LOCK:
+                    telemetry.record(
+                        pcp_dir,
+                        cycle="build", cycle_number=attempt,
+                        module=mod["name"], submodule=None, criterion_id=c["id"], run_id=run_log_id,
+                        files=[], languages=[], lines_added=0, lines_removed=0,
+                        model=attempt_model, result="timeout", errors=[feedback],
+                        duration_ms=timeout_sec * 1000,
+                    )
+                continue
+
+            if result.returncode != 0:
+                console.print("[red]Claude agent exited with error.[/red]")
+                feedback = "Claude CLI agent run failed or exited with non-zero code."
+                attempt_history.append(f"Attempt {attempt}: {feedback}")
+                continue
+
+            agent_usage = {}
+            try:
+                envelope = json.loads(result.stdout)
+                if envelope.get("is_error"):
+                    console.print(f"[red]Claude agent reported an error:[/red] {envelope.get('result', '')}")
+                    feedback = f"Previous attempt errored: {envelope.get('result', '')}"
+                    attempt_history.append(f"Attempt {attempt}: {feedback[:500]}")
+                    continue
+                with _STATE_LOCK:
+                    _log_usage(
+                        pcp_dir, "build-agent", attempt_model, envelope.get("session_id"),
+                        envelope.get("usage", {}), envelope.get("total_cost_usd"),
+                    )
+                budget.add_cost(envelope.get("total_cost_usd"))
+                agent_usage = {
+                    "model": attempt_model or "default",
+                    "session_id": envelope.get("session_id"),
+                    "usage": envelope.get("usage", {}),
+                    "cost_usd": envelope.get("total_cost_usd"),
+                    "duration_ms": envelope.get("duration_ms"),
+                }
+                _u = envelope.get("usage", {})
+                run_log_tokens["input"] += _u.get("input_tokens", 0) + _u.get("cache_creation_input_tokens", 0)
+                run_log_tokens["output"] += _u.get("output_tokens", 0)
+                run_log_tokens["cache_read"] += _u.get("cache_read_input_tokens", 0)
+                run_log_tokens["cost"] += envelope.get("total_cost_usd") or 0
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         # Run checks. PCP's own operational writes (token ledger, telemetry)
         # and stale pre-existing dirty state (see pre_existing_dirty_files
@@ -5202,6 +5316,10 @@ def _refresh_state(pcp_dir: Path, modules_dir: Path) -> None:
 @click.command()
 @click.option("--module", "module_name", default=None,
               help="Build specific module only.")
+@click.option("--criterion", "criterion_ids_raw", default=None,
+              help="Comma-separated criterion id(s) to build, narrowed WITHIN --module (requires --module). "
+                   "Added for the Workflow-tool wave-partition: local_llm_build criteria route here instead "
+                   "of Workflow's agent() pipeline, which has no path to a local model.")
 @click.option("--path", "project_path", type=click.Path(), default=None,
               help="Project root override.")
 @click.option("--yes", "yes", is_flag=True,
@@ -5211,7 +5329,7 @@ def _refresh_state(pcp_dir: Path, modules_dir: Path) -> None:
                    "pre-existing debt (.pcp/baseline_test_failures.yaml) — mirrors `pcp check --baseline`'s "
                    "brownfield-grace pattern, extended to the test suite. Explicit only, never automatic: "
                    "a test failure could be a real regression, not debt. Does not build anything; exits after capturing.")
-def build(module_name: str | None, project_path: str | None, yes: bool, capture_test_baseline: bool):
+def build(module_name: str | None, criterion_ids_raw: str | None, project_path: str | None, yes: bool, capture_test_baseline: bool):
     """Run autonomous AI coding loops for pending acceptance criteria.
 
     This is the HEADLESS executor (ThreadPoolExecutor, worktree-per-criterion,
@@ -5222,6 +5340,11 @@ def build(module_name: str | None, project_path: str | None, yes: bool, capture_
     same wave computation, but the harness governs concurrency and worktree
     isolation natively instead of this engine reinventing merge/retry. This
     command still nudges toward that path below when it detects one."""
+    if criterion_ids_raw and not module_name:
+        console.print("[red]Error:[/red] --criterion requires --module (narrows WITHIN one module, not across the whole program).")
+        sys.exit(2)
+    criterion_ids = frozenset(x.strip() for x in criterion_ids_raw.split(",") if x.strip()) if criterion_ids_raw else None
+
     try:
         pcp_dir = find_pcp_dir(Path(project_path) if project_path else None)
     except NoPCPDir as e:
@@ -5338,7 +5461,7 @@ def build(module_name: str | None, project_path: str | None, yes: bool, capture_
 
     project_root = pcp_dir.parent
 
-    modules_to_build = gather_modules_to_build(pcp_dir, module_name)
+    modules_to_build = gather_modules_to_build(pcp_dir, module_name, criterion_ids)
 
     # Refuse to rebuild work that already landed. `pcp build` picks its work from
     # `status: pending`, so a criterion whose status was never written back gets
