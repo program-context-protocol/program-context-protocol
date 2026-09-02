@@ -105,7 +105,11 @@ def test_consecutive_fix_breaker_pauses_auto_fix(tmp_path):
 # ── attempt_auto_fix: budget cap + session reuse ──
 
 def test_attempt_auto_fix_first_attempt_uses_session_id_flag(tmp_path):
-    with patch("pcp.commands.watch.subprocess.run") as mock_run:
+    # 2026-09-02: is_first_attempt + CODE now tries a local (Ornith) fix
+    # before falling to claude -- force that fallback so this test isolates
+    # what it's actually meant to check, the claude call's own flag shape.
+    with patch("pcp.commands.watch._attempt_local_ci_fix", return_value=False), \
+            patch("pcp.commands.watch.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
         attempt_auto_fix(tmp_path / ".pcp", "log", "abc-123", True)
     cmd = mock_run.call_args[0][0]
@@ -126,7 +130,9 @@ def test_attempt_auto_fix_subsequent_attempt_uses_resume_flag(tmp_path):
 
 def test_attempt_auto_fix_includes_max_budget_usd_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("PCP_WATCH_AGENT_MAX_BUDGET_USD", "7")
-    with patch("pcp.commands.watch.subprocess.run") as mock_run:
+    # Same 2026-09-02 note as above — force the local-fix short-circuit off.
+    with patch("pcp.commands.watch._attempt_local_ci_fix", return_value=False), \
+            patch("pcp.commands.watch.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
         attempt_auto_fix(tmp_path / ".pcp", "log", "abc-123", True)
     cmd = mock_run.call_args[0][0]
@@ -245,7 +251,10 @@ def test_notify_quiet_on_successful_delivery(capsys):
 # ── flaky-test classification in the auto-fix prompt ──
 
 def test_auto_fix_prompt_requires_failure_classification(tmp_path):
-    with patch("pcp.commands.watch.subprocess.run") as mock_run:
+    # Same 2026-09-02 note — this test is about the claude prompt's own
+    # content, reached only once the local-fix short-circuit is forced off.
+    with patch("pcp.commands.watch._attempt_local_ci_fix", return_value=False), \
+            patch("pcp.commands.watch.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
         attempt_auto_fix(tmp_path / ".pcp", "log", "abc-123", True)
     prompt = mock_run.call_args.kwargs["input"]

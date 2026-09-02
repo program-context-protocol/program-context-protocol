@@ -21,8 +21,10 @@ from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
 from pcp.commands.doctor import load_integrations, check_environment
-from pcp.commands.build import check_agent_depth_or_exit
+from pcp.commands.build import check_agent_depth_or_exit, _run_local_llm_attempt, _auto_push
 from pcp.llm.client import _claude_bin
+from pcp.llm import client as llm
+from pcp import qa
 
 console = Console()
 
@@ -213,27 +215,139 @@ def check_stale_escalations(pcp_dir: Path, already_reported: set) -> None:
         notify(msg)
 
 
-def attempt_auto_fix(pcp_dir: Path, failure_context: str, session_id: str, is_first_attempt: bool) -> bool:
-    """Spawn a claude -p session instructed to diagnose+fix+commit+push.
+def _classify_ci_failure(failure_context: str) -> tuple[str, str]:
+    """Read-only CODE|FLAKY|INFRA triage — stays Claude-direct always,
+    2026-09-02, regardless of whether the actual fix ends up local. This
+    is deliberately the one part of the auto-fix flow NOT delegated:
+    real, unsupervised diagnosis from a raw log with no ground truth is
+    exactly the case the global local-delegation doctrine carves out as
+    Claude-direct. A real Harbor/Terminus-2 eval that day validated
+    Ornith FIXING a specified, already-classified defect (real: 5/5,
+    7/7, 16/16, 6/6, 7/7 across several task shapes) — not diagnosing an
+    unknown one from scratch, a different and harder task. A separate
+    real finding the same eval run: given a genuinely ambiguous spec,
+    Ornith reasoned through the ambiguity internally and picked
+    reasonably, but shipped zero trace of that reasoning externally (no
+    comment, no note) — fine for a bounded code fix a human/gate reviews
+    downstream, not something to trust blind for a call this
+    consequential (FLAKY quarantines a test; CODE edits application
+    logic; picking wrong is a real, different-shaped mistake either way).
+    Cheap, single judge call — not a tool-using agent session."""
+    system = (
+        "You are a CI failure triage classifier. Respond with EXACTLY one line, "
+        "no other text: CLASSIFICATION|one-sentence evidence — where CLASSIFICATION "
+        "is exactly one of CODE, FLAKY, INFRA."
+    )
+    user = (
+        "Classify this CI failure as CODE (a real defect in application/test logic), "
+        "FLAKY (test passes/fails non-deterministically — timing, ordering, network, "
+        "shared state), or INFRA (runner/tooling/dependency-resolution problem outside "
+        f"the code).\n\n## CI Failure Log\n```\n{failure_context}\n```"
+    )
+    try:
+        text = llm.call(system, user, command="watch.classify")
+    except Exception as e:
+        return "CODE", f"classification call failed ({e}) — defaulting to CODE, the pre-existing behavior"
+    parts = (text or "").strip().split("|", 1)
+    classification = parts[0].strip().upper()
+    evidence = parts[1].strip() if len(parts) > 1 else ""
+    if classification not in ("CODE", "FLAKY", "INFRA"):
+        return "CODE", f"unparseable classifier response ({text[:200]!r}) — defaulting to CODE"
+    return classification, evidence
 
-    session_id ties consecutive auto-fix attempts within the same failure
-    streak together: is_first_attempt=True opens a fresh session with
-    --session-id, subsequent consecutive attempts --resume it instead of
-    cold-restarting -- the same fix build.py already applies to its own
+
+def _attempt_local_ci_fix(pcp_dir: Path, project_root: Path, failure_context: str, evidence: str) -> bool:
+    """Ornith-first CODE fix, added 2026-09-02 to route real 'maximize local
+    usage' pressure through this loop too — but with a real, SYNCHRONOUS
+    local test gate before anything is committed or pushed, which the
+    pre-existing claude path never had (that one relies purely on the next
+    CI poll, async, to catch a bad fix — a real risk gap this closes for
+    the local path specifically). Reverts cleanly to the pre-attempt git
+    state on ANY failure (didn't run, or ran but failed real tests) — git
+    state decides what sticks, never Ornith's own self-report. Returns
+    True only if the fix passed a real local test run AND was committed
+    (and pushed, if a remote exists)."""
+    pre_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=project_root,
+    ).stdout.strip()
+    if not pre_sha:
+        return False  # not a real git repo at HEAD -- nothing safe to revert to, don't attempt
+
+    prompt = (
+        "A CI run on this repository failed and has already been classified as a CODE "
+        f"defect (evidence: {evidence}). Fix the underlying defect. Do not touch test "
+        "files unless the defect is genuinely IN the test itself — if you're unsure "
+        "whether a test or the application code is wrong, prefer fixing the application "
+        "code. If you make a genuinely ambiguous judgment call (the failure/spec doesn't "
+        "fully determine the one right fix), say so explicitly in a code comment at the "
+        "decision point — don't silently pick one option and leave no trace of having "
+        f"had to choose.\n\n## CI Failure Log\n```\n{failure_context}\n```"
+    )
+    ok, err = _run_local_llm_attempt(project_root, prompt)
+    if not ok:
+        console.print(f"[dim]Local CI-fix attempt did not complete: {err}[/dim]")
+        subprocess.run(["git", "checkout", "--", "."], cwd=project_root, capture_output=True)
+        subprocess.run(["git", "clean", "-fd"], cwd=project_root, capture_output=True)
+        return False
+
+    result = qa.run_test_suite(project_root, pcp_dir=pcp_dir)
+    if not result.get("passed", False):
+        console.print("[dim]Local CI-fix did not pass the real local test suite — reverting, falling back to claude.[/dim]")
+        subprocess.run(["git", "reset", "--hard", pre_sha], cwd=project_root, capture_output=True)
+        subprocess.run(["git", "clean", "-fd"], cwd=project_root, capture_output=True)
+        return False
+
+    subprocess.run(["git", "add", "-A"], cwd=project_root, capture_output=True)
+    commit = subprocess.run(
+        ["git", "commit", "-m", "fix: local (Ornith) CI auto-fix, verified by a real local test run"],
+        cwd=project_root, capture_output=True, text=True,
+    )
+    if commit.returncode != 0:
+        console.print(f"[dim]Local CI-fix passed real local tests but nothing to commit, or commit failed: {commit.stderr.strip()[:200]}[/dim]")
+        return False
+    _auto_push(project_root)
+    console.print("[green]Local (Ornith) CI-fix passed real local tests, committed and pushed.[/green]")
+    return True
+
+
+def attempt_auto_fix(pcp_dir: Path, failure_context: str, session_id: str, is_first_attempt: bool) -> bool:
+    """Classify first (always Claude — see _classify_ci_failure), then try
+    an Ornith-first fix for a NEW CODE failure streak (is_first_attempt),
+    falling back to claude -p (this function's pre-existing behavior,
+    unchanged below) if local isn't attempted or doesn't stick. A resumed
+    streak (is_first_attempt=False) skips local entirely — that mid-streak
+    session-resume optimization is claude-specific (Ornith has no session
+    concept to resume), local only ever gets ONE shot per fresh streak.
+
+    session_id ties consecutive claude auto-fix attempts within the same
+    failure streak together: is_first_attempt=True opens a fresh session
+    with --session-id, subsequent consecutive attempts --resume it instead
+    of cold-restarting -- the same fix build.py already applies to its own
     per-criterion retries (a cold restart re-explores the whole repo and
     re-pastes context for every attempt). The caller resets to a new
     session_id once CI succeeds, so a genuinely new failure never resumes
     stale context from an unrelated one.
 
     Returns True if the agent ran without a process-level error — not a
-    guarantee the fix worked, the next poll cycle re-checks CI for that."""
+    guarantee the fix worked, the next poll cycle re-checks CI for that
+    (except the local path, which already verified locally before ever
+    returning True)."""
+    project_root = pcp_dir.parent
+    classification, evidence = _classify_ci_failure(failure_context)
+    console.print(f"[dim]CI failure classified as {classification}: {evidence}[/dim]")
+
+    if is_first_attempt and classification == "CODE":
+        if _attempt_local_ci_fix(pcp_dir, project_root, failure_context, evidence):
+            return True
+        console.print("[dim]Local CI-fix unavailable or unsuccessful — falling back to claude.[/dim]")
+
     prompt = (
-        "A CI run failed on this repository. FIRST classify the failure from the log below "
-        "as exactly one of: CODE (a real defect in application/test logic), FLAKY (test "
-        "passes/fails non-deterministically — timing, ordering, network, shared state), or "
-        "INFRA (runner/tooling/dependency-resolution problem outside the code). State the "
-        "classification and your evidence for it before doing anything else.\n"
-        "- CODE: fix the underlying defect, commit, and push to the current branch.\n"
+        f"A CI run failed on this repository — already classified as {classification} "
+        f"(evidence: {evidence}).\n"
+        "- CODE: fix the underlying defect, commit, and push to the current branch. "
+        "(If reached here, a local automated fix attempt was already tried and did not "
+        "stick — check the working tree for its own attempt before starting your own; "
+        "it's already been reverted.)\n"
         "- FLAKY: do NOT patch application code to make the symptom go away — masking an "
         "unreliable test with application changes creates debt and hides the real problem. "
         "Quarantine the test instead (mark it skipped/xfail with a comment naming the "

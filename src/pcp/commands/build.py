@@ -4728,7 +4728,13 @@ def _build_one_criterion(
                 "a directory/package named after it unless you actually find one already existing "
                 "in the repo via your read tools. Use the real, existing import paths and file "
                 "layout you find by reading the repo — never invent a package path from the "
-                "module label."
+                "module label.\n"
+                "If you make a genuinely ambiguous judgment call anywhere (the spec/criterion "
+                "doesn't fully determine one right answer — e.g. an unstated tie-break rule, an "
+                "unspecified edge case), say so explicitly in a code comment at that decision "
+                "point. Don't silently pick one option and leave no trace of having had to "
+                "choose — a real eval run found this a genuine gap: correct internal reasoning "
+                "through an ambiguity, zero trace of it in the shipped code."
             )
             # local_llm_build + UI-facing (2026-09-02): _build_agent_prompt's UI
             # section (see _is_ui_facing_criterion above) tells the agent to vendor
