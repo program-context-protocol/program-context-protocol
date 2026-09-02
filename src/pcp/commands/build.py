@@ -4703,26 +4703,29 @@ def _build_one_criterion(
                     ])
             else:
                 agent_prompt = _build_local_retry_prompt(pcp_dir, mod["name"], c, mod["spec"], feedback)
-            # General local-environment note, ALL local attempts (2026-09-02,
-            # found via real testing during the multi-attempt redesign):
-            # _build_agent_prompt's TDD instruction ("write a failing test,
-            # confirm it fails... run tests to verify") assumes the agent can
-            # itself execute a test runner -- Ornith's tool set has no
-            # execute/shell tool at all (file ops only, by design). Left
-            # unclarified, a real test run showed this produces confused,
-            # looping behavior (wrong files created, hit the iteration cap
-            # without ever finishing) rather than a clean failure -- the
-            # model appears to get stuck trying to reconcile an instruction
-            # it structurally cannot follow. This must run before the
-            # UI-specific note below so both apply when relevant.
+            # General local-environment note, ALL local attempts. Updated
+            # 2026-09-02: Ornith now HAS a real run_shell tool (worktree-
+            # confined, no shell metacharacter injection, a mechanical
+            # deny-list on destructive commands mirroring the rm-quarantine/
+            # git-repo-guard hooks Claude's own shell access already gets) --
+            # earlier the same day this note said the opposite ("no shell,
+            # no test runner") after real testing showed the TDD instruction
+            # ("run tests to verify") produced confused, looping behavior
+            # when the agent had no way to follow it. That gap is closed now
+            # by giving it the capability, not just clarifying its absence.
+            # This must run before the UI-specific note below so both apply
+            # when relevant.
             agent_prompt += (
                 "\n\n## Local build environment note\n"
-                "You have file read/write tools only (grep, read, list, write, edit) — "
-                "no shell, no test runner, no way to execute anything yourself. Write "
-                "BOTH the test file and the implementation as instructed, but do not try "
-                "to run or confirm-fail/confirm-pass them — that verification happens "
-                "automatically, outside your control, after you finish. Just write code "
-                "you're confident is correct, then stop calling tools.\n"
+                "You have file read/write tools (grep, read, list, write, edit) AND a "
+                "run_shell tool — use it to actually run tests yourself (e.g. `python3 -m "
+                "pytest -v`) and confirm red-then-green as instructed, not just write code "
+                "you hope is correct. run_shell runs ONE command at a time (no pipes/&&/"
+                "chaining — pass one command and its args only) inside this worktree; a "
+                "small set of destructive commands (rm, git push, sudo, install commands, "
+                "etc.) is refused outright, not run. Verification also happens automatically "
+                "outside your control after you finish either way — running tests yourself is "
+                "for your own confidence and faster convergence, not a substitute for that.\n"
                 "The 'Module: " + mod["name"] + "' line above is a PROJECT-ORGANIZATION label "
                 "for this codebase, not a Python package name — do not import from it or create "
                 "a directory/package named after it unless you actually find one already existing "
