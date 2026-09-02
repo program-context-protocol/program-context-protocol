@@ -2078,6 +2078,27 @@ def _build_escalation_prompt(pcp_dir: Path, module_name: str, criterion: dict, s
     ])
 
 
+def _build_local_retry_prompt(pcp_dir: Path, module_name: str, criterion: dict, spec: dict, constraint_feedback: str) -> str:
+    """Retry prompt for a LOCAL (Ornith) attempt — 2026-09-02. Unlike
+    `_build_retry_prompt` (a --resume'd claude session, which already has
+    its own prior turn's context and just needs the new feedback), Ornith's
+    calls are stateless single-shot HTTP requests with no session concept
+    at all — every attempt starts from zero memory of the last one. So this
+    re-supplies the FULL base prompt (same as attempt 1) rather than just
+    the delta, then appends the real gate feedback on top."""
+    base = _build_agent_prompt(pcp_dir, module_name, criterion, spec)
+    return base + "\n".join([
+        "",
+        "## Your previous attempt at this criterion was BLOCKED by quality/architecture gates:",
+        "",
+        constraint_feedback,
+        "",
+        "You have no memory of that attempt (this is a fresh call) — the working tree may still "
+        "have your partial work in it though. Fix these violations. Make sure to adhere to all "
+        "principles above.",
+    ])
+
+
 def _build_retry_prompt(constraint_feedback: str) -> str:
     """Follow-up prompt for a --resume'd session. No re-pasted context — the agent
     already has it from the same session's earlier turn."""
@@ -4614,8 +4635,23 @@ def _build_one_criterion(
     # than the block_findings channel in this pass.
     preflight_lines = _run_architect_preflight(pcp_dir, mod, c)
 
-    for attempt in range(1, 4):
-        console.print(f"\n[dim]Attempt {attempt}/3 — {mod['name']}/{c['id']}...[/dim]")
+    # CTRL-0XX: local-LLM (Ornith) attempts get 3 full tries, escalating to
+    # real claude -p only on a 4th and final attempt -- redesigned 2026-09-02
+    # on Ganesh's explicit instruction ("maybe after 4 attempts... we can go
+    # to claude.. not for the 1st 3"; supersedes the original single-local-
+    # attempt design from earlier the same day). DEFAULT ON: every criterion
+    # routes here UNLESS it explicitly sets `local_llm_build: false`
+    # (module_acceptance.schema.json) -- no automatic carve-out by
+    # logic_tier/adversarial_review/UI-facing, an explicit per-criterion
+    # false is the exclusion mechanism, by design. Opted-out criteria are
+    # entirely unaffected below -- max_attempts stays 3 and every branch
+    # behaves byte-identically to before this whole local-LLM feature ever
+    # existed.
+    local_enabled = c.get("local_llm_build") is not False
+    max_attempts = 4 if local_enabled else 3
+
+    for attempt in range(1, max_attempts + 1):
+        console.print(f"\n[dim]Attempt {attempt}/{max_attempts} — {mod['name']}/{c['id']}...[/dim]")
         _write_progress(pcp_dir, mod["name"], c["id"], attempt, "coding")
 
         allowed, spend_reason = spend.check_ceiling(pcp_dir)
@@ -4634,21 +4670,56 @@ def _build_one_criterion(
             console.print("[dim]Override with PCP_MAX_BUILD_SESSIONS=<n> if this build genuinely needs more.[/dim]")
             raise
 
-        # Attempt 1 opens a fresh session; attempt 2 --resumes it (avoids
-        # re-exploring the repo — Token Discipline). Attempt 3 (escalation)
-        # deliberately does NOT resume: failed-attempt context contaminates
-        # retries (CCRM, arXiv:2605.08563 — contaminated-context error rate
-        # 7.1x baseline, "clean-restart dominance") — the escalated model gets
-        # a FRESH session plus a structured summary of what failed, not the
-        # raw failure trajectory (summarize-don't-replay, arXiv:2604.16529).
-        if attempt == 1:
-            agent_prompt = _build_agent_prompt(pcp_dir, mod["name"], c, mod["spec"])
-            if preflight_lines:
-                agent_prompt += "\n".join([
-                    "",
-                    "## Architect pre-flight concerns (advisory, raised before you started — address or explicitly reason past them):",
-                    *[f"- {line}" for line in preflight_lines],
-                ])
+        # route_local is true for attempts 1-3 whenever local_enabled -- i.e.
+        # EVERY attempt when opted in, since max_attempts=4 there and only the
+        # 4th (final) ever falls through to the claude branch below. When
+        # local_enabled is False, this is always False (max_attempts=3, so
+        # `attempt <= 3` is trivially true but `local_enabled` gates it off)
+        # and every attempt takes the original, byte-identical claude ladder.
+        route_local = local_enabled and attempt <= 3
+
+        if route_local:
+            # LOCAL (Ornith) attempt -- no session concept at all, every call
+            # is a stateless single-shot HTTP request (see
+            # _build_local_retry_prompt's docstring for why retries can't
+            # just send a delta the way a --resume'd claude session can).
+            if attempt == 1:
+                agent_prompt = _build_agent_prompt(pcp_dir, mod["name"], c, mod["spec"])
+                if preflight_lines:
+                    agent_prompt += "\n".join([
+                        "",
+                        "## Architect pre-flight concerns (advisory, raised before you started — address or explicitly reason past them):",
+                        *[f"- {line}" for line in preflight_lines],
+                    ])
+            else:
+                agent_prompt = _build_local_retry_prompt(pcp_dir, mod["name"], c, mod["spec"], feedback)
+            # General local-environment note, ALL local attempts (2026-09-02,
+            # found via real testing during the multi-attempt redesign):
+            # _build_agent_prompt's TDD instruction ("write a failing test,
+            # confirm it fails... run tests to verify") assumes the agent can
+            # itself execute a test runner -- Ornith's tool set has no
+            # execute/shell tool at all (file ops only, by design). Left
+            # unclarified, a real test run showed this produces confused,
+            # looping behavior (wrong files created, hit the iteration cap
+            # without ever finishing) rather than a clean failure -- the
+            # model appears to get stuck trying to reconcile an instruction
+            # it structurally cannot follow. This must run before the
+            # UI-specific note below so both apply when relevant.
+            agent_prompt += (
+                "\n\n## Local build environment note\n"
+                "You have file read/write tools only (grep, read, list, write, edit) — "
+                "no shell, no test runner, no way to execute anything yourself. Write "
+                "BOTH the test file and the implementation as instructed, but do not try "
+                "to run or confirm-fail/confirm-pass them — that verification happens "
+                "automatically, outside your control, after you finish. Just write code "
+                "you're confident is correct, then stop calling tools.\n"
+                "The 'Module: " + mod["name"] + "' line above is a PROJECT-ORGANIZATION label "
+                "for this codebase, not a Python package name — do not import from it or create "
+                "a directory/package named after it unless you actually find one already existing "
+                "in the repo via your read tools. Use the real, existing import paths and file "
+                "layout you find by reading the repo — never invent a package path from the "
+                "module label."
+            )
             # local_llm_build + UI-facing (2026-09-02): _build_agent_prompt's UI
             # section (see _is_ui_facing_criterion above) tells the agent to vendor
             # shadcn components via its shadcn MCP server or `npx shadcn add` — the
@@ -4659,9 +4730,11 @@ def _build_one_criterion(
             # exactly what pcp-ui-design's Step 2.5 exists to avoid. Composing from
             # already-vendored primitives is still fine; a genuinely missing
             # component should be flagged, not faked, so gates catch it and the
-            # criterion falls through to the normal claude-p retry path (which does
-            # have shadcn access) instead of silently shipping hand-rolled markup.
-            if c.get("local_llm_build") is not False and _is_ui_facing_criterion(c):
+            # criterion falls through to the normal claude-p escalation path
+            # (which does have shadcn access) instead of silently shipping
+            # hand-rolled markup. Applies to every local attempt, not just the
+            # first -- Ornith has no memory of having been told this already.
+            if _is_ui_facing_criterion(c):
                 agent_prompt += (
                     "\n\n## Local build environment note\n"
                     "You have file read/write tools only — no shell, no MCP servers. "
@@ -4673,47 +4746,7 @@ def _build_one_criterion(
                     "what you write rather than hand-rolling replacement markup — "
                     "leave it for a follow-up build pass, don't fake it."
                 )
-            session_flag = ["--session-id", agent_session_id]
-        elif attempt == 2:
-            agent_prompt = _build_retry_prompt(feedback)
-            session_flag = ["--resume", agent_session_id]
-        else:
-            escalation_session_id = str(uuid.uuid4())
-            agent_prompt = _build_escalation_prompt(pcp_dir, mod["name"], c, mod["spec"], attempt_history)
-            session_flag = ["--session-id", escalation_session_id]
-            agent_session_id = escalation_session_id
 
-        # Commit-trailer attribution: the installed commit-msg hook stamps
-        # PCP-Agent-Session onto any commit made inside this subprocess —
-        # set AFTER the escalation branch so attempt 3 carries its own id.
-        os.environ["PCP_AGENT_SESSION_ID"] = agent_session_id
-
-        # Escalate to Opus on the final attempt -- two Sonnet attempts already
-        # failed, a real complexity signal worth paying up for before handing
-        # off to human escalation. Never overrides an explicit human choice:
-        # PCP_BUILD_MODEL set on attempt 1 stays in effect on attempt 3 too,
-        # rather than silently switching models without being asked.
-        attempt_model = build_model
-        if attempt == 3 and not build_model_explicit:
-            attempt_model = llm.ESCALATION_MODEL
-
-        # CTRL-0XX: local-LLM build attempt, attempt 1 only, DEFAULT ON as of
-        # 2026-09-02 (Ganesh's explicit call: "auto opt in... if any specific
-        # reason I can opt out for that use case" -- flipped from the original
-        # opt-in design). Every criterion tries Ornith first UNLESS it
-        # explicitly sets `local_llm_build: false` (module_acceptance.schema.json)
-        # -- no automatic carve-out for adversarial_review/UI-facing/etc.; an
-        # explicit per-criterion false is how those get excluded, by design,
-        # not a heuristic this code guesses at. Low real downside even at
-        # attempt 1 across the whole board: a local miss costs nothing (Ornith
-        # is free) and attempts 2/3 ALWAYS still take the unmodified `claude -p`
-        # path below with the real gate feedback from whatever happened on
-        # attempt 1 -- this flag only ever touches attempt 1, the existing
-        # escalation ladder is the safety net, not a separate mechanism.
-        # See _run_local_llm_attempt's own docstring for the full rationale
-        # (Ornith writes in place inside this criterion's own isolated
-        # worktree; the SAME gates below verify its diff as any Claude diff).
-        if attempt == 1 and c.get("local_llm_build") is not False:
             console.print(f"[dim]Local LLM build attempt (Ornith) — {mod['name']}/{c['id']}...[/dim]")
             ok, local_err = _run_local_llm_attempt(project_root, agent_prompt)
             if not ok:
@@ -4726,6 +4759,54 @@ def _build_one_criterion(
                 "usage": {}, "cost_usd": 0.0, "duration_ms": None,
             }
         else:
+            # CLAUDE path. Reached either as the opted-out criterion's normal
+            # 3-attempt ladder (attempt in 1,2,3, max_attempts=3), or -- when
+            # local_enabled -- ONLY as the 4th and final attempt, always
+            # landing in the `else` (escalation) branch just below since
+            # route_local already consumed attempts 1-3. Attempt 1 opens a
+            # fresh session; attempt 2 --resumes it (avoids re-exploring the
+            # repo — Token Discipline). The final attempt (escalation)
+            # deliberately does NOT resume: failed-attempt context
+            # contaminates retries (CCRM, arXiv:2605.08563 — contaminated-
+            # context error rate 7.1x baseline, "clean-restart dominance") —
+            # the escalated model gets a FRESH session plus a structured
+            # summary of what failed (which, for a local_enabled criterion,
+            # is the 3 local attempts' real gate feedback), not the raw
+            # failure trajectory (summarize-don't-replay, arXiv:2604.16529).
+            if attempt == 1:
+                agent_prompt = _build_agent_prompt(pcp_dir, mod["name"], c, mod["spec"])
+                if preflight_lines:
+                    agent_prompt += "\n".join([
+                        "",
+                        "## Architect pre-flight concerns (advisory, raised before you started — address or explicitly reason past them):",
+                        *[f"- {line}" for line in preflight_lines],
+                    ])
+                session_flag = ["--session-id", agent_session_id]
+            elif attempt == 2:
+                agent_prompt = _build_retry_prompt(feedback)
+                session_flag = ["--resume", agent_session_id]
+            else:
+                escalation_session_id = str(uuid.uuid4())
+                agent_prompt = _build_escalation_prompt(pcp_dir, mod["name"], c, mod["spec"], attempt_history)
+                session_flag = ["--session-id", escalation_session_id]
+                agent_session_id = escalation_session_id
+
+            # Commit-trailer attribution: the installed commit-msg hook stamps
+            # PCP-Agent-Session onto any commit made inside this subprocess —
+            # set AFTER the escalation branch so the final attempt carries its
+            # own id.
+            os.environ["PCP_AGENT_SESSION_ID"] = agent_session_id
+
+            # Escalate to Opus on the final attempt -- prior attempts already
+            # failed (local ones, or Sonnet's own, depending on local_enabled),
+            # a real complexity signal worth paying up for before handing off
+            # to human escalation. Never overrides an explicit human choice:
+            # PCP_BUILD_MODEL set explicitly stays in effect on the final
+            # attempt too, rather than silently switching models unasked.
+            attempt_model = build_model
+            if attempt == max_attempts and not build_model_explicit:
+                attempt_model = llm.ESCALATION_MODEL
+
             cmd = [
                 _claude_bin(),
                 "-p",
