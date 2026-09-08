@@ -38,3 +38,4 @@ docs/research-rigidity-vs-reliability-2026-07.md
 docs/CHANGELOG.md
 docs/reviews-*/
 _wre_dll_poc/
+.playwright-mcp/
