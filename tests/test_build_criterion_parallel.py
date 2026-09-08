@@ -384,11 +384,17 @@ def test_criterion_pool_is_capped(monkeypatch):
     """The criterion pool was uncapped while the module pool was capped at 5 —
     the asymmetry behind the 2026-07-22 30+-agent spawn. Harmless while
     parallelism was opt-in; with it defaulted on, core-data-model's 46
-    independent criteria would start 46 agents against one Postgres."""
+    independent criteria would start 46 agents against one Postgres.
+
+    Default raised 5 -> 8, 2026-09-02 (see _max_parallel_criteria's own
+    docstring): matches the real local Ornith router's --max-num-seqs 8,
+    not arbitrary symmetry with the module-level pool. This test drifted
+    out of sync with that change until fixed 2026-09-07 -- caught by a
+    real CI run, not a code review."""
     import inspect
     from pcp.commands import build
     monkeypatch.delenv("PCP_BUILD_MAX_PARALLEL_CRITERIA", raising=False)
-    assert build._max_parallel_criteria() == 5
+    assert build._max_parallel_criteria() == 8
     monkeypatch.setenv("PCP_BUILD_MAX_PARALLEL_CRITERIA", "15")
     assert build._max_parallel_criteria() == 15
     monkeypatch.setenv("PCP_BUILD_MAX_PARALLEL_CRITERIA", "0")

@@ -1074,7 +1074,7 @@ def _describe_prior_criterion_work(project_root: Path, criterion_id: str) -> str
     worktree's history -- never on a criterion's genuine first attempt. A
     clean first attempt should form its own approach, not get anchored
     toward a previous attempt's possibly-wrong one; this only targets the
-    specific failure mode observed (wasted discovery), by handing over
+    specific failure mode observed (wasted discovery), by supplying
     what a `git log --grep` for the criterion id would have found anyway.
 
     Grep-by-criterion-id rather than diffing against a stored base sha --
