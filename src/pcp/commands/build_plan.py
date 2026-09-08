@@ -52,7 +52,9 @@ import click
 from rich.console import Console
 
 from pcp.pcp_dir import find_pcp_dir, NoPCPDir
-from pcp.commands.build import gather_modules_to_build, compute_waves, _compute_criterion_waves
+from pcp.commands.build import (
+    gather_modules_to_build, compute_waves, _compute_criterion_waves, _local_llm_infra_available,
+)
 
 console = Console()
 
@@ -88,16 +90,28 @@ def _module_shared_surface(pcp_dir: Path, module_name: str) -> list[str]:
 def build_plan(pcp_dir: Path, module_name: str | None = None) -> dict:
     """{modules: [{name, wave, shared_surface_files, dependencies,
     criterion_waves: [[{id, description, check, target, depends_on,
-    touches_shared_surface}, ...], ...]}], total_criteria: int}.
+    touches_shared_surface, local_llm_build}, ...], ...]}], total_criteria: int}.
 
     Pure aggregation over data build.py already computes -- no new scheduling
     logic, no LLM, nothing spawned. `criterion_waves` is a list of lists: each
     inner list is one dependency wave (from `_compute_criterion_waves`), so
     the consumer knows both "these can run together" and "in what order
     relative to each other" without recomputing anything.
+
+    `local_llm_build` (added 2026-09-07): resolved the same way build.py's own
+    `_build_one_criterion` resolves it (`local_llm_build != false` AND the
+    local-LLM infra is actually present on this machine, `_local_llm_infra_available()`)
+    -- NOT just the raw schema field. Closes a real gap: the orchestrating
+    session (the `/pcp` skill) had no way to read this from `build-plan`'s own
+    JSON and was independently re-deriving it by re-reading `acceptance.yaml`
+    itself, a second source of truth for the same decision. This field is now
+    the single source of truth for "does this criterion build via
+    `pcp build --module X --criterion Y` (Ornith) or via Workflow's `agent()`
+    (Claude)."
     """
     modules = gather_modules_to_build(pcp_dir, module_name)
     module_waves = compute_waves(modules)
+    local_infra_ok = _local_llm_infra_available()
 
     out_modules = []
     for mod in modules:
@@ -116,6 +130,7 @@ def build_plan(pcp_dir: Path, module_name: str | None = None) -> dict:
                     "target": c.get("target"),
                     "depends_on": c.get("depends_on") or [],
                     "touches_shared_surface": True,  # see _module_shared_surface docstring
+                    "local_llm_build": c.get("local_llm_build") is not False and local_infra_ok,
                 }
                 for c in wave_criteria
             ])

@@ -49,6 +49,12 @@ console = Console()
 # read-modify-write file operations need to be serialized.
 _STATE_LOCK = threading.Lock()
 
+# Real capability cache for the local-LLM (Ornith/opencode) build path --
+# see _local_llm_infra_available()'s own docstring. None = not checked yet,
+# True/False = checked once, cached for the rest of this process's life.
+_LOCAL_LLM_INFRA_CACHE: bool | None = None
+_LOCAL_LLM_INFRA_WARNED = False
+
 
 def _max_build_sessions() -> int:
     """Run-level circuit breaker on raw agent session spawns (sanity cap, not just per-criterion).
@@ -93,7 +99,147 @@ def _local_llm_build_timeout_sec() -> int:
     return int(os.environ.get("PCP_LOCAL_LLM_BUILD_TIMEOUT_SEC", "900"))
 
 
-def _run_local_llm_attempt(project_root: Path, agent_prompt: str) -> tuple[bool, str]:
+# Real, versioned instruction-fragment library for Ornith's local-build
+# prompts, started 2026-09-02 (see geek-squad memory
+# decision_ornith_prompt_skill_library.md for the full reasoning). Deliberately
+# additive, not a refactor of the existing hardcoded environment/ambiguity
+# notes below (those are already proven working via a real A/B test -- see
+# project_ornith_agentic_harness.md -- touching them risks regressing a
+# confirmed-good instruction for no real gain). This is where NEW,
+# data-motivated fragments land going forward, so they're tracked/versioned
+# rather than accumulating as more one-off inline appends. Each entry should
+# name the real failure pattern it targets and, once real outcome volume
+# exists in local_llm_delegations, get evaluated the same way the ambiguity
+# fragment was (A/B, not assumed).
+_ORNITH_PROMPT_FRAGMENTS: dict[str, str] = {
+    "convergence_awareness": (
+        "## If you're not converging\n"
+        "If you notice yourself repeating similar edits, re-reading the same files, or "
+        "re-trying near-identical approaches across many tool calls without getting closer "
+        "to passing tests, STOP looping. Write a clear comment (or, if nothing has been "
+        "written yet, a short final message) stating exactly what's blocking convergence — "
+        "missing context, an environment issue, a genuinely unclear requirement, a test that "
+        "seems to contradict the spec — rather than continuing until you run out of "
+        "iterations with nothing usable to show. A clear statement of what's blocking you is "
+        "more useful than silent exhaustion of your iteration budget."
+    ),
+}
+# Real motivation for the one fragment above: checked directly 2026-09-02
+# against local_llm_delegations (pcp_criterion task_type, 48 real failures) --
+# iteration_cap was 21/48 (44%), the single largest failure bucket, distinct
+# from the already-addressed "stop"-but-fail bucket (20/48, 42%, covered by
+# the existing ambiguity-flagging note). No fragment existed for this one.
+
+
+def _get_delegation_finish_reason(delegation_id: int | None) -> str | None:
+    """Real, cheap lookup -- one row by primary key, not a history scan.
+    Returns None on any error (missing scanner, delegation_id never logged,
+    etc.) so a lookup failure degrades to "no fragment added" rather than
+    blocking the build."""
+    if delegation_id is None:
+        return None
+    try:
+        sys.path.insert(0, str(Path.home() / "Claude-code" / "claude-usage"))
+        import scanner
+        conn = scanner.get_db(scanner.DB_PATH)
+        row = conn.execute(
+            "SELECT finish_reason FROM local_llm_delegations WHERE id = ?", (delegation_id,)
+        ).fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _select_ornith_prompt_fragments(prior_delegation_id: int | None = None) -> str:
+    """v2, real conditional selection, 2026-09-02 night -- replaces v1's
+    unconditional append. Real reasoning (see
+    decision_ornith_prompt_skill_library.md): optimization means BOTH lower
+    input tokens AND higher success rate, not just the second one. Always
+    appending every fragment to every call only pushes on success rate while
+    actively working against the cost side. This only adds a fragment when a
+    real signal justifies it -- prior_delegation_id is the IMMEDIATELY PRIOR
+    attempt's own delegation_id for this SAME criterion (available in-process
+    from the caller's own retry loop, no DB history-mining across unrelated
+    criteria needed). A first attempt (prior_delegation_id=None) or a prior
+    attempt that didn't show real non-convergence gets NO fragment appended
+    -- the default prompt stays exactly as lean as before this library
+    existed. Real values checked 2026-09-02 against local_llm_delegations:
+    finish_reason in {iteration_cap, length} are the real non-convergence
+    signals; {stop, router_error} are not (stop-but-fail is a different real
+    bucket, already covered by the separate, existing ambiguity-flag note;
+    router_error is infra, not a prompting problem)."""
+    fragments = []
+    finish_reason = _get_delegation_finish_reason(prior_delegation_id)
+    if finish_reason in ("iteration_cap", "length"):
+        fragments.append(_ORNITH_PROMPT_FRAGMENTS["convergence_awareness"])
+    if not fragments:
+        return ""
+    return "\n\n" + "\n\n".join(fragments)
+
+
+def _local_llm_infra_available() -> bool:
+    """Real capability gate, added 2026-09-07. `local_llm_build`'s schema
+    default is opt-out (every criterion routes to Ornith unless it says
+    `false`), and local_enabled criteria get zero Claude auto-escalation on
+    failure (see local_enabled's own comment below) -- a deliberate choice
+    for Ganesh's own dogfooding, made against his own hardware
+    (delegate-to-workhorse-pcp-criterion + opencode + a real Ornith router).
+
+    This repo is BOTH that dogfood copy AND the public open-source PCP
+    package (program-context-protocol, PyPI + GitHub org) -- a fresh
+    `pip install` user has neither the script nor `opencode` on PATH. Without
+    this gate, that combination (opt-out default x no auto-escalation) would
+    make every criterion fail 5 times, silently, forever, for anyone who
+    isn't Ganesh -- a real regression shipped to the platform, not a
+    Ganesh-only quirk. `local_enabled` ANDs this in: the schema flag still
+    declares real INTENT (prefer local when it's there); this is what makes
+    that default safe to ship publicly instead of an environment-specific
+    hack. Checked once and cached for this process's life -- presence of a
+    script/binary on disk doesn't change mid-run."""
+    global _LOCAL_LLM_INFRA_CACHE
+    if _LOCAL_LLM_INFRA_CACHE is None:
+        script = Path.home() / "bin" / "delegate-to-workhorse-pcp-criterion"
+        _LOCAL_LLM_INFRA_CACHE = (
+            script.is_file() and os.access(script, os.X_OK) and shutil.which("opencode") is not None
+        )
+    return _LOCAL_LLM_INFRA_CACHE
+
+
+def _ornith_standing_conventions_available(project_root: Path) -> bool:
+    """Real gate, added 2026-09-07 alongside `pcp init`'s new AGENTS.md
+    scaffolding (init.py's upsert_pcp_agents_md_block). opencode reads
+    AGENTS.md natively at the project root every session -- the same slot
+    Claude Code's own CLAUDE.md fills for Claude. Before this, build.py
+    re-appended the same standing Ornith conventions (run_shell usage,
+    don't invent a package from the module label, flag genuine ambiguity,
+    shadcn-vendored-only for UI) into the `--prompt` argument on every
+    attempt of every criterion -- paying for identical text once per
+    attempt instead of once per session (priorart: AGENTS.md is a real,
+    established multi-tool convention as of 2026, read by opencode/Codex
+    CLI/Cursor/Aider -- reference-pattern-only, no library to add).
+
+    Deliberately checks the PROJECT's own AGENTS.md (`project_root`, not
+    this repo's), and only for the exact marker `pcp init` writes -- a
+    project that has never re-run `pcp init` since this shipped, or a
+    hand-written AGENTS.md without the PCP section, gets False here and
+    build.py falls back to injecting the notes inline exactly as before
+    (see the route_local branch in _build_one_criterion) -- never a silent
+    behavior change for an un-migrated project. Checked fresh each call
+    (unlike _local_llm_infra_available's cache) since it's a per-project
+    file read, not a per-process environment fact, and different modules
+    in a multi-project build could plausibly have different states."""
+    try:
+        from pcp.commands.init import PCP_AGENTS_BLOCK_START
+        agents_md = project_root / "AGENTS.md"
+        return agents_md.is_file() and PCP_AGENTS_BLOCK_START in agents_md.read_text()
+    except Exception:
+        return False
+
+
+def _run_local_llm_attempt(
+    project_root: Path, agent_prompt: str, session_id: str | None = None,
+) -> tuple[bool, str, int | None, str | None]:
     """Opt-in (`local_llm_build: true` on the criterion, checked by the
     caller) — routes attempt 1 to Ornith via a read+write tool loop scoped
     to `project_root`, instead of spawning `claude -p`. Purely additive:
@@ -114,22 +260,97 @@ def _run_local_llm_attempt(project_root: Path, agent_prompt: str) -> tuple[bool,
     `--max-budget-usd` circuit breakers above: those cap real Anthropic API
     spend, which a self-hosted local call doesn't incur.
 
-    Returns (ran_without_error, error_message)."""
+    `session_id` (added 2026-09-07, real per-criterion retry continuity):
+    the CALLER's own prior attempt's returned session_id for THIS SAME
+    criterion, never shared across criteria (see _build_one_criterion's
+    `criterion_session_id` loop-local variable) -- opencode sessions are a
+    sequential conversation, incompatible with the module-level parallelism
+    `_max_parallel_criteria()` already runs by default. None on a
+    criterion's first attempt (creates a fresh session); the delegate
+    script passes it through as `opencode run -s <id>` to continue. Real,
+    empirically confirmed mechanism, not assumed from Claude Code's own
+    `--session-id` (which pre-creates from a caller-chosen id -- opencode's
+    `-s` does not, it errors on an id it didn't assign itself).
+
+    Returns (ran_without_error, error_message, delegation_id, session_id).
+    delegation_id is the local_llm_delegations row the script itself already
+    wrote (a provisional outcome — did ITS OWN tool loop finish, not whether
+    real gates will pass) — the caller updates that same row with the REAL
+    gate result via _record_local_delegation_outcome once gates actually
+    run. None if the script's own logging failed/was skipped or the
+    `DELEGATION_ID:` line wasn't found (e.g. an older script version) --
+    never a reason to fail the attempt itself, just nothing to update
+    later. `session_id` in the return is the REAL id opencode assigned
+    (echoed back even when the caller passed one in) — None only if the
+    script's own `SESSION_ID:` line is missing (e.g. an older script
+    version), in which case the caller's next attempt falls back to a
+    fresh session rather than erroring on a stale/absent id."""
     script = str(Path.home() / "bin" / "delegate-to-workhorse-pcp-criterion")
     timeout_sec = _local_llm_build_timeout_sec()
+    cmd = [script, "--worktree", str(project_root), "--prompt", agent_prompt,
+           "--timeout", str(timeout_sec)]
+    if session_id:
+        cmd += ["--session", session_id]
     try:
-        result = subprocess.run(
-            [script, "--worktree", str(project_root), "--prompt", agent_prompt,
-             "--timeout", str(timeout_sec)],
-            capture_output=True, text=True, timeout=timeout_sec + 15,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec + 15)
     except subprocess.TimeoutExpired:
-        return False, f"local build script exceeded its own {timeout_sec}s timeout wrapper"
+        return False, f"local build script exceeded its own {timeout_sec}s timeout wrapper", None, None
     except FileNotFoundError:
-        return False, f"local build script not found at {script}"
+        return False, f"local build script not found at {script}", None, None
+    delegation_id = None
+    m = re.search(r"DELEGATION_ID:(\d+)", result.stdout or "")
+    if m:
+        delegation_id = int(m.group(1))
+    returned_session_id = None
+    m2 = re.search(r"SESSION_ID:(\S+)", result.stdout or "")
+    if m2:
+        returned_session_id = m2.group(1)
     if result.returncode != 0:
-        return False, f"local build script exited {result.returncode}: {result.stderr[-500:]}"
-    return True, ""
+        return (
+            False, f"local build script exited {result.returncode}: {result.stderr[-500:]}",
+            delegation_id, returned_session_id,
+        )
+    return True, "", delegation_id, returned_session_id
+
+
+def _record_local_delegation_outcome(
+    delegation_id: int | None, passed: bool, test_names_failed: list[str] | None = None,
+) -> None:
+    """Overwrites a local_llm_delegations row's provisional outcome (set by
+    delegate-to-workhorse-pcp-criterion at call time -- "did the tool loop
+    itself finish", not "did the diff pass") with the REAL outcome from
+    PCP's own gates, the only verification that actually matters for the
+    eventual DSPy-style prompt-optimization trainset this table exists to
+    build (see scanner.py's local_llm_delegations schema comment). Real gap
+    closed 2026-09-02: this call previously didn't exist at all, so every
+    local_llm_build attempt's row -- pass or fail at the tool-loop level --
+    never reflected whether its own diff actually passed a real test/lint/
+    SAST/architecture gate, which is the only outcome any optimization
+    against this data could ever train on. No-op on None (nothing was
+    logged, or an older script version) or on any import/DB error -- this
+    is a telemetry nicety, never a reason to fail or slow down a build.
+
+    Second real gap closed 2026-09-02, same night: test_names_failed/
+    tests_failed existed in scanner.py's schema and log_delegation_outcome's
+    own signature the whole time, but nothing upstream ever passed them --
+    checked directly, 70/70 pcp_criterion rows had outcome set but zero test
+    detail, making the table useless for diagnosing WHY an attempt failed,
+    not just whether it did. tests_failed is derived as len(test_names_failed)
+    when present. tests_passed is deliberately still not wired -- no existing
+    parser for a real pass-count, not worth a fragile regex against pytest's
+    summary line without a concrete current need for that specific number."""
+    if delegation_id is None:
+        return
+    try:
+        sys.path.insert(0, str(Path.home() / "Claude-code" / "claude-usage"))
+        import scanner
+        scanner.log_delegation_outcome(
+            delegation_id, "pass" if passed else "fail",
+            tests_failed=len(test_names_failed) if test_names_failed else None,
+            test_names_failed=test_names_failed or None,
+        )
+    except Exception:
+        pass
 
 
 def _max_agent_depth() -> int:
@@ -363,16 +584,20 @@ def _max_parallel_criteria() -> int:
     independent criteria would have started 46 concurrent agents, each with a
     worktree and a test suite hitting the same Postgres.
 
-    Defaults to 5, matching _max_parallel_modules(). Worst case is therefore
-    modules x criteria concurrent agents, bounded overall by
-    PCP_MAX_BUILD_SESSIONS. Raise PCP_BUILD_MAX_PARALLEL_CRITERIA for a
-    single-module run (`--module X`), where no module-level fan-out is
+    Default raised 5 -> 8 (2026-09-02, Ganesh, real hardware match): the
+    local Ornith router (Spark-751a) runs vLLM with --max-num-seqs 8 --
+    matching the module-level pool cap here was arbitrary symmetry, not a
+    measurement of what the actual local-LLM backend can serve. 8 is the
+    real number this box was configured to handle concurrently. Worst case
+    is still modules x criteria concurrent agents, bounded overall by
+    PCP_MAX_BUILD_SESSIONS. Raise PCP_BUILD_MAX_PARALLEL_CRITERIA further
+    for a single-module run (`--module X`), where no module-level fan-out is
     competing for the same database.
 
     Scope note, 2026-07-30: headless-engine-only, same as _max_parallel_modules()
     above -- the Workflow-tool path schedules criteria via `pipeline()`/`parallel()`
     per `pcp build-plan`'s criterion_waves and lets Workflow's own cap govern."""
-    return max(1, int(os.environ.get("PCP_BUILD_MAX_PARALLEL_CRITERIA", "5")))
+    return max(1, int(os.environ.get("PCP_BUILD_MAX_PARALLEL_CRITERIA", "8")))
 
 
 def _criteria_parallel_enabled(mod: dict) -> bool:
@@ -781,8 +1006,117 @@ def _resolve_regenerated_conflicts(project_root: Path, pcp_dir: Path | None) -> 
     return False
 
 
+def _detect_module_package_shadowing(project_root: Path) -> list[str]:
+    """Deterministic, git-tracked-files-only scan for a flat module (`X.py`)
+    and a package (`X/__init__.py`) coexisting in the same directory.
+
+    Real incident, 2026-09-02 Hermes/Maestri autonomy build (org_roles):
+    two criteria in the same module, each building in its OWN isolated
+    worktree in parallel with no visibility into the other, independently
+    decided to represent a brand-new shared concept differently -- one as
+    `org_roles.py`, the other as `org_roles/` -- and both merges succeeded
+    cleanly (different files, no textual conflict). Python then silently
+    resolves the package first, so the flat module's contents become
+    unreachable and every downstream test/criterion importing from it
+    breaks, at import time, invisibly, in whatever worktree next synced
+    against this base. Prompt-level guidance already tells the build agent
+    not to invent a package from the module label (see the "Local build
+    environment note" in _build_one_criterion) -- that only helps when the
+    package/module already exists to be found; it does nothing when this is
+    the first criterion creating the shared name and a LATER, independent
+    criterion picks the other shape. A mechanical merge-time check is the
+    only thing that can actually catch this, since neither criterion's own
+    agent ever sees the other's diff.
+
+    Uses `git ls-files` (tracked files only) rather than a filesystem walk
+    so build artifacts, venvs, and __pycache__ never produce false
+    positives. Cheap -- one subprocess call, an O(files) scan."""
+    result = subprocess.run(["git", "ls-files"], cwd=project_root, capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    module_stems: dict[str, set[str]] = {}
+    package_stems: dict[str, set[str]] = {}
+    for line in result.stdout.splitlines():
+        p = Path(line)
+        if p.name == "__init__.py" and len(p.parts) >= 2:
+            parent_dir = str(p.parent.parent)
+            package_stems.setdefault(parent_dir, set()).add(p.parent.name)
+        elif p.suffix == ".py" and p.stem != "__init__":
+            parent_dir = str(p.parent)
+            module_stems.setdefault(parent_dir, set()).add(p.stem)
+    violations = []
+    for parent_dir, stems in module_stems.items():
+        shadowed = stems & package_stems.get(parent_dir, set())
+        for stem in sorted(shadowed):
+            rel = "" if parent_dir == "." else f"{parent_dir}/"
+            violations.append(
+                f"{rel}{stem}.py and {rel}{stem}/ (package) both exist -- Python resolves the "
+                f"package first, silently shadowing the flat module for every importer."
+            )
+    return violations
+
+
+def _describe_prior_criterion_work(project_root: Path, criterion_id: str) -> str | None:
+    """Real gap found 2026-09-02 diagnosing org_roles/OR_002's Ornith failures
+    (with geek-squad): once the run_shell metachar and repeat-guard fixes
+    landed, a fresh local attempt STILL failed -- not by looping, but by
+    spending its entire round budget rediscovering a PRIOR attempt's real
+    code (already sitting in this repo's history, from an earlier escalated
+    Claude attempt or a previous `pcp build` run on this same criterion) via
+    `git log`/`git show` archaeology, never reaching the point of writing
+    anything itself. Real transcript: 12 rounds of legitimate exploration,
+    then ~10 more rounds finding and reading that prior work -- 10+ rounds
+    that could have been skipped entirely had the prompt just said what
+    already exists.
+
+    Deliberately scoped (geek-squad's call, agreed) to fire ONLY when real
+    prior commits referencing this criterion id are already found in this
+    worktree's history -- never on a criterion's genuine first attempt. A
+    clean first attempt should form its own approach, not get anchored
+    toward a previous attempt's possibly-wrong one; this only targets the
+    specific failure mode observed (wasted discovery), by handing over
+    what a `git log --grep` for the criterion id would have found anyway.
+
+    Grep-by-criterion-id rather than diffing against a stored base sha --
+    both `_auto_commit_criterion`'s own commit format
+    (`{module}/{criterion_id}: ...`) and real observed Claude-authored
+    commits (`... [OR_002]`) both contain the literal id, and this needs no
+    extra plumbing through `_setup_worktree`'s callers to have a base sha
+    available. Returns None on no match or any git error -- this is a
+    prompt-quality nicety, never a reason to fail or change behavior."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "--all", "--oneline", f"--grep={criterion_id}"],
+            cwd=project_root, capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        log_lines = result.stdout.strip().splitlines()
+        newest_sha = log_lines[0].split()[0]
+        stat = subprocess.run(
+            ["git", "show", newest_sha, "--stat", "--format="],
+            cwd=project_root, capture_output=True, text=True, timeout=15,
+        )
+        return (
+            f"## Prior work already exists for this criterion\n"
+            f"Real commits referencing {criterion_id} already exist in this repo's history "
+            f"(from an earlier attempt) -- do NOT rediscover this by digging through git log "
+            f"yourself; the commits and files are listed below.\n\n"
+            f"Commits:\n{result.stdout.strip()}\n\n"
+            f"Files touched by the most recent one ({newest_sha}):\n{stat.stdout.strip()}\n\n"
+            f"Read the actual current file contents yourself (read_file) before deciding "
+            f"whether to build on this prior work or take a different approach -- this is "
+            f"context to save you rediscovery time, not an instruction to accept it uncritically."
+        )
+    except Exception:
+        return None
+
+
 def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | None = None) -> tuple[bool, str]:
     branch = f"feat/{module_name}"
+    pre_merge_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=project_root, capture_output=True, text=True,
+    ).stdout.strip()
     discarded = _discard_regenerated_files_before_merge(project_root, pcp_dir)
     if discarded:
         shown = ", ".join(discarded[:5]) + ("..." if len(discarded) > 5 else "")
@@ -797,7 +1131,19 @@ def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | N
         ok = result.returncode == 0
         if not ok:
             ok = _resolve_regenerated_conflicts(project_root, pcp_dir)
-        if not ok:
+        shadow_violations: list[str] = []
+        if ok:
+            shadow_violations = _detect_module_package_shadowing(project_root)
+            if shadow_violations:
+                # Merge succeeded textually (no conflict -- different files)
+                # but produced a real structural defect. Revert it exactly
+                # like a conflicted merge: leave main clean, leave the
+                # branch/worktree up for manual resolution, never let this
+                # land silently. See _detect_module_package_shadowing's
+                # docstring for the real incident this closes.
+                subprocess.run(["git", "reset", "--hard", pre_merge_sha], cwd=project_root, capture_output=True)
+                ok = False
+        if not ok and not shadow_violations:
             # Leave NO half-merged state behind. Without this, a conflicting merge
             # leaves project_root mid-MERGE with conflict markers in the tree, and
             # every subsequent git command in that repo fails on unmerged paths --
@@ -814,6 +1160,45 @@ def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | N
         # Restored regardless of outcome -- the security hardening posture
         # must not stay weakened just because a merge failed.
         _restore_append_only(cleared_flags)
+    # Real, tracked gap closed 2026-09-03 (see geek-squad memory
+    # feedback_pcp_worktree_lifecycle_gap.md, found 2026-08-12, never fixed
+    # until now): PCP created a worktree+branch per criterion but never
+    # retired either on merge, so they accumulated forever -- confirmed real
+    # bloat this exact pattern caused in ontology-foundry (485M/190 branches)
+    # and pisco-sour, and the same class of thing was independently found
+    # tonight on win2mac's m5test (251G, unconfirmed exact cause, but the
+    # SHAPE matches). Only runs when `ok` here -- a real, clean, no-conflict,
+    # no-shadow-violation merge -- so this can NEVER touch a branch whose
+    # work isn't already safely landed. `git branch -d` (lowercase, not -D)
+    # is the real safety net memory's own fix prescribes: it refuses to
+    # delete anything git doesn't consider merged, so if this ever runs on
+    # a branch that ISN'T actually an ancestor of the current HEAD for some
+    # unexpected reason, it fails loud instead of silently discarding real
+    # work. Worktree removal uses --force since by this point the criterion's
+    # real content is already merged into project_root -- the worktree
+    # checkout itself is disposable regardless of its own dirty-state.
+    if ok:
+        wt_path = _worktree_dir(project_root, module_name)
+        if wt_path.exists():
+            wt_remove = subprocess.run(
+                ["git", "worktree", "remove", "--force", str(wt_path)],
+                cwd=project_root, capture_output=True, text=True,
+            )
+            if wt_remove.returncode != 0:
+                console.print(f"[dim]Worktree cleanup for {branch} failed (non-fatal, real merge already landed): {wt_remove.stderr.strip()[:200]}[/dim]")
+        branch_delete = subprocess.run(
+            ["git", "branch", "-d", branch], cwd=project_root, capture_output=True, text=True,
+        )
+        if branch_delete.returncode != 0:
+            console.print(f"[dim]Branch cleanup for {branch} failed (non-fatal, real merge already landed): {branch_delete.stderr.strip()[:200]}[/dim]")
+    # A shadow-violation revert leaves `result` describing the (successful,
+    # now-reverted) merge -- report the real reason instead of that stale
+    # success text, so a caller/log reading this failure isn't misled into
+    # thinking git itself rejected the merge.
+    output = (
+        "Merge succeeded but introduced a module/package name collision, reverted:\n" + "\n".join(shadow_violations)
+        if shadow_violations else (result.stdout + result.stderr)
+    )
     # Conflict-rate telemetry (2026-07-17): AgenticFlict (arXiv:2604.03551)
     # measured a 27.67% merge-conflict baseline for agent-authored PRs; PCP's
     # worktree-isolated wave merges should beat that, and now the data to
@@ -824,10 +1209,10 @@ def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | N
                 pcp_dir, cycle="qa", cycle_number=None, check="worktree-merge", control_id=None,
                 module=module_name, submodule=None, criterion_id=None, files=[],
                 result="pass" if ok else "block",
-                errors=[] if ok else [(result.stdout + result.stderr)[-500:]],
+                errors=[] if ok else [output[-500:]],
                 error_count=0 if ok else 1,
             )
-    return ok, (result.stdout + result.stderr)
+    return ok, output
 
 
 def _cleanup_worktree(project_root: Path, module_name: str, wt_path: Path) -> None:
@@ -1879,6 +2264,41 @@ def _tdd_instruction(criterion: dict) -> str:
     )
 
 
+def _definition_of_done_line(criterion: dict) -> str:
+    """Real, explicit statement of what determines this criterion is done --
+    added 2026-09-07 per opencode's own documented prompting guidance (goal +
+    definition of done beats an implementation instruction: 'add a /search
+    endpoint with tests and docs' beats 'implement search'). Before this, the
+    check/target/pattern that actually determines pass/fail was only ever
+    implicit -- surfaced piecemeal via the target-file hint below and
+    _tdd_instruction's TDD guidance, never stated as a single, upfront
+    definition of done. Deterministic string formatting per declared `check`
+    value (module_acceptance.schema.json's enum) -- no LLM, no judgment,
+    just naming the real thing that will be checked."""
+    check = (criterion.get("check") or "manual").strip()
+    target = criterion.get("target")
+    pattern = criterion.get("pattern")
+    if check == "file_exists":
+        return f"Definition of done: `{target}` must exist." if target else "Definition of done: the criterion's target file must exist."
+    if check == "ast_pattern":
+        if target and pattern:
+            return f"Definition of done: `{target}` must contain a match for the pattern `{pattern}`."
+        return "Definition of done: the target file must contain the declared pattern."
+    if check == "test_passes":
+        return "Definition of done: the test suite (including any test you write or modify) must pass."
+    if check == "dom_contains":
+        selector = criterion.get("selector")
+        detail = f" (selector `{selector}`)" if selector else ""
+        return f"Definition of done: the rendered page{detail} must contain the expected content — a real UAT check against the running app."
+    if check == "url_responds":
+        url = criterion.get("url")
+        detail = f" `{url}`" if url else ""
+        return f"Definition of done: the running app's{detail} endpoint must respond successfully — a real UAT check, not a code-only check."
+    if check == "visual":
+        return "Definition of done: a headless-browser screenshot comparison against this criterion's reference (if declared) must pass."
+    return "Definition of done: satisfies the criterion description above — no deterministic check is declared, this is human/manual-verified."
+
+
 def _build_agent_prompt(
     pcp_dir: Path,
     module_name: str,
@@ -1933,6 +2353,7 @@ def _build_agent_prompt(
         "Your task is to write/modify code in the project to implement this feature.",
         f"Module: {module_name}",
         f"Criterion: [{criterion['id']}] {criterion['description']}",
+        _definition_of_done_line(criterion),
         "",
         "Before editing, read these files yourself for context (don't ask — just Read them). "
         "Read ONLY these — they are routed for this specific criterion; pulling in other "
@@ -2086,6 +2507,84 @@ def _build_escalation_prompt(pcp_dir: Path, module_name: str, criterion: dict, s
         "be present) and take a genuinely different approach where the summary suggests the "
         "previous one was structurally wrong.",
     ])
+
+
+_PROMPT_DIAGNOSIS_SYSTEM_PROMPT = """\
+A worker has failed to complete this task twice. Your job is to identify what is genuinely AMBIGUOUS, \
+UNDERSPECIFIED, or MISLEADING in the task's own wording -- not to critique the worker -- and write a short, \
+direct clarification the worker can act on for its next attempt.
+
+Output ONLY valid JSON: {"clarification": "..."}. Write it plainly and directly to the worker (e.g. "The
+prior attempts modified the wrong file -- X is the file this criterion actually concerns" or "Your last
+attempt was blocked because Y -- do Z instead"). Be concrete and actionable, grounded only in the real
+criterion text, module context, and what the worker's own gate failures concretely say went wrong -- never
+invent a gap that isn't evidenced there. If you cannot identify a real, specific gap in the task's own
+wording (as opposed to the worker simply making a mistake executing an already-clear task), return
+{"clarification": ""} -- an empty string is the correct, honest answer far more often than a speculative
+rewrite; a misdiagnosis here would inject a confident-but-wrong correction, worse than no correction."""
+
+
+def _run_prompt_diagnosis(pcp_dir: Path, mod: dict, criterion: dict, attempt_history: list[str]) -> str:
+    """After 2 real local (Ornith) failures, one bounded advisory call asks
+    whether the TASK WORDING itself has a real, identifiable gap -- as
+    opposed to the worker having simply made a mistake on an already-clear
+    task, which this deliberately does NOT try to fix (see the "empty
+    string is the correct, honest answer" instruction above).
+
+    Fully transparent to the worker, by design (Ganesh, 2026-09-02): this is
+    plain corrective feedback, delivered the same way _build_local_retry_
+    prompt's own "your previous attempt was BLOCKED by gates" feedback
+    already is -- no different in kind, just a sharper diagnosis of WHY.
+    The thing that must stay hidden is a Claude-escalation backstop (there
+    isn't one -- 5 real Ornith attempts, then a reported failure, per
+    Ganesh's explicit instruction); this diagnostic step is the opposite of
+    that, aimed at making Ornith itself converge, and hiding it would
+    server no purpose.
+
+    Advisory and best-effort: any call failure or an empty clarification
+    means attempt 3 proceeds exactly as it would have without this,
+    through the unchanged _build_local_retry_prompt path."""
+    try:
+        user_prompt = (
+            f"Criterion: [{criterion.get('id')}] {criterion.get('description', '')}\n"
+            f"Module: {mod['name']} — {mod.get('spec', {}).get('description', '')}\n"
+            f"Module constraints: {mod.get('spec', {}).get('constraints', [])}\n"
+            f"What the worker tried and what went wrong, across its 2 real attempts so far:\n"
+            + "\n".join(f"- {line}" for line in attempt_history)
+        )
+        res = llm.call_json(
+            _PROMPT_DIAGNOSIS_SYSTEM_PROMPT, user_prompt,
+            model=llm.JUDGE_MODEL, pcp_dir=pcp_dir, command="prompt-diagnosis",
+        )
+        clarification = (res.get("clarification") or "").strip() if isinstance(res, dict) else ""
+    except Exception as e:
+        console.print(f"[dim]Prompt diagnosis skipped: {e}[/dim]")
+        return ""
+    ctx = {"module": mod["name"], "submodule": None, "criterion_id": criterion.get("id"), "attempt": 2, "files": []}
+    _qa_record(
+        pcp_dir, ctx, "prompt-diagnosis", [clarification] if clarification else [],
+        control_id="CTRL-044", tool="judge-model", result="pass",
+    )
+    if clarification:
+        # A real gap in the CRITERION'S OWN TEXT, not just this one attempt
+        # -- worth durably visible so a human can actually fix
+        # acceptance.yaml (attempts 1-2 of every FUTURE build against this
+        # criterion still start from the same underspecified text
+        # otherwise). Routed through the same escalations/decision-log
+        # surface every other real finding tonight used ("consider
+        # `pcp pm ...`") rather than left to evaporate as a one-time
+        # runtime patch once this build finishes.
+        from pcp import escalations
+        escalations.record(
+            pcp_dir, mod["name"], criterion.get("id"), route="spec-gap",
+            findings=[f"Criterion text gap found via prompt diagnosis: {clarification}"],
+        )
+        console.print(
+            f"[yellow]⚠  high-severity decision logged, no enforcing criterion "
+            f"({mod['name']}/{criterion.get('id')}):[/yellow] {clarification} "
+            f"— consider `pcp pm \"{clarification}\"`"
+        )
+    return clarification
 
 
 def _build_local_retry_prompt(pcp_dir: Path, module_name: str, criterion: dict, spec: dict, constraint_feedback: str) -> str:
@@ -2291,6 +2790,19 @@ def _run_test_suite_check(pcp_dir: Path, project_root: Path, ctx: dict) -> list[
     2026-07-27 on Project O: 1,098 tests / ~7m46s per attempt, versus 478
     scoped. PCP_QA_FULL_SUITE=1 restores the old behaviour."""
     result = qa.run_test_suite(project_root, pcp_dir=pcp_dir, changed_files=ctx.get("files"))
+    # Real gap closed 2026-09-02: local_llm_delegations' test_names_failed/
+    # tests_failed columns existed in scanner.py's schema and were already
+    # accepted by log_delegation_outcome, but nothing upstream ever passed
+    # them -- every pcp_criterion delegation row (70/70 checked) had outcome
+    # correctly set but zero test detail, making the table useless for
+    # actually diagnosing WHY attempts failed. Stashing the real parsed
+    # failed_test_ids here (ctx is the same dict object the caller reads
+    # after all gates finish) so _record_local_delegation_outcome can wire
+    # it through. tests_passed count is deliberately left unset -- no
+    # existing parser for it, and bolting one on now risks a fragile regex
+    # against pytest's human-readable summary line for a value we don't
+    # have concrete need for yet.
+    ctx["_test_failed_ids"] = result.get("failed_test_ids")
     if result.get("scoped_to"):
         detail = f"[dim]Test suite scoped to impacted modules: {', '.join(result['scoped_to'])}"
         if result.get("incremental"):
@@ -2685,7 +3197,19 @@ def _gate_infrastructure_failure(check: str, exc: Exception) -> list[str]:
 
 
 def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ctx: dict) -> list[str]:
-    """Run architect review and return BLOCK findings that survive adversarial verification."""
+    """Run architect review and return BLOCK findings that survive adversarial verification.
+
+    Real gap found 2026-09-02: an empty diff (the criterion was already
+    satisfied by pre-existing code -- see the zero-writes/finish_reason=stop
+    pass path in _run_local_llm_attempt/_build_one_criterion) was still sent
+    to this LLM judge, which reasonably has nothing to review and returns a
+    finding about that absence -- not a real architectural problem, just an
+    artifact of asking "does this diff violate any principle" about a diff
+    that doesn't exist. No architecture question is answerable about zero
+    changes; skip the LLM call entirely rather than manufacture a verdict."""
+    if not diff.strip():
+        _qa_record(pcp_dir, ctx, "architect-review", [], control_id="CTRL-005", files=changed_files, result="skipped")
+        return []
     from pcp.commands.architect_review import SYSTEM_PROMPT, _build_prompt, _load_persona, _load_kb
     persona = _load_persona(pcp_dir)
     architecture = (pcp_dir / "architecture.md").read_text() if (pcp_dir / "architecture.md").exists() else ""
@@ -2718,7 +3242,27 @@ def _run_architect_review(pcp_dir: Path, diff: str, changed_files: list[str], ct
 
 
 def _run_gate_check(pcp_dir: Path, diff: str, ctx: dict) -> list[str]:
-    """Run gate review and return block issues that survive adversarial verification."""
+    """Run gate review and return block issues that survive adversarial verification.
+
+    Real bug found 2026-09-02, org_roles/OR_006: Ornith correctly found the
+    criterion already satisfied by pre-existing code (verified via its own
+    real test-suite run -- 28/28 passing, independently confirmed), made no
+    changes, and returned a clean pass with an empty diff -- exactly the
+    zero-writes/finish_reason=stop path _run_local_llm_attempt now allows
+    through instead of auto-failing. This judge, given an empty diff to
+    score for PR alignment, reasonably reported "no diff content provided,
+    recommendation: block" -- correct behavior for the question it was
+    asked, but the question itself was wrong: there is no PR to judge the
+    alignment of when nothing changed. That false BLOCK undid the entire
+    point of the zero-writes fix, so a criterion Ornith correctly recognized
+    as already-done kept failing anyway. Skip the LLM call on an empty diff
+    -- the real gates that matter here (tests/lint/SAST/L1) already ran
+    against the actual current code regardless of whether this attempt
+    changed anything, and are the correct source of truth for "is this
+    criterion satisfied," not an LLM's opinion of a diff that doesn't exist."""
+    if not diff.strip():
+        _qa_record(pcp_dir, ctx, "gate", [], control_id="CTRL-006", result="skipped")
+        return []
     from pcp.commands.gate import SYSTEM_PROMPT, _build_prompt, _load_llm_rules
     objective = (pcp_dir / "objective.md").read_text() if (pcp_dir / "objective.md").exists() else ""
     target_state = (pcp_dir / "target_state.md").read_text() if (pcp_dir / "target_state.md").exists() else ""
@@ -4570,6 +5114,22 @@ def _build_one_criterion(
 
     feedback = None
     success = False
+    # Real infra-down fallback (Ganesh, 2026-09-03): distinct from the
+    # deliberate "no auto-Claude-escalation" policy above, which is about
+    # Ornith being UP but failing the TASK. If Ornith itself is genuinely
+    # unreachable (delegate-to-workhorse-pcp-criterion's "router_down"
+    # outcome -- a real connection failure, not an HTTP error response the
+    # router returned), there is nothing to learn from retrying it 5 times
+    # against a dead endpoint -- that's an infra fact, not a task-quality
+    # signal. Once detected, every REMAINING attempt on this criterion
+    # routes to Claude instead, so a real outage doesn't just burn the
+    # whole budget for nothing.
+    ornith_down_detected = False
+    # Tracks whether a real Claude session has actually been opened this
+    # criterion -- guards the attempt==2 "--resume" branch below from firing
+    # when attempt 1 was local (Ornith) and there is no real session id to
+    # resume (see the Ornith-down fallback in the Claude branch itself).
+    claude_session_opened = False
     block_findings: list[str] = []
     diff = ""  # populated inside the attempt loop; stays "" if every attempt
                # errored before reaching gate evaluation (adversarial review
@@ -4645,11 +5205,22 @@ def _build_one_criterion(
     # than the block_findings channel in this pass.
     preflight_lines = _run_architect_preflight(pcp_dir, mod, c)
 
-    # CTRL-0XX: local-LLM (Ornith) attempts get 3 full tries, escalating to
-    # real claude -p only on a 4th and final attempt -- redesigned 2026-09-02
-    # on Ganesh's explicit instruction ("maybe after 4 attempts... we can go
-    # to claude.. not for the 1st 3"; supersedes the original single-local-
-    # attempt design from earlier the same day). DEFAULT ON: every criterion
+    # CTRL-0XX: local-LLM (Ornith) criteria get 5 full tries, ALL of them
+    # local -- no auto-escalation to Claude at all. Real history, same day
+    # (2026-09-02), three iterations: (1) 3 Ornith attempts then 1 Claude
+    # escalation; (2) widened to 2 Claude attempts (4 and 5) so a BLOCKED
+    # gate's real feedback wasn't discarded; (3) THIS version -- a live
+    # dogfood run found every single "pass" under design (2) had secretly
+    # needed Claude to close (org_roles: 0/8 real Ornith-only wins even
+    # after five real infra fixes: the identical-command loop, shell-
+    # metachar handling, 8000-char read truncation, wasted prior-attempt
+    # rediscovery, and the 65536-token context ceiling). Auto-escalating
+    # was masking that signal instead of surfacing it. Ganesh's explicit
+    # call: remove the Claude path entirely for local_enabled criteria --
+    # if Ornith can't converge in 5 real attempts, report the failure and
+    # require a human to explicitly authorize Claude (set this criterion's
+    # `local_llm_build: false` and rebuild, or invoke Claude directly)
+    # rather than the harness quietly doing it. DEFAULT ON: every criterion
     # routes here UNLESS it explicitly sets `local_llm_build: false`
     # (module_acceptance.schema.json) -- no automatic carve-out by
     # logic_tier/adversarial_review/UI-facing, an explicit per-criterion
@@ -4657,10 +5228,56 @@ def _build_one_criterion(
     # entirely unaffected below -- max_attempts stays 3 and every branch
     # behaves byte-identically to before this whole local-LLM feature ever
     # existed.
-    local_enabled = c.get("local_llm_build") is not False
-    max_attempts = 4 if local_enabled else 3
+    local_wanted = c.get("local_llm_build") is not False
+    local_enabled = local_wanted and _local_llm_infra_available()
+    if local_wanted and not local_enabled:
+        # Real infra absence (no delegate-to-workhorse-pcp-criterion / no
+        # opencode on PATH) -- e.g. any user of the public PCP package who
+        # isn't running on Ganesh's own hardware. NOT the same signal as
+        # ornith_down_detected below (a router that exists but went
+        # unreachable mid-run) -- this criterion never even attempts Ornith,
+        # so it silently takes the standard 3-attempt claude-only ladder,
+        # byte-identical to a criterion with `local_llm_build: false`. See
+        # _local_llm_infra_available()'s own docstring.
+        global _LOCAL_LLM_INFRA_WARNED
+        with _STATE_LOCK:
+            if not _LOCAL_LLM_INFRA_WARNED:
+                _LOCAL_LLM_INFRA_WARNED = True
+                console.print(
+                    "[dim]Local-LLM build infra (delegate-to-workhorse-pcp-criterion / opencode) "
+                    "not found on this machine -- criteria default to the standard claude -p ladder "
+                    "instead of Ornith. Set up ~/bin/delegate-to-workhorse-pcp-criterion + opencode "
+                    "to enable local-first builds.[/dim]"
+                )
+    max_attempts = 5 if local_enabled else 3
+    # Real signal for _select_ornith_prompt_fragments' conditional selection
+    # (see that function's own docstring) -- the PRIOR iteration's own
+    # delegation_id, carried forward one loop iteration before
+    # current_attempt_local_delegation_id gets reset to None below. None on
+    # the first attempt (no prior local attempt to look at yet).
+    prior_local_delegation_id = None
+    current_attempt_local_delegation_id = None  # real bug caught before it shipped: referenced
+    # below on attempt 1 before this ever existed in scope otherwise -- must be defined here too.
+    # Real opencode session id for THIS criterion's own retry ladder (2026-09-07)
+    # -- loop-local, never shared with any other criterion (see
+    # _run_local_llm_attempt's own docstring for why: sessions are sequential,
+    # module-level parallelism is not). None on attempt 1 (fresh session);
+    # updated after every local attempt to whatever the script echoes back,
+    # even on a failed attempt -- a retry should remember what it tried and
+    # why it failed, not just get told about it fresh each time.
+    criterion_session_id = None
 
     for attempt in range(1, max_attempts + 1):
+        # Reset every iteration -- only set (below) when THIS attempt is a
+        # local one that produced a real diff; a Claude attempt, or a local
+        # attempt that never reached gate evaluation, must never reuse a
+        # stale id from a previous attempt when gates run further down.
+        # Captured into prior_local_delegation_id (above/below) BEFORE this
+        # reset, so the next iteration's prompt-fragment selection can still
+        # see it.
+        if current_attempt_local_delegation_id is not None:
+            prior_local_delegation_id = current_attempt_local_delegation_id
+        current_attempt_local_delegation_id = None
         console.print(f"\n[dim]Attempt {attempt}/{max_attempts} — {mod['name']}/{c['id']}...[/dim]")
         _write_progress(pcp_dir, mod["name"], c["id"], attempt, "coding")
 
@@ -4680,13 +5297,25 @@ def _build_one_criterion(
             console.print("[dim]Override with PCP_MAX_BUILD_SESSIONS=<n> if this build genuinely needs more.[/dim]")
             raise
 
-        # route_local is true for attempts 1-3 whenever local_enabled -- i.e.
-        # EVERY attempt when opted in, since max_attempts=4 there and only the
-        # 4th (final) ever falls through to the claude branch below. When
-        # local_enabled is False, this is always False (max_attempts=3, so
-        # `attempt <= 3` is trivially true but `local_enabled` gates it off)
-        # and every attempt takes the original, byte-identical claude ladder.
-        route_local = local_enabled and attempt <= 3
+        # Changed 2026-09-02 (Ganesh, explicit, after a real dogfood run
+        # found org_roles's Ornith-only success rate stuck at 0/8 even after
+        # five real infrastructure fixes): local_enabled criteria no longer
+        # auto-escalate to Claude at all. ALL 5 attempts route to Ornith --
+        # `route_local = local_enabled` unconditionally, no `attempt <= 3`
+        # cutoff. If Ornith genuinely can't converge in 5 real tries, the
+        # criterion is reported failed (same "Failed to build Criterion ...
+        # after all attempts" path as before) and stays that way until a
+        # human explicitly authorizes Claude -- either by setting this one
+        # criterion's `local_llm_build: false` and rebuilding, or invoking
+        # Claude directly. This is a deliberate reversal of the earlier
+        # same-day 3-Ornith-then-2-Claude design: that ladder was masking
+        # the real signal (every "pass" tonight secretly needed Claude) by
+        # auto-closing the gap instead of surfacing it. When local_enabled
+        # is False, this is always False and every attempt takes the
+        # original, byte-identical claude ladder (max_attempts=3, untouched).
+        # `and not ornith_down_detected`: the one real exception to "no
+        # auto-escalation" -- see that flag's own comment above.
+        route_local = local_enabled and not ornith_down_detected
 
         if route_local:
             # LOCAL (Ornith) attempt -- no session concept at all, every call
@@ -4701,78 +5330,115 @@ def _build_one_criterion(
                         "## Architect pre-flight concerns (advisory, raised before you started — address or explicitly reason past them):",
                         *[f"- {line}" for line in preflight_lines],
                     ])
+                prior_work = _describe_prior_criterion_work(project_root, c["id"])
+                if prior_work:
+                    agent_prompt += "\n\n" + prior_work
             else:
                 agent_prompt = _build_local_retry_prompt(pcp_dir, mod["name"], c, mod["spec"], feedback)
-            # General local-environment note, ALL local attempts. Updated
-            # 2026-09-02: Ornith now HAS a real run_shell tool (worktree-
-            # confined, no shell metacharacter injection, a mechanical
-            # deny-list on destructive commands mirroring the rm-quarantine/
-            # git-repo-guard hooks Claude's own shell access already gets) --
-            # earlier the same day this note said the opposite ("no shell,
-            # no test runner") after real testing showed the TDD instruction
-            # ("run tests to verify") produced confused, looping behavior
-            # when the agent had no way to follow it. That gap is closed now
-            # by giving it the capability, not just clarifying its absence.
-            # This must run before the UI-specific note below so both apply
-            # when relevant.
-            agent_prompt += (
-                "\n\n## Local build environment note\n"
-                "You have file read/write tools (grep, read, list, write, edit) AND a "
-                "run_shell tool — use it to actually run tests yourself (e.g. `python3 -m "
-                "pytest -v`) and confirm red-then-green as instructed, not just write code "
-                "you hope is correct. run_shell runs ONE command at a time (no pipes/&&/"
-                "chaining — pass one command and its args only) inside this worktree; a "
-                "small set of destructive commands (rm, git push, sudo, install commands, "
-                "etc.) is refused outright, not run. Verification also happens automatically "
-                "outside your control after you finish either way — running tests yourself is "
-                "for your own confidence and faster convergence, not a substitute for that.\n"
-                "The 'Module: " + mod["name"] + "' line above is a PROJECT-ORGANIZATION label "
-                "for this codebase, not a Python package name — do not import from it or create "
-                "a directory/package named after it unless you actually find one already existing "
-                "in the repo via your read tools. Use the real, existing import paths and file "
-                "layout you find by reading the repo — never invent a package path from the "
-                "module label.\n"
-                "If you make a genuinely ambiguous judgment call anywhere (the spec/criterion "
-                "doesn't fully determine one right answer — e.g. an unstated tie-break rule, an "
-                "unspecified edge case), say so explicitly in a code comment at that decision "
-                "point. Don't silently pick one option and leave no trace of having had to "
-                "choose — a real eval run found this a genuine gap: correct internal reasoning "
-                "through an ambiguity, zero trace of it in the shipped code."
-            )
-            # local_llm_build + UI-facing (2026-09-02): _build_agent_prompt's UI
-            # section (see _is_ui_facing_criterion above) tells the agent to vendor
-            # shadcn components via its shadcn MCP server or `npx shadcn add` — the
-            # local workhorse tool loop (delegate-to-workhorse-pcp-criterion) has
-            # neither, by design (file operations only, no shell/MCP access). Left
-            # unclarified, the real failure mode this note exists to prevent is
-            # Ornith hand-rolling markup instead of vendoring real components —
-            # exactly what pcp-ui-design's Step 2.5 exists to avoid. Composing from
-            # already-vendored primitives is still fine; a genuinely missing
-            # component should be flagged, not faked, so gates catch it and the
-            # criterion falls through to the normal claude-p escalation path
-            # (which does have shadcn access) instead of silently shipping
-            # hand-rolled markup. Applies to every local attempt, not just the
-            # first -- Ornith has no memory of having been told this already.
-            if _is_ui_facing_criterion(c):
+                if attempt == 3:
+                    # After 2 real local failures -- one bounded, advisory
+                    # call to check whether the TASK WORDING itself has a
+                    # real gap (see _run_prompt_diagnosis's own docstring).
+                    # Fully transparent, plain corrective feedback, same
+                    # posture as the gate-failure feedback already above.
+                    # Appended into the SAME retry prompt
+                    # _build_local_retry_prompt already produces -- nothing
+                    # about the call site itself is visible to the worker.
+                    clarification = _run_prompt_diagnosis(pcp_dir, mod, c, attempt_history)
+                    if clarification:
+                        agent_prompt += "\n\n" + clarification
+            # General local-environment note, ALL local attempts -- ONLY when
+            # this project's own AGENTS.md doesn't already carry it (added
+            # 2026-09-07, see _ornith_standing_conventions_available's own
+            # docstring: opencode reads AGENTS.md natively, once per session,
+            # so a migrated project gets this for free instead of paying for
+            # identical text on every attempt of every criterion). An
+            # un-migrated project (this worktree's AGENTS.md missing/stale)
+            # falls back to the exact inline text that shipped before this
+            # gate existed -- never a silent behavior change.
+            if not _ornith_standing_conventions_available(project_root):
                 agent_prompt += (
                     "\n\n## Local build environment note\n"
-                    "You have file read/write tools only — no shell, no MCP servers. "
-                    "You cannot run `npx shadcn add` or reach a shadcn MCP server "
-                    "yourself. Compose ONLY from shadcn components already vendored "
-                    "in this project (check the project's existing component "
-                    "directory with your read tools first). If this screen genuinely "
-                    "needs a component that isn't vendored yet, state that plainly in "
-                    "what you write rather than hand-rolling replacement markup — "
-                    "leave it for a follow-up build pass, don't fake it."
+                    "You have file read/write tools (grep, read, list, write, edit) AND a "
+                    "run_shell tool — use it to actually run tests yourself (e.g. `python3 -m "
+                    "pytest -v`) and confirm red-then-green as instructed, not just write code "
+                    "you hope is correct. run_shell runs ONE command at a time (no pipes/&&/"
+                    "chaining — pass one command and its args only) inside this worktree; a "
+                    "small set of destructive commands (rm, git push, sudo, install commands, "
+                    "etc.) is refused outright, not run. Verification also happens automatically "
+                    "outside your control after you finish either way — running tests yourself is "
+                    "for your own confidence and faster convergence, not a substitute for that.\n"
+                    "The 'Module: " + mod["name"] + "' line above is a PROJECT-ORGANIZATION label "
+                    "for this codebase, not a Python package name — do not import from it or create "
+                    "a directory/package named after it unless you actually find one already existing "
+                    "in the repo via your read tools. Use the real, existing import paths and file "
+                    "layout you find by reading the repo — never invent a package path from the "
+                    "module label.\n"
+                    "If you make a genuinely ambiguous judgment call anywhere (the spec/criterion "
+                    "doesn't fully determine one right answer — e.g. an unstated tie-break rule, an "
+                    "unspecified edge case), say so explicitly in a code comment at that decision "
+                    "point. Don't silently pick one option and leave no trace of having had to "
+                    "choose — a real eval run found this a genuine gap: correct internal reasoning "
+                    "through an ambiguity, zero trace of it in the shipped code."
+                )
+            agent_prompt += _select_ornith_prompt_fragments(prior_local_delegation_id)
+            # local_llm_build + UI-facing (2026-09-02, gated 2026-09-07 same as
+            # above): the shadcn-vendored-only note now lives in AGENTS.md too --
+            # only injected inline as a fallback for an un-migrated project. Also
+            # fixes a real staleness bug found while adding this gate: this note
+            # still said "no shell, no MCP servers" — stale since the run_shell
+            # tool was added 2026-09-02, same day as the note above it. The gap
+            # it describes is real regardless (no shadcn MCP/npx reachable from
+            # the tool loop), just the wrong justification.
+            if _is_ui_facing_criterion(c) and not _ornith_standing_conventions_available(project_root):
+                agent_prompt += (
+                    "\n\n## Local build environment note\n"
+                    "You have file read/write tools for UI composition — nothing in your tool "
+                    "loop reaches a shadcn MCP server or runs `npx shadcn add`. Compose ONLY "
+                    "from shadcn components already vendored in this project (check the "
+                    "project's existing component directory with your read tools first). If "
+                    "this screen genuinely needs a component that isn't vendored yet, state "
+                    "that plainly in what you write rather than hand-rolling replacement "
+                    "markup — leave it for a follow-up build pass, don't fake it."
                 )
 
             console.print(f"[dim]Local LLM build attempt (Ornith) — {mod['name']}/{c['id']}...[/dim]")
-            ok, local_err = _run_local_llm_attempt(project_root, agent_prompt)
+            ok, local_err, local_delegation_id, returned_session_id = _run_local_llm_attempt(
+                project_root, agent_prompt, session_id=criterion_session_id,
+            )
+            # Real per-criterion retry continuity: remember whatever session
+            # id the script echoed back, pass/fail, so the NEXT attempt (if
+            # any) continues it. A literal "session not found" (opencode's
+            # own real error text -- confirmed live, see _run_local_llm_attempt's
+            # docstring) resets this to None rather than keep retrying a dead
+            # session id -- can genuinely happen (opencode restarted, session
+            # pruned) and a fresh session is the right recovery, not a hard
+            # failure carried into every remaining attempt.
+            if "session not found" in (local_err or "").lower():
+                criterion_session_id = None
+            else:
+                criterion_session_id = returned_session_id or criterion_session_id
             if not ok:
                 console.print(f"[red]Local LLM build attempt failed: {local_err}[/red]")
                 feedback = f"Local LLM (Ornith) build attempt failed to run: {local_err}"
                 attempt_history.append(f"Attempt {attempt}: {feedback}")
+                if "router unreachable" in local_err or "router_down" in local_err:
+                    # Real infra fact, not a task-quality signal -- see
+                    # ornith_down_detected's own comment above. Every
+                    # REMAINING attempt on this criterion now routes to
+                    # Claude instead of retrying a dead endpoint.
+                    console.print(
+                        "[yellow]⚠  Ornith router unreachable -- falling back to Claude for the "
+                        "remaining attempts on this criterion.[/yellow]"
+                    )
+                    ornith_down_detected = True
+                # No gate evaluation happens this attempt (no diff to
+                # evaluate) -- the script's own already-logged outcome
+                # ("fail": iteration cap / zero write calls) already reflects
+                # what happened here, nothing to overwrite with a real gate
+                # result that never ran.
                 continue
+            current_attempt_local_delegation_id = local_delegation_id
             agent_usage = {
                 "model": "ornith-1.5-35b-a3b-nvfp4 (local)", "session_id": None,
                 "usage": {}, "cost_usd": 0.0, "duration_ms": None,
@@ -4780,17 +5446,19 @@ def _build_one_criterion(
         else:
             # CLAUDE path. Reached either as the opted-out criterion's normal
             # 3-attempt ladder (attempt in 1,2,3, max_attempts=3), or -- when
-            # local_enabled -- ONLY as the 4th and final attempt, always
-            # landing in the `else` (escalation) branch just below since
-            # route_local already consumed attempts 1-3. Attempt 1 opens a
-            # fresh session; attempt 2 --resumes it (avoids re-exploring the
-            # repo — Token Discipline). The final attempt (escalation)
-            # deliberately does NOT resume: failed-attempt context
-            # contaminates retries (CCRM, arXiv:2605.08563 — contaminated-
-            # context error rate 7.1x baseline, "clean-restart dominance") —
-            # the escalated model gets a FRESH session plus a structured
-            # summary of what failed (which, for a local_enabled criterion,
-            # is the 3 local attempts' real gate feedback), not the raw
+            # local_enabled -- as attempts 4 AND 5, both always landing in
+            # the `else` (escalation) branch just below since route_local
+            # already consumed attempts 1-3. Attempt 1 opens a fresh session;
+            # attempt 2 --resumes it (avoids re-exploring the repo — Token
+            # Discipline). Every escalation attempt (3 on the opted-out
+            # ladder; 4 and 5 on the local_enabled ladder) deliberately does
+            # NOT resume: failed-attempt context contaminates retries (CCRM,
+            # arXiv:2605.08563 — contaminated-context error rate 7.1x
+            # baseline, "clean-restart dominance") — each escalation gets a
+            # FRESH session plus a structured summary of everything that
+            # failed so far (attempt_history — for a local_enabled criterion,
+            # the 3 local attempts' real gate feedback, plus attempt 4's own
+            # real gate feedback by the time attempt 5 runs), not the raw
             # failure trajectory (summarize-don't-replay, arXiv:2604.16529).
             if attempt == 1:
                 agent_prompt = _build_agent_prompt(pcp_dir, mod["name"], c, mod["spec"])
@@ -4801,14 +5469,23 @@ def _build_one_criterion(
                         *[f"- {line}" for line in preflight_lines],
                     ])
                 session_flag = ["--session-id", agent_session_id]
-            elif attempt == 2:
+                claude_session_opened = True
+            elif attempt == 2 and claude_session_opened:
                 agent_prompt = _build_retry_prompt(feedback)
                 session_flag = ["--resume", agent_session_id]
             else:
+                # Also the real Ornith-down fallback's first Claude attempt
+                # (see ornith_down_detected above): `attempt` can be 2 here
+                # with claude_session_opened still False -- attempt 1 was
+                # local (Ornith), so there is no real prior Claude session
+                # to --resume. Falls through to this same fresh-session
+                # escalation path instead, correctly, rather than passing
+                # --resume for a session id that was never opened.
                 escalation_session_id = str(uuid.uuid4())
                 agent_prompt = _build_escalation_prompt(pcp_dir, mod["name"], c, mod["spec"], attempt_history)
                 session_flag = ["--session-id", escalation_session_id]
                 agent_session_id = escalation_session_id
+                claude_session_opened = True
 
             # Commit-trailer attribution: the installed commit-msg hook stamps
             # PCP-Agent-Session onto any commit made inside this subprocess —
@@ -5049,6 +5726,16 @@ def _build_one_criterion(
             + gate_results["l1"] + gate_results["arch"] + gate_results["gate"]
         )
 
+        # Real gate result overwrites the local script's own provisional
+        # outcome (see _record_local_delegation_outcome docstring) -- only
+        # meaningful when this attempt actually was local and reached this
+        # point with a real diff (current_attempt_local_delegation_id is
+        # None otherwise, in which case this is a no-op).
+        _record_local_delegation_outcome(
+            current_attempt_local_delegation_id, passed=not block_findings,
+            test_names_failed=ctx.get("_test_failed_ids"),
+        )
+
         if block_findings:
             console.print(f"[red]BLOCKED by quality/architecture gates ({mod['name']}/{c['id']}):[/red]")
             for v in block_findings:
@@ -5120,7 +5807,19 @@ def _mark_criterion_complete(mod: dict, criterion_id: str, verified_by: str = "p
     vs a hand-edited acceptance.yaml (which never touches this function, so
     a manually-flipped criterion simply has no verified_by field at all).
     Closes the "pcp build and a regular build say completed the same way"
-    gap named 2026-07-24."""
+    gap named 2026-07-24.
+
+    Commits immediately (2026-09-02, real fix): this write used to sit
+    uncommitted in project_root's working tree indefinitely -- any LATER
+    `git merge --abort` in that same checkout (a real, repeated occurrence:
+    concurrent criteria colliding on merge) resets the working tree and
+    silently discards whatever's sitting there uncommitted, including this
+    mark. Real incident, twice the same night: org_roles lost 6 criteria's
+    status this way, then harbor_chat_template/shared/skill_pool lost theirs
+    the same way on a later run, both requiring manual git-log archaeology
+    to recover. Committing this one small, self-contained change the moment
+    it's made closes the actual gap -- a merge --abort can only discard
+    uncommitted work, never a real commit already in history."""
     with _STATE_LOCK:
         acc_data = load_yaml(mod["acc_path"])
         for crit in acc_data.get("criteria", []):
@@ -5128,6 +5827,13 @@ def _mark_criterion_complete(mod: dict, criterion_id: str, verified_by: str = "p
                 crit["status"] = "complete"
                 crit["verified_by"] = verified_by
         mod["acc_path"].write_text(yaml.dump(acc_data, default_flow_style=False))
+        project_root = mod["acc_path"].parents[4]
+        rel_path = mod["acc_path"].relative_to(project_root)
+        subprocess.run(["git", "add", "--", str(rel_path)], cwd=project_root, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", f"{mod['name']}/{criterion_id}: mark complete (verified_by={verified_by})"],
+            cwd=project_root, capture_output=True,
+        )  # non-fatal if there's nothing to commit (e.g. re-marking the same criterion) or git errors
 
 
 def _build_module_worker(
@@ -5228,7 +5934,7 @@ def _build_module_worker_inner(
                 _mark_criterion_complete(mod, c["id"])
                 _write_progress(pcp_dir, mod["name"], c["id"], 0, "done")
             else:
-                console.print(f"[red]✗ Failed to build Criterion [{c['id']}] after 3 attempts.[/red]")
+                console.print(f"[red]✗ Failed to build Criterion [{c['id']}] after all attempts.[/red]")
                 _record_escalation(pcp_dir, mod["name"], c["id"], block_findings)
                 _write_progress(pcp_dir, mod["name"], c["id"], 0, "failed")
                 return {"module": mod["name"], "success": False, "failed_criterion": c["id"], "block_findings": block_findings}
@@ -5278,7 +5984,7 @@ def _build_module_worker_inner(
                 _mark_criterion_complete(mod, c["id"])
                 _write_progress(pcp_dir, mod["name"], c["id"], 0, "done")
             else:
-                console.print(f"[red]✗ Failed to build Criterion [{c['id']}] after 3 attempts.[/red]")
+                console.print(f"[red]✗ Failed to build Criterion [{c['id']}] after all attempts.[/red]")
                 _record_escalation(pcp_dir, mod["name"], c["id"], block_findings)
                 _write_progress(pcp_dir, mod["name"], c["id"], 0, "failed")
                 return {"module": mod["name"], "success": False, "failed_criterion": c["id"], "block_findings": block_findings}
@@ -5382,7 +6088,7 @@ def _build_module_worker_inner(
                         console.print(f"[dim]Worktree left at {retry_wt} for manual resolution.[/dim]")
             else:
                 any_failed, failed_id, failed_findings = True, cid, block_findings
-                console.print(f"[red]✗ Failed to build Criterion [{cid}] after 3 attempts.[/red]")
+                console.print(f"[red]✗ Failed to build Criterion [{cid}] after all attempts.[/red]")
                 _record_escalation(pcp_dir, mod["name"], cid, block_findings)
 
         if any_failed:
@@ -5522,7 +6228,31 @@ def build(module_name: str | None, criterion_ids_raw: str | None, project_path: 
     # i.e. a human already made the edit -- so this only blocks on conflicts
     # nobody has actually resolved yet. See objective_conflicts.py.
     unresolved_conflicts = objective_conflicts.reconcile(pcp_dir)
-    if unresolved_conflicts:
+    if unresolved_conflicts and os.environ.get("PCP_SKIP_OBJECTIVE_CONFLICT_GATE") == "1":
+        # Real, deliberate escape hatch, 2026-09-02 (Ganesh, explicit):
+        # dismissing conflicts one ID at a time doesn't fix the underlying
+        # tension -- objective.md/target_state.md itself still says
+        # something the real world keeps contradicting, so a FRESH conflict
+        # gets captured (a new BRD-0XX id) on every subsequent run even
+        # after the previous one is dismissed (real: BRD-009 dismissed,
+        # BRD-011 fired the very next run, same underlying claim). The real
+        # fix is `pcp correct-objective` actually rewriting the objective
+        # text -- deferred, not skipped, per Ganesh's explicit "later is
+        # better" call. This just lets a build proceed with the conflict(s)
+        # still logged and still visible via `pcp objective-conflicts`,
+        # rather than looping through --dismiss on a new id every run.
+        console.print(
+            f"[yellow]⚠  PCP_SKIP_OBJECTIVE_CONFLICT_GATE=1 -- proceeding despite "
+            f"{len(unresolved_conflicts)} unresolved objective conflict(s): "
+            f"{', '.join(c.get('id', '?') for c in unresolved_conflicts)}. "
+            f"Objective correction deferred, not resolved.[/yellow]"
+        )
+        telemetry.record(
+            pcp_dir, cycle="build", check="objective-conflict-gate", control_id="CTRL-035",
+            result="skipped", error_count=len(unresolved_conflicts),
+            errors=[c.get("id", "?") for c in unresolved_conflicts],
+        )
+    elif unresolved_conflicts:
         telemetry.record(
             pcp_dir, cycle="build", check="objective-conflict-gate", control_id="CTRL-035",
             result="blocked", error_count=len(unresolved_conflicts),

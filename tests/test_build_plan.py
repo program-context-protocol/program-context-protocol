@@ -12,6 +12,7 @@ declared as any criterion's `target`, so no scheduler could see the collision
 coming from declared targets alone.
 """
 import subprocess
+from unittest.mock import patch
 
 import yaml
 from click.testing import CliRunner
@@ -129,6 +130,61 @@ def test_module_filter_narrows_the_plan(tmp_path):
     }))
     plan = build_plan(pcp_dir, module_name="billing")
     assert [m["name"] for m in plan["modules"]] == ["billing"]
+
+
+def _project_with_local_llm_opt_out(tmp_path):
+    root = tmp_path / "p"
+    pcp_dir = root / ".pcp"
+    (pcp_dir / "strategy" / "modules" / "billing").mkdir(parents=True)
+    (pcp_dir / "strategy" / "modules" / "billing" / "spec.yaml").write_text(
+        yaml.dump({"version": "2.0", "module": "billing", "description": "d", "dependencies": []})
+    )
+    (pcp_dir / "strategy" / "modules" / "billing" / "acceptance.yaml").write_text(yaml.dump({
+        "version": "2.0", "module": "billing",
+        "criteria": [
+            {"id": "A001", "description": "default", "check": "manual",
+             "target": "src/modules/billing/charge.py", "status": "pending"},
+            {"id": "A002", "description": "opted out", "check": "manual",
+             "target": "src/modules/billing/refund.py", "status": "pending",
+             "local_llm_build": False},
+        ],
+    }))
+    return pcp_dir
+
+
+def test_local_llm_build_true_when_default_and_infra_available(tmp_path):
+    """A criterion with no explicit `local_llm_build` field defaults to eligible
+    -- but only actually resolves true if the real Ornith/opencode infra is
+    present on this machine, per _local_llm_infra_available(). Mocked here so
+    the test doesn't depend on this machine's real filesystem state."""
+    pcp_dir = _project_with_local_llm_opt_out(tmp_path)
+    with patch("pcp.commands.build_plan._local_llm_infra_available", return_value=True):
+        plan = build_plan(pcp_dir)
+    mod = plan["modules"][0]
+    by_id = {c["id"]: c for wave in mod["criterion_waves"] for c in wave}
+    assert by_id["A001"]["local_llm_build"] is True
+
+
+def test_local_llm_build_false_on_explicit_opt_out_even_with_infra_available(tmp_path):
+    pcp_dir = _project_with_local_llm_opt_out(tmp_path)
+    with patch("pcp.commands.build_plan._local_llm_infra_available", return_value=True):
+        plan = build_plan(pcp_dir)
+    mod = plan["modules"][0]
+    by_id = {c["id"]: c for wave in mod["criterion_waves"] for c in wave}
+    assert by_id["A002"]["local_llm_build"] is False
+
+
+def test_local_llm_build_false_for_everyone_when_infra_missing(tmp_path):
+    """The real gap this field closes: on a machine without the Ornith/opencode
+    infra (any external PyPI/GitHub install of this package), every criterion
+    resolves false regardless of the schema flag -- the orchestrating session
+    trusts this single field instead of re-deriving infra presence itself."""
+    pcp_dir = _project_with_local_llm_opt_out(tmp_path)
+    with patch("pcp.commands.build_plan._local_llm_infra_available", return_value=False):
+        plan = build_plan(pcp_dir)
+    mod = plan["modules"][0]
+    all_criteria = [c for wave in mod["criterion_waves"] for c in wave]
+    assert all(c["local_llm_build"] is False for c in all_criteria)
 
 
 def test_empty_project_returns_empty_plan(tmp_path):

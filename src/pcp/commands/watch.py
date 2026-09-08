@@ -283,7 +283,14 @@ def _attempt_local_ci_fix(pcp_dir: Path, project_root: Path, failure_context: st
         "decision point — don't silently pick one option and leave no trace of having "
         f"had to choose.\n\n## CI Failure Log\n```\n{failure_context}\n```"
     )
-    ok, err = _run_local_llm_attempt(project_root, prompt)
+    # Real pre-existing bug fixed 2026-09-07: this call site still unpacked
+    # a 2-tuple from a much earlier version of _run_local_llm_attempt, which
+    # had already grown a 3rd (delegation_id) and then a 4th (session_id)
+    # return value in build.py without this caller being updated -- would
+    # have raised ValueError at runtime the first time this path actually
+    # ran. delegation_id/session_id aren't used here: a CI-fix is a single
+    # independent attempt, not part of a criterion's own retry ladder.
+    ok, err, _delegation_id, _session_id = _run_local_llm_attempt(project_root, prompt)
     if not ok:
         console.print(f"[dim]Local CI-fix attempt did not complete: {err}[/dim]")
         subprocess.run(["git", "checkout", "--", "."], cwd=project_root, capture_output=True)

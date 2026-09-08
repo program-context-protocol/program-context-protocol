@@ -1162,6 +1162,87 @@ it and reuses the same system instead of deciding fresh._
 PCP_CLAUDE_BLOCK_START = "<!-- PCP:BEGIN — auto-managed by `pcp init`, do not hand-edit this block -->"
 PCP_CLAUDE_BLOCK_END = "<!-- PCP:END -->"
 
+# AGENTS.md (added 2026-09-07): opencode reads this natively at the project
+# root every session -- same slot Claude Code's own CLAUDE.md fills for
+# Claude. Real gap this closes: build.py's Ornith/local-LLM path was
+# re-appending the same standing conventions (run_shell usage, don't invent
+# a package from the module label, flag genuine ambiguity, shadcn-vendored-
+# only for UI) into the `--prompt` argument on EVERY attempt of EVERY
+# criterion, instead of leveraging opencode's own equivalent mechanism --
+# paying for the same standing text once per attempt instead of once per
+# session. See _run_local_llm_attempt/_build_one_criterion in build.py:
+# the inline notes only fire as a fallback when this block is absent, so an
+# un-migrated project (never re-run `pcp init`) keeps working exactly as
+# before. Priorart: AGENTS.md is a real, multi-tool convention (read by
+# opencode, Codex CLI, Cursor, Aider, others as of 2026) -- reference-
+# pattern-only here, no library, just following the established shape.
+PCP_AGENTS_BLOCK_START = "<!-- PCP:BEGIN-ORNITH — auto-managed by `pcp init`, do not hand-edit this block -->"
+PCP_AGENTS_BLOCK_END = "<!-- PCP:END-ORNITH -->"
+
+PCP_AGENTS_BLOCK_BODY = """
+## Ornith / local-build agent conventions
+
+These apply whenever `opencode run` builds a PCP acceptance criterion in this project
+(the `pcp build`/`pcp build-plan` local-LLM path -- see `.pcp/` for the full protocol).
+
+- You have file read/write tools (grep, read, list, write, edit) AND a `run_shell` tool.
+  Use run_shell to actually run tests yourself (e.g. `python3 -m pytest -v`) and confirm
+  red-then-green, not just write code you hope is correct. run_shell runs ONE command at a
+  time (no pipes/&&/chaining -- pass one command and its args only) inside your worktree; a
+  small set of destructive commands (rm, git push, sudo, install commands, etc.) is refused
+  outright, not run. Verification also happens automatically outside your control after you
+  finish either way -- running tests yourself is for your own confidence and faster
+  convergence, not a substitute for that.
+- A "Module: <name>" label in your task is a PROJECT-ORGANIZATION label for this codebase,
+  not a Python package name -- do not import from it or create a directory/package named
+  after it unless you actually find one already existing in the repo via your read tools.
+  Use the real, existing import paths and file layout you find by reading the repo -- never
+  invent a package path from the module label.
+- If you make a genuinely ambiguous judgment call anywhere (the spec/criterion doesn't fully
+  determine one right answer -- e.g. an unstated tie-break rule, an unspecified edge case),
+  say so explicitly in a code comment at that decision point. Don't silently pick one option
+  and leave no trace of having had to choose.
+- For UI-facing work: you have file read/write tools only for UI composition -- nothing in
+  your tool loop reaches a shadcn MCP server or runs `npx shadcn add`. Compose ONLY from
+  shadcn components already vendored in this project (check the project's existing
+  component directory with your read tools first). If a screen genuinely needs a component
+  that isn't vendored yet, state that plainly rather than hand-rolling replacement markup --
+  leave it for a follow-up pass, don't fake it.
+"""
+
+
+def render_pcp_agents_block() -> str:
+    return f"{PCP_AGENTS_BLOCK_START}\n{PCP_AGENTS_BLOCK_BODY}{PCP_AGENTS_BLOCK_END}"
+
+
+def _upsert_marked_block(path: Path, start: str, end: str, block: str) -> bool:
+    """Insert or refresh a PCP-managed marker block in a project file,
+    preserving any human-authored content outside the marker pair. Returns
+    True if the file was created or changed. Shared by
+    upsert_pcp_claude_block/upsert_pcp_agents_md_block -- same marker-pair
+    upsert semantics, different file/content."""
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(block + "\n")
+        return True
+
+    existing = path.read_text()
+    if start in existing and end in existing:
+        pre = existing.split(start)[0]
+        post = existing.split(end)[1]
+        new_content = pre + block + post
+    else:
+        new_content = (existing.rstrip("\n") + "\n\n" + block + "\n") if existing.strip() else block + "\n"
+
+    if new_content == existing:
+        return False
+    path.write_text(new_content)
+    return True
+
+
+def upsert_pcp_agents_md_block(agents_md_path: Path) -> bool:
+    return _upsert_marked_block(agents_md_path, PCP_AGENTS_BLOCK_START, PCP_AGENTS_BLOCK_END, render_pcp_agents_block())
+
 PCP_CLAUDE_BLOCK_BODY = """\
 # PCP Governance (this project is PCP-managed)
 
@@ -1271,26 +1352,14 @@ def upsert_pcp_claude_block(claude_md_path: Path) -> bool:
     """Insert or refresh the PCP governance block in a project's CLAUDE.md.
 
     Preserves any human-authored content outside the marker pair. Returns
-    True if the file was created or changed.
+    True if the file was created or changed. Real logic lives in
+    _upsert_marked_block (shared with upsert_pcp_agents_md_block, added
+    2026-09-07 for AGENTS.md) -- kept as a byte-identical behavior refactor,
+    not a rewrite.
     """
-    block = render_pcp_claude_block()
-    if not claude_md_path.exists():
-        claude_md_path.parent.mkdir(parents=True, exist_ok=True)
-        claude_md_path.write_text(block + "\n")
-        return True
-
-    existing = claude_md_path.read_text()
-    if PCP_CLAUDE_BLOCK_START in existing and PCP_CLAUDE_BLOCK_END in existing:
-        pre = existing.split(PCP_CLAUDE_BLOCK_START)[0]
-        post = existing.split(PCP_CLAUDE_BLOCK_END)[1]
-        new_content = pre + block + post
-    else:
-        new_content = (existing.rstrip("\n") + "\n\n" + block + "\n") if existing.strip() else block + "\n"
-
-    if new_content == existing:
-        return False
-    claude_md_path.write_text(new_content)
-    return True
+    return _upsert_marked_block(
+        claude_md_path, PCP_CLAUDE_BLOCK_START, PCP_CLAUDE_BLOCK_END, render_pcp_claude_block(),
+    )
 
 
 ADR_EXAMPLE = """\
@@ -1907,6 +1976,12 @@ def init(project_path: str, module_name: str | None, force: bool):
         console.print(f"  [green]updated[/green]  CLAUDE.md  (PCP governance block)")
     else:
         console.print(f"  [dim]unchanged[/dim]  CLAUDE.md  (PCP governance block already current)")
+
+    agents_md = root / "AGENTS.md"
+    if upsert_pcp_agents_md_block(agents_md):
+        console.print(f"  [green]updated[/green]  AGENTS.md  (Ornith/local-build agent conventions -- opencode reads this natively)")
+    else:
+        console.print(f"  [dim]unchanged[/dim]  AGENTS.md  (already current)")
 
     gitattributes = root / ".gitattributes"
     ga_lines = [
