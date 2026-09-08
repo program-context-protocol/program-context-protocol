@@ -100,7 +100,7 @@ def _local_llm_build_timeout_sec() -> int:
 
 
 # Real, versioned instruction-fragment library for Ornith's local-build
-# prompts, started 2026-09-02 (see geek-squad memory
+# prompts, started 2026-09-02 (see Project G memory
 # decision_ornith_prompt_skill_library.md for the full reasoning). Deliberately
 # additive, not a refactor of the existing hardcoded environment/ambiguity
 # notes below (those are already proven working via a real A/B test -- see
@@ -1058,7 +1058,7 @@ def _detect_module_package_shadowing(project_root: Path) -> list[str]:
 
 def _describe_prior_criterion_work(project_root: Path, criterion_id: str) -> str | None:
     """Real gap found 2026-09-02 diagnosing org_roles/OR_002's Ornith failures
-    (with geek-squad): once the run_shell metachar and repeat-guard fixes
+    (with Project G): once the run_shell metachar and repeat-guard fixes
     landed, a fresh local attempt STILL failed -- not by looping, but by
     spending its entire round budget rediscovering a PRIOR attempt's real
     code (already sitting in this repo's history, from an earlier escalated
@@ -1069,7 +1069,7 @@ def _describe_prior_criterion_work(project_root: Path, criterion_id: str) -> str
     that could have been skipped entirely had the prompt just said what
     already exists.
 
-    Deliberately scoped (geek-squad's call, agreed) to fire ONLY when real
+    Deliberately scoped (Project G's call, agreed) to fire ONLY when real
     prior commits referencing this criterion id are already found in this
     worktree's history -- never on a criterion's genuine first attempt. A
     clean first attempt should form its own approach, not get anchored
@@ -1160,13 +1160,13 @@ def _merge_module_branch(project_root: Path, module_name: str, pcp_dir: Path | N
         # Restored regardless of outcome -- the security hardening posture
         # must not stay weakened just because a merge failed.
         _restore_append_only(cleared_flags)
-    # Real, tracked gap closed 2026-09-03 (see geek-squad memory
+    # Real, tracked gap closed 2026-09-03 (see Project G memory
     # feedback_pcp_worktree_lifecycle_gap.md, found 2026-08-12, never fixed
     # until now): PCP created a worktree+branch per criterion but never
     # retired either on merge, so they accumulated forever -- confirmed real
-    # bloat this exact pattern caused in ontology-foundry (485M/190 branches)
-    # and pisco-sour, and the same class of thing was independently found
-    # tonight on win2mac's m5test (251G, unconfirmed exact cause, but the
+    # bloat this exact pattern caused in Project O (485M/190 branches)
+    # and Project I, and the same class of thing was independently found
+    # tonight on Project W's m5test (251G, unconfirmed exact cause, but the
     # SHAPE matches). Only runs when `ok` here -- a real, clean, no-conflict,
     # no-shadow-violation merge -- so this can NEVER touch a branch whose
     # work isn't already safely landed. `git branch -d` (lowercase, not -D)

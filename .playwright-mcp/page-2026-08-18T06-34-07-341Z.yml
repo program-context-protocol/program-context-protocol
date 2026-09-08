@@ -1,0 +1,92 @@
+- generic [ref=f2e1]:
+  - banner [active] [ref=f2e2]:
+    - link "Skip to main content" [ref=f2e3] [cursor=pointer]:
+      - /url: "#content-body"
+    - generic [ref=f2e5]:
+      - link "Homepage" [ref=f2e6] [cursor=pointer]:
+        - /url: /
+      - list [ref=f2e15]:
+        - listitem [ref=f2e16]:
+          - link "Explore" [ref=f2e17] [cursor=pointer]:
+            - /url: /explore
+    - button "Search or go to… /" [ref=f2e19] [cursor=pointer]:
+      - generic [ref=f2e20]:
+        - generic [ref=f2e23]: Search or go to…
+        - generic [ref=f2e24]: /
+    - generic [ref=f2e25]:
+      - link "Register" [ref=f2e26] [cursor=pointer]:
+        - /url: /users/sign_up
+      - link "Sign in" [ref=f2e28] [cursor=pointer]:
+        - /url: /users/sign_in?redirect_to_referer=yes
+  - generic [ref=f2e30]:
+    - navigation [ref=f2e32]:
+      - heading "Primary navigation" [level=2] [ref=f2e33]
+      - generic [ref=f2e34]:
+        - generic [ref=f2e35]: Project
+        - list "Project" [ref=f2e38]:
+          - listitem [ref=f2e39]:
+            - link "wine" [ref=f2e40] [cursor=pointer]:
+              - /url: /wine/wine
+              - img "avatar" [ref=f2e43]
+          - listitem [ref=f2e46]:
+            - button "Manage" [ref=f2e47] [cursor=pointer]
+          - listitem [ref=f2e55]:
+            - button "Plan" [expanded] [ref=f2e56] [cursor=pointer]
+            - list "Plan" [ref=f2e65]:
+              - listitem [ref=f2e66]:
+                - link "Wiki" [ref=f2e67] [cursor=pointer]:
+                  - /url: /wine/wine/-/wikis
+              - listitem [ref=f2e72]:
+                - link "Bugzilla" [ref=f2e73] [cursor=pointer]:
+                  - /url: https://bugs.winehq.org/describecomponents.cgi?product=Wine
+          - listitem [ref=f2e78]:
+            - button "Code" [ref=f2e79] [cursor=pointer]
+          - listitem [ref=f2e87]:
+            - button "Build" [ref=f2e88] [cursor=pointer]
+          - listitem [ref=f2e96]:
+            - button "Deploy" [ref=f2e97] [cursor=pointer]
+          - listitem [ref=f2e105]:
+            - button "Analyze" [ref=f2e106] [cursor=pointer]
+        - button "Help" [ref=f2e117] [cursor=pointer]
+        - button "Collapse sidebar" [ref=f2e123] [cursor=pointer]
+    - generic [ref=f2e130]:
+      - navigation "Breadcrumb" [ref=f2e134]:
+        - list [ref=f2e135]:
+          - listitem [ref=f2e136]:
+            - link "wine" [ref=f2e137] [cursor=pointer]:
+              - /url: /wine
+            - text: /
+          - listitem [ref=f2e139]:
+            - link "wine" [ref=f2e140] [cursor=pointer]:
+              - /url: /wine/wine
+            - text: /
+          - listitem [ref=f2e142]:
+            - link "Wiki" [ref=f2e143] [cursor=pointer]:
+              - /url: /wine/wine/-/wikis/home
+            - text: /
+          - listitem [ref=f2e144]:
+            - link "Wine Developer's Guide" [ref=f2e145] [cursor=pointer]:
+              - /url: /wine/wine/-/wikis/Wine-Developer's-Guide
+            - text: /
+          - listitem [ref=f2e146]:
+            - link "Kernel modules" [ref=f2e147] [cursor=pointer]:
+              - /url: /wine/wine/-/wikis/Wine-Developer's-Guide/Kernel-modules
+      - main [ref=f2e151]:
+        - generic [ref=f2e152]:
+          - complementary "Wiki" [ref=f2e153]
+          - generic [ref=f2e155]:
+            - generic [ref=f2e159]:
+              - generic [ref=f2e160]:
+                - heading "Open sidebar Kernel modules" [level=1] [ref=f2e161]:
+                  - generic [ref=f2e162]:
+                    - button "Open sidebar" [ref=f2e164] [cursor=pointer]
+                    - generic [ref=f2e167]: Kernel modules
+                - generic [ref=f2e168]:
+                  - button "Notifications are off" [disabled] [ref=f2e169]
+                  - button "Wiki actions" [ref=f2e175] [cursor=pointer]
+              - generic [ref=f2e179]:
+                - text: Last edited by
+                - link "Damjan Jovanovic" [ref=f2e180] [cursor=pointer]:
+                  - /url: https://gitlab.winehq.org/dj
+                - time [ref=f2e181]: Feb 6, 2025
+            - img "Loading" [ref=f2e183]
